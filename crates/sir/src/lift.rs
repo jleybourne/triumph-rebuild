@@ -37,12 +37,14 @@ pub struct Lifted {
     /// SGPRs read before any write: user data (root constants, descriptor addresses) the program needs as
     /// inputs. A program with any is not complete until root parameters are built.
     pub live_in: BTreeSet<u8>,
-    written: BTreeSet<u8>,
     /// A constant buffer is read through the heap (`SirCb`).
     pub uses_cb: bool,
     /// Immediate samplers: the console sampler words the code builds from constants, in register order
     /// (`sir_imm{k} : register(s{k}, space100)`); [`crate::sampler::decode`] gives the host's static sampler.
     pub immediate_samplers: Vec<[u32; 4]>,
+    /// Immediate samplers a comparison reads (`SamplerComparisonState`; the static sampler's comparison
+    /// function is in its words).
+    pub immediate_compare: BTreeSet<usize>,
     /// The descriptor shadow table is read (`sir_shadow`, see [`SHADOW_SPACE`]).
     pub uses_shadow: bool,
     /// LDS is read or written (`groupshared uint sir_lds[]`).
@@ -126,25 +128,69 @@ fn inline_bits(code: u16) -> String {
     }
 }
 
+pub mod cfg;
 pub mod io;
 pub mod res;
 pub use io::{cs_program, ps_program, vs_program, PsStage, Stage, VsStage};
 pub use res::Bindings;
 
-struct Lifter<'a> {
-    out: Lifted,
-    stage: Stage<'a>,
-    bind: Option<Bindings<'a>>,
+/// What the lifter knows at one point of the program. In a straight line it only grows; with control flow
+/// ([`cfg`]) each block starts from the meet of its predecessors' states.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct FlowState {
     /// SGPRs holding a loaded descriptor's heap index (its first dword)
     descs: BTreeMap<u8, res::Desc>,
     /// the other dwords of loaded descriptors (not data on the host)
     desc_words: BTreeSet<u8>,
-    /// why the last instruction was refused, when a reason is known
-    why: Option<String>,
     /// SGPRs whose value is derived from a descriptor table's offset (table's user-data dword)
     table_of: BTreeMap<u8, u8>,
     /// SGPRs holding a known constant (set by `s_mov_b32`/`s_movk_i32` from a literal or inline integer)
     consts: BTreeMap<u8, u32>,
+    /// SGPRs written on every path here (a read of any other may read user data)
+    written: BTreeSet<u8>,
+    /// SGPRs written on some path here (any other still holds its user data)
+    may_written: BTreeSet<u8>,
+    /// SGPRs (by low index) whose lane mask `m{n}` is current
+    mask_cur: BTreeSet<u8>,
+    /// SGPRs whose data variable `s{n}` is stale: a lane mask was written there since
+    stale: BTreeSet<u8>,
+    /// EXEC may be narrower than at entry (VALU writes are predicated)
+    narrowed: bool,
+}
+
+impl FlowState {
+    /// The state where paths join: only what holds on every incoming path.
+    pub(crate) fn meet(&self, o: &FlowState) -> FlowState {
+        fn same<K: Ord + Copy, V: PartialEq + Copy>(a: &BTreeMap<K, V>, b: &BTreeMap<K, V>) -> BTreeMap<K, V> {
+            a.iter().filter(|(k, v)| b.get(k) == Some(v)).map(|(k, v)| (*k, *v)).collect()
+        }
+        FlowState {
+            descs: same(&self.descs, &o.descs),
+            desc_words: self.desc_words.union(&o.desc_words).copied().collect(),
+            table_of: same(&self.table_of, &o.table_of),
+            consts: same(&self.consts, &o.consts),
+            written: self.written.intersection(&o.written).copied().collect(),
+            may_written: self.may_written.union(&o.may_written).copied().collect(),
+            mask_cur: self.mask_cur.intersection(&o.mask_cur).copied().collect(),
+            stale: self.stale.union(&o.stale).copied().collect(),
+            narrowed: self.narrowed || o.narrowed,
+        }
+    }
+}
+
+struct Lifter<'a> {
+    out: Lifted,
+    stage: Stage<'a>,
+    bind: Option<Bindings<'a>>,
+    f: FlowState,
+    /// why the last instruction was refused, when a reason is known
+    why: Option<String>,
+    /// the program runs as wave64 on the console (lane masks are SGPR pairs and `_b64` ops)
+    wave64: bool,
+    /// SCC is read after the current instruction before anything writes it again
+    scc_live: bool,
+    /// inside a DPP instruction: src0 reads `sir_dpp`; VALU writes also need `sir_dv` when set
+    dpp: Option<bool>,
 }
 
 /// What an operand reads, as a `uint` expression; `None` if not translated yet.
@@ -152,11 +198,15 @@ impl Lifter<'_> {
     fn src(&mut self, code: u32, literal: Option<u32>) -> Option<String> {
         Some(match enc::src(code) {
             Src::Sgpr(n) => {
-                if self.descs.contains_key(&n) || self.desc_words.contains(&n) {
+                if self.f.descs.contains_key(&n) || self.f.desc_words.contains(&n) {
                     return None; // a descriptor word read as data
                 }
+                if self.f.stale.contains(&n) {
+                    self.why = Some("a lane mask read as data".into());
+                    return None;
+                }
                 self.out.sgprs.insert(n);
-                if !self.out.written.contains(&n) {
+                if !self.f.written.contains(&n) {
                     self.out.live_in.insert(n);
                 }
                 format!("s{n}")
@@ -178,6 +228,16 @@ impl Lifter<'_> {
 
     /// A float operand, with VOP3 abs/neg for operand `i`.
     fn fsrc(&mut self, d: &Decoded, field: &str, i: u32) -> Option<String> {
+        if self.dpp.is_some() && field == "src0" {
+            let mut e = "asfloat(sir_dpp)".to_string();
+            if d.get("src0_abs") == Some(1) {
+                e = format!("abs({e})");
+            }
+            if d.get("src0_neg") == Some(1) {
+                e = format!("(-{e})");
+            }
+            return Some(e);
+        }
         let code = d.get(field)?;
         let mut e = match enc::src(code) {
             Src::Inline(c) if (240..=248).contains(&c) => inline_float(c)?.to_string(),
@@ -262,6 +322,41 @@ impl Lifter<'_> {
         Some(())
     }
 
+    /// DPP16 in its quad form (`quad_perm`, the only one an agnostic program has): lane `i` of each quad reads
+    /// src0 from the lane the 2-bit field `i` names, as `QuadReadLaneAt` with constant lanes (host control flow
+    /// is uniform, so every lane takes part). A source lane EXEC has off is read only with `fi`; otherwise it
+    /// gives 0 with `bound_ctrl`, or leaves the destination unwritten.
+    fn dpp16(&mut self, name: &str, d: &Decoded, src: u16) -> Option<()> {
+        let ctrl = d.get("dpp_ctrl")?;
+        if ctrl > 0xFF || d.get("row_mask")? != 0xF || d.get("bank_mask")? != 0xF {
+            self.why = Some("dpp16 beyond a full-mask quad_perm".into());
+            return None;
+        }
+        if d.get("src1_abs")? == 1 || d.get("src1_neg")? == 1 || name.starts_with("v_cmp") {
+            self.why = Some("dpp16 form".into());
+            return None;
+        }
+        self.out.vgprs.insert(src);
+        let sel: Vec<u32> = (0..4).map(|k| ctrl >> (2 * k) & 3).collect();
+        let q: Vec<String> = sel.iter().map(|l| format!("QuadReadLaneAt(v{src}, {l})")).collect();
+        self.line(format!("{{ uint sir_q[4] = {{ {} }}; uint sir_dpp = sir_q[WaveGetLaneIndex() & 3];", q.join(", ")));
+        let mut guard = false;
+        if self.f.narrowed && d.get("fi")? == 0 {
+            let v: Vec<String> = sel.iter().map(|l| format!("QuadReadLaneAt(ex, {l})")).collect();
+            self.line(format!("  bool sir_qv[4] = {{ {} }}; bool sir_dv = sir_qv[WaveGetLaneIndex() & 3];", v.join(", ")));
+            if d.get("bound_ctrl")? == 1 {
+                self.line("  if (!sir_dv) sir_dpp = 0u;".into());
+            } else {
+                guard = true;
+            }
+        }
+        self.dpp = Some(guard);
+        let r = self.valu(name, d);
+        self.dpp = None;
+        self.line("}".into());
+        r
+    }
+
     /// LDS as `groupshared uint sir_lds[]`, by dword: reads and writes of 1, 2 or 4 dwords, the two-address
     /// forms (offsets in dwords, or 64 dwords with `st64`), and `ds_add_u32`. Only active lanes write.
     fn lds(&mut self, name: &str, d: &Decoded) -> Option<()> {
@@ -273,7 +368,7 @@ impl Lifter<'_> {
         self.out.vgprs.insert(a);
         let (o0, o1) = (d.get("offset0")?, d.get("offset1")?);
         let off = o0 | o1 << 8;
-        let guard = if self.out.exec_narrowed { "if (ex) " } else { "" };
+        let guard = if self.f.narrowed { "if (ex) " } else { "" };
         let data = |l: &mut Self, f: &str, k: u16| -> Option<String> {
             let v = d.get(f)? as u16 + k;
             l.out.vgprs.insert(v);
@@ -322,6 +417,9 @@ impl Lifter<'_> {
     }
 
     fn usrc(&mut self, d: &Decoded, field: &str) -> Option<String> {
+        if self.dpp.is_some() && field == "src0" {
+            return Some("sir_dpp".into());
+        }
         let code = d.get(field)?;
         self.src(code, d.literal)
     }
@@ -329,19 +427,99 @@ impl Lifter<'_> {
     /// The per-lane mask a VALU op reads: VCC for VOP2, an SGPR pair for VOP3 `src2`.
     fn mask_src(&mut self, d: &Decoded) -> Option<String> {
         let code = if d.encoding == Encoding::Vop3 { d.get("src2")? } else { 106 };
+        self.mask_read(code)
+    }
+
+    /// A lane mask operand as a per-lane boolean: VCC, EXEC, an SGPR pair whose mask is current, or the
+    /// constants 0 and -1 (no lane, every lane).
+    fn mask_read(&mut self, code: u32) -> Option<String> {
         match enc::src(code) {
             Src::VccLo => Some(self.mask_name(106)),
-            Src::Sgpr(n) => Some(self.mask_name(n)),
             Src::ExecLo => Some("ex".into()),
+            Src::Sgpr(n) if self.f.mask_cur.contains(&n) => Some(self.mask_name(n)),
+            Src::Inline(128) => Some("false".into()),
+            Src::Inline(193) => Some("true".into()),
+            // a pair set to a constant as data (a loop's exit mask starts at 0)
+            Src::Sgpr(n) if self.const_mask(n).is_some() => Some(self.const_mask(n)?.into()),
+            Src::Sgpr(_) => {
+                self.why = Some("lane mask not traced".into());
+                None
+            }
             _ => None,
+        }
+    }
+
+    /// Writes a lane mask (a per-lane boolean expression) to EXEC, VCC or an SGPR pair.
+    fn mask_write(&mut self, dst: u32, e: &str) -> Option<()> {
+        match enc::src(dst) {
+            Src::ExecLo => {
+                self.out.exec_narrowed = true;
+                self.f.narrowed = true;
+                self.line(format!("ex = {e};"));
+            }
+            Src::VccLo => {
+                let v = self.mask_name(106);
+                self.line(format!("{v} = {e};"));
+            }
+            Src::Sgpr(n) => {
+                let m = self.mask_name(n);
+                self.mask_owns(n);
+                self.line(format!("{m} = {e};"));
+            }
+            Src::Null => {}
+            _ => return None,
+        }
+        Some(())
+    }
+
+    /// SGPR `n` (and `n + 1` in wave64) now holds a lane mask: its data variables are stale.
+    fn mask_owns(&mut self, n: u8) {
+        let hi = if self.wave64 { n.saturating_add(1) } else { n };
+        for s in [n, hi] {
+            self.wrote(s);
+            self.f.stale.insert(s);
+        }
+        self.f.mask_cur.insert(n);
+    }
+
+    /// An SGPR (pair in wave64) holding the constant 0 or -1 as data, as a lane mask.
+    fn const_mask(&self, n: u8) -> Option<&'static str> {
+        let lo = *self.f.consts.get(&n)?;
+        if self.wave64 && self.f.consts.get(&(n + 1)) != Some(&lo) {
+            return None;
+        }
+        match lo {
+            0 => Some("false"),
+            u32::MAX => Some("true"),
+            _ => None,
+        }
+    }
+
+    /// SGPR `s` was written with data.
+    fn wrote(&mut self, s: u8) {
+        self.f.written.insert(s);
+        self.f.may_written.insert(s);
+        self.f.descs.remove(&s);
+        self.f.desc_words.remove(&s);
+        self.f.consts.remove(&s);
+        self.f.table_of.remove(&s);
+        self.f.stale.remove(&s);
+        self.f.mask_cur.remove(&s);
+        self.f.mask_cur.remove(&s.wrapping_sub(1));
+    }
+
+    /// SCC after a lane-mask op: is any lane's bit set (only computed when something reads it).
+    fn mask_scc(&mut self, e: &str) {
+        if self.scc_live {
+            self.line(format!("scc = WaveActiveAnyTrue({e});"));
         }
     }
 
     fn mask_name(&mut self, n: u8) -> String {
         self.out.masks.insert(n);
         // the pair holds a lane mask from here on (or is read as one): not a known constant any more
-        self.consts.remove(&n);
-        self.consts.remove(&(n + 1));
+        self.f.consts.remove(&n);
+        self.f.consts.remove(&(n + 1));
         if n == 106 { "vcc".into() } else { format!("m{n}") }
     }
 
@@ -369,7 +547,10 @@ impl Lifter<'_> {
 
     fn vwrite_raw(&mut self, v: u16, expr: String) {
         self.out.vgprs.insert(v);
-        if self.out.exec_narrowed {
+        if self.dpp == Some(true) {
+            let g = if self.f.narrowed { "ex && sir_dv" } else { "sir_dv" };
+            let _ = writeln!(self.out.body, "    if ({g}) v{v} = {expr};");
+        } else if self.f.narrowed {
             let _ = writeln!(self.out.body, "    if (ex) v{v} = {expr};");
         } else {
             let _ = writeln!(self.out.body, "    v{v} = {expr};");
@@ -380,10 +561,7 @@ impl Lifter<'_> {
         match enc::src(n) {
             Src::Sgpr(s) => {
                 self.out.sgprs.insert(s);
-                self.out.written.insert(s);
-                self.descs.remove(&s);
-                self.desc_words.remove(&s);
-                self.consts.remove(&s);
+                self.wrote(s);
                 let _ = writeln!(self.out.body, "    s{s} = {expr};");
             }
             Src::M0 => {
@@ -402,7 +580,7 @@ impl Lifter<'_> {
             Src::Literal => d.literal,
             Src::Inline(c @ 128..=192) => Some(u32::from(c - 128)),
             Src::Inline(c @ 193..=208) => Some((-(i32::from(c) - 192)) as u32),
-            Src::Sgpr(s) => self.consts.get(&s).copied(),
+            Src::Sgpr(s) => self.f.consts.get(&s).copied(),
             _ => None,
         }
     }
@@ -435,8 +613,13 @@ impl Lifter<'_> {
             Encoding::Ds if name == "ds_swizzle_b32" => self.swizzle(&d),
             Encoding::Ds => self.lds(name, &d),
             Encoding::Vop1 | Encoding::Vop2 | Encoding::Vop3 | Encoding::Vopc => {
-                if d.extra.is_some() {
-                    return None; // SDWA / DPP: not yet
+                if let Some((x, v)) = &d.extra {
+                    if x.name == "dpp16" {
+                        return self.dpp16(name, &d, v[0] as u16);
+                    }
+                    // SDWA / DPP8: not yet
+                    self.why = Some(if x.name.starts_with("sdwa") { "SDWA".into() } else { x.name.to_string() });
+                    return None;
                 }
                 self.valu(name, &d)
             }
@@ -467,10 +650,10 @@ impl Lifter<'_> {
             if let Some(Src::Sgpr(dst)) = d.get("sdst").map(enc::src) {
                 match table {
                     Some(t) => {
-                        self.table_of.insert(dst, t);
+                        self.f.table_of.insert(dst, t);
                     }
                     None => {
-                        self.table_of.remove(&dst);
+                        self.f.table_of.remove(&dst);
                     }
                 }
             }
@@ -481,11 +664,11 @@ impl Lifter<'_> {
     /// The descriptor table or heap a value derives from (its user-data dword): the parameter's own user
     /// SGPR (unwritten), or a value computed from one.
     fn table_origin(&self, n: u8) -> Option<u8> {
-        if let Some(t) = self.table_of.get(&n) {
+        if let Some(t) = self.f.table_of.get(&n) {
             return Some(*t);
         }
         let b = self.bind?;
-        if self.out.written.contains(&n) {
+        if self.f.may_written.contains(&n) {
             return None;
         }
         b.layout
@@ -507,6 +690,20 @@ impl Lifter<'_> {
         let a = |l: &mut Self| l.usrc(d, "ssrc0");
         let b = |l: &mut Self| l.usrc(d, "ssrc1");
         match name {
+            "s_mov_b32" if !self.wave64 && self.is_mask32(d) => self.mov_mask(d, false),
+            // a select between masks, or between 0 and -1 (written as both a mask and data)
+            "s_cselect_b32"
+                if !self.wave64
+                    && (self.is_mask32(d)
+                        || ["ssrc0", "ssrc1"].iter().all(|f| d.get(f).is_some_and(|c| matches!(enc::src(c), Src::Inline(128 | 193))))) =>
+            {
+                self.cselect_mask(d, false)
+            }
+            "s_and_b32" | "s_or_b32" | "s_xor_b32" | "s_andn2_b32" | "s_orn2_b32" | "s_nand_b32" | "s_nor_b32" | "s_xnor_b32"
+                if !self.wave64 && self.is_mask32(d) =>
+            {
+                self.mask_op(name, d)
+            }
             // M0 for interpolation (the attribute base): the host interpolates, so it is not needed
             "s_mov_b32" if matches!(self.stage, Stage::Ps(_)) && sdst.map(enc::src) == Some(Src::M0) => Some(()),
             "s_mov_b32" => {
@@ -519,7 +716,7 @@ impl Lifter<'_> {
                     _ => None,
                 };
                 if let (Some(v), Src::Sgpr(s)) = (value, enc::src(sdst?)) {
-                    self.consts.insert(s, v);
+                    self.f.consts.insert(s, v);
                 }
                 Some(())
             }
@@ -527,7 +724,7 @@ impl Lifter<'_> {
                 let v = d.get("simm16")? as u16 as i16 as i32 as u32;
                 self.swrite(sdst?, format!("{v}u"))?;
                 if let Src::Sgpr(s) = enc::src(sdst?) {
-                    self.consts.insert(s, v);
+                    self.f.consts.insert(s, v);
                 }
                 Some(())
             }
@@ -536,33 +733,11 @@ impl Lifter<'_> {
                 let x = a(self)?;
                 self.swrite(sdst?, format!("reversebits({x})"))?;
                 if let (Some(v), Src::Sgpr(s)) = (folded, enc::src(sdst?)) {
-                    self.consts.insert(s, v);
+                    self.f.consts.insert(s, v);
                 }
                 Some(())
             }
-            "s_mov_b64" => {
-                // a lane mask copy (EXEC or a mask pair) or a plain 64-bit copy
-                let (src, dst) = (d.get("ssrc0")?, sdst?);
-                match (enc::src(src), enc::src(dst)) {
-                    (Src::ExecLo, Src::Sgpr(n)) => {
-                        let m = self.mask_name(n);
-                        self.line(format!("{m} = ex;"));
-                        Some(())
-                    }
-                    (Src::Sgpr(s), Src::ExecLo) if self.out.masks.contains(&s) => {
-                        let m = self.mask_name(s);
-                        self.out.exec_narrowed = true;
-                        self.line(format!("ex = {m};"));
-                        Some(())
-                    }
-                    (Src::Sgpr(s), Src::Sgpr(t)) => {
-                        self.out.sgprs.extend([s, s + 1, t, t + 1]);
-                        self.line(format!("s{t} = s{s}; s{} = s{};", t + 1, s + 1));
-                        Some(())
-                    }
-                    _ => None,
-                }
-            }
+            "s_mov_b64" => self.mov_mask(d, true),
             "s_add_u32" | "s_add_i32" | "s_sub_u32" | "s_sub_i32" | "s_mul_i32" | "s_and_b32" | "s_or_b32" | "s_xor_b32"
             | "s_andn2_b32" | "s_orn2_b32" | "s_lshl_b32" | "s_lshr_b32" | "s_ashr_i32" | "s_min_u32" | "s_max_u32"
             | "s_min_i32" | "s_max_i32" | "s_cselect_b32" | "s_bfe_u32" | "s_bfe_i32" | "s_lshl1_add_u32"
@@ -621,7 +796,7 @@ impl Lifter<'_> {
                 let dst = sdst?;
                 self.swrite(dst, "r".into())?;
                 if let (Some(v), Src::Sgpr(s)) = (folded, enc::src(dst)) {
-                    self.consts.insert(s, v);
+                    self.f.consts.insert(s, v);
                 }
                 self.line("}".into());
                 Some(())
@@ -637,67 +812,190 @@ impl Lifter<'_> {
                 self.out.notes.insert("s_setreg (float mode) not modelled");
                 Some(())
             }
-            "s_and_b64" | "s_or_b64" | "s_andn2_b64" | "s_xor_b64" => self.mask_op(name, d),
-            "s_wqm_b64" => {
+            "s_and_b64" | "s_or_b64" | "s_andn2_b64" | "s_xor_b64" | "s_orn2_b64" | "s_nand_b64" | "s_nor_b64" | "s_xnor_b64" => {
+                self.mask_op(name, d)
+            }
+            "s_wqm_b64" | "s_wqm_b32" if name.ends_with(if self.wave64 { "_b64" } else { "_b32" }) => {
                 // whole-quad mode: a lane is on if any lane of its quad is. On the host, helper lanes run for
-                // derivatives anyway, so on an untouched EXEC this is a no-op.
+                // derivatives anyway, so on an untouched EXEC this is a no-op. Host control flow is uniform, so
+                // the quad reads see every lane.
                 let (src, dst) = (d.get("ssrc0")?, sdst?);
-                if !(matches!(enc::src(src), Src::ExecLo) && matches!(enc::src(dst), Src::ExecLo)) {
-                    return None;
+                let exec_to_exec = matches!(enc::src(src), Src::ExecLo) && matches!(enc::src(dst), Src::ExecLo);
+                if exec_to_exec && !self.f.narrowed {
+                    self.mask_scc("ex");
+                    return Some(());
                 }
-                if self.out.exec_narrowed {
-                    self.line("ex = ex || QuadReadAcrossX(ex) || QuadReadAcrossY(ex) || QuadReadAcrossDiagonal(ex);".into());
+                let m = self.mask_read(src)?;
+                self.line(format!("{{ bool r = {m} || QuadReadAcrossX({m}) || QuadReadAcrossY({m}) || QuadReadAcrossDiagonal({m});"));
+                self.mask_write(dst, "r")?;
+                self.mask_scc("r");
+                self.line("}".into());
+                Some(())
+            }
+            "s_cselect_b64" => self.cselect_mask(d, true),
+            "s_addk_i32" | "s_mulk_i32" => {
+                let k = d.get("simm16")? as u16 as i16 as i32;
+                let x = self.usrc(d, "sdst")?;
+                let e = if name == "s_addk_i32" { format!("(uint)((int){x} + {k})") } else { format!("(uint)((int){x} * {k})") };
+                self.line(format!("{{ uint r = {e};"));
+                if name == "s_addk_i32" {
+                    // signed overflow
+                    self.line(format!("  scc = ((int){x} >= 0) == ({k} >= 0) && ((int)r >= 0) != ({k} >= 0);"));
+                }
+                self.swrite(d.get("sdst")?, "r".into())?;
+                self.line("}".into());
+                Some(())
+            }
+            n if n.starts_with("s_cmpk_") => {
+                let x = self.usrc(d, "sdst")?;
+                let (op, signed) = cmp_op(n.strip_prefix("s_cmpk_")?)?;
+                let k = d.get("simm16")? as u16;
+                let e = if signed { format!("(int){x} {op} {}", k as i16) } else { format!("{x} {op} {k}u") };
+                self.line(format!("scc = {e};"));
+                Some(())
+            }
+            n if (n.contains("_saveexec_") || n.contains("_wrexec_")) && n.ends_with(if self.wave64 { "_b64" } else { "_b32" }) => {
+                self.saveexec(n, d)
+            }
+            _ => None,
+        }
+    }
+
+    /// SALU logic on lane masks (`_b64`, or `_b32` in wave32): per-lane boolean logic. SCC is whether any
+    /// lane's bit is set.
+    fn mask_op(&mut self, name: &str, d: &Decoded) -> Option<()> {
+        let (x, y) = (self.mask_read(d.get("ssrc0")?)?, self.mask_read(d.get("ssrc1")?)?);
+        let e = match name.trim_end_matches("_b64").trim_end_matches("_b32") {
+            "s_and" => format!("{x} && {y}"),
+            "s_or" => format!("{x} || {y}"),
+            "s_andn2" => format!("{x} && !{y}"),
+            "s_orn2" => format!("{x} || !{y}"),
+            "s_xor" => format!("{x} != {y}"),
+            "s_xnor" => format!("{x} == {y}"),
+            "s_nand" => format!("!({x} && {y})"),
+            "s_nor" => format!("!({x} || {y})"),
+            _ => return None,
+        };
+        if self.scc_live {
+            self.line(format!("{{ bool r = {e};"));
+            self.mask_write(d.get("sdst")?, "r")?;
+            self.mask_scc("r");
+            self.line("}".into());
+        } else {
+            self.mask_write(d.get("sdst")?, &e)?;
+        }
+        Some(())
+    }
+
+    /// `s_mov_b64` (or `s_mov_b32` in wave32): a lane mask copy, a constant (written as both a mask and
+    /// data, since either may be read), or a plain 64-bit copy of data.
+    fn mov_mask(&mut self, d: &Decoded, wide: bool) -> Option<()> {
+        let (src, dst) = (d.get("ssrc0")?, d.get("sdst")?);
+        let is_mask = |l: &Self, c: u32| match enc::src(c) {
+            Src::ExecLo | Src::VccLo => true,
+            Src::Sgpr(n) => l.f.mask_cur.contains(&n),
+            _ => false,
+        };
+        match (enc::src(src), enc::src(dst)) {
+            (Src::Inline(c @ (128 | 193)), Src::Sgpr(t)) => {
+                let (m, v) = if c == 128 { ("false", "0u") } else { ("true", "0xffffffffu") };
+                self.mask_write(dst, m)?;
+                self.swrite_keep(t, v);
+                if wide {
+                    self.swrite_keep(t + 1, v);
                 }
                 Some(())
             }
-            "s_and_saveexec_b64" => {
-                let (src, dst) = (d.get("ssrc0")?, sdst?);
-                let m = match enc::src(src) {
-                    Src::VccLo => self.mask_name(106),
-                    Src::Sgpr(n) if self.out.masks.contains(&n) => self.mask_name(n),
-                    _ => return None,
-                };
-                let Src::Sgpr(t) = enc::src(dst) else { return None };
-                let saved = self.mask_name(t);
-                self.out.exec_narrowed = true;
-                self.line(format!("{saved} = ex; ex = ex && {m};"));
+            (_, Src::ExecLo | Src::VccLo) => {
+                let m = self.mask_read(src)?;
+                self.mask_write(dst, &m)
+            }
+            _ if is_mask(self, src) => {
+                let m = self.mask_read(src)?;
+                self.mask_write(dst, &m)
+            }
+            (Src::Sgpr(s), Src::Sgpr(t)) if wide => {
+                let (a, b) = (self.src(u32::from(s), None)?, self.src(u32::from(s) + 1, None)?);
+                self.line(format!("{{ uint a = {a}, b = {b};"));
+                self.swrite(u32::from(t), "a".into())?;
+                self.swrite(u32::from(t) + 1, "b".into())?;
+                self.line("}".into());
                 Some(())
             }
             _ => None,
         }
     }
 
-    /// 64-bit SALU logic on lane masks: per-lane boolean logic.
-    fn mask_op(&mut self, name: &str, d: &Decoded) -> Option<()> {
-        let m = |l: &mut Self, code: u32| -> Option<String> {
-            match enc::src(code) {
-                Src::VccLo => Some(l.mask_name(106)),
-                Src::ExecLo => Some("ex".into()),
-                Src::Sgpr(n) if l.out.masks.contains(&n) => Some(l.mask_name(n)),
-                _ => None,
-            }
+    /// Writes data SGPR `t` without forgetting that its lane mask is current too (the value is both).
+    fn swrite_keep(&mut self, t: u8, v: &str) {
+        self.out.sgprs.insert(t);
+        self.f.written.insert(t);
+        self.f.may_written.insert(t);
+        self.f.stale.remove(&t);
+        match v {
+            "0u" => self.f.consts.insert(t, 0),
+            "0xffffffffu" => self.f.consts.insert(t, u32::MAX),
+            _ => self.f.consts.remove(&t),
         };
-        let (x, y) = (m(self, d.get("ssrc0")?)?, m(self, d.get("ssrc1")?)?);
-        let e = match name {
-            "s_and_b64" => format!("{x} && {y}"),
-            "s_or_b64" => format!("{x} || {y}"),
-            "s_andn2_b64" => format!("{x} && !{y}"),
-            "s_xor_b64" => format!("{x} != {y}"),
-            _ => return None,
+        self.line(format!("s{t} = {v};"));
+    }
+
+    /// `s_cselect_b64` (or `_b32` in wave32) between lane masks or the constants 0 and -1: a mask by SCC. With
+    /// two constants the pair holds the same value as data too (code tests it either way).
+    fn cselect_mask(&mut self, d: &Decoded, wide: bool) -> Option<()> {
+        let (a, b, dst) = (d.get("ssrc0")?, d.get("ssrc1")?, d.get("sdst")?);
+        let (x, y) = (self.mask_read(a)?, self.mask_read(b)?);
+        self.mask_write(dst, &format!("(scc ? {x} : {y})"))?;
+        let word = |c: u32| match enc::src(c) {
+            Src::Inline(128) => Some("0u"),
+            Src::Inline(193) => Some("0xffffffffu"),
+            _ => None,
         };
-        match enc::src(d.get("sdst")?) {
-            Src::ExecLo => {
-                self.out.exec_narrowed = true;
-                self.line(format!("ex = {e};"));
+        if let (Some(p), Some(q), Src::Sgpr(t)) = (word(a), word(b), enc::src(dst)) {
+            let v = format!("(scc ? {p} : {q})");
+            self.swrite_keep(t, &v);
+            if wide {
+                self.swrite_keep(t + 1, &v);
             }
-            Src::VccLo => self.line(format!("vcc = {e};")),
-            Src::Sgpr(n) => {
-                let t = self.mask_name(n);
-                self.line(format!("{t} = {e};"));
-            }
-            _ => return None,
         }
-        // SCC = the result is non-zero over the wave: a wave-wide test, not modelled in a straight line
+        Some(())
+    }
+
+    /// In wave32, a 32-bit logic op or move is lane-mask work when it touches EXEC or VCC, or reads only
+    /// masks (one at least).
+    fn is_mask32(&self, d: &Decoded) -> bool {
+        let codes: Vec<u32> = ["ssrc0", "ssrc1", "sdst"].iter().filter_map(|f| d.get(f)).collect();
+        if codes.iter().any(|c| matches!(enc::src(*c), Src::ExecLo | Src::VccLo)) {
+            return true;
+        }
+        let srcs: Vec<Src> = ["ssrc0", "ssrc1"].iter().filter_map(|f| d.get(f)).map(enc::src).collect();
+        let mask = |s: &Src| matches!(s, Src::Sgpr(n) if self.f.mask_cur.contains(n));
+        srcs.iter().any(mask) && srcs.iter().all(|s| mask(s) || matches!(s, Src::Inline(128 | 193)))
+    }
+
+    /// The save-EXEC family: `D = EXEC; EXEC = f(S, EXEC)` (`*_saveexec`), or `EXEC = f(S, EXEC); D = EXEC`
+    /// (`*_wrexec`). SCC is whether any lane is left on.
+    fn saveexec(&mut self, name: &str, d: &Decoded) -> Option<()> {
+        let s = self.mask_read(d.get("ssrc0")?)?;
+        let op = name.split("_saveexec").next()?.split("_wrexec").next()?;
+        let e = match op {
+            "s_and" => "sir_s && sir_o",
+            "s_or" => "sir_s || sir_o",
+            "s_xor" => "sir_s != sir_o",
+            "s_xnor" => "sir_s == sir_o",
+            "s_andn1" => "!sir_s && sir_o",
+            "s_andn2" => "sir_s && !sir_o",
+            "s_orn1" => "!sir_s || sir_o",
+            "s_orn2" => "sir_s || !sir_o",
+            "s_nand" => "!(sir_s && sir_o)",
+            "s_nor" => "!(sir_s || sir_o)",
+            _ => return None,
+        };
+        self.line(format!("{{ bool sir_s = {s}, sir_o = ex;"));
+        self.mask_write(126, e)?;
+        self.mask_write(d.get("sdst")?, if name.contains("_wrexec_") { "ex" } else { "sir_o" })?;
+        self.mask_scc("ex");
+        self.line("}".into());
         Some(())
     }
 
@@ -988,21 +1286,16 @@ impl Lifter<'_> {
             _ => return None,
         };
         // the result is the lane's bit, and 0 in inactive lanes
-        let e = if self.out.exec_narrowed { format!("ex && ({e})") } else { format!("({e})") };
+        let e = if self.f.narrowed { format!("ex && ({e})") } else { format!("({e})") };
         // GFX10: v_cmpx writes EXEC only; v_cmp writes VCC (VOPC) or an SGPR pair (VOP3)
         if x_form {
-            self.out.exec_narrowed = true;
-            self.line(format!("ex = {e};"));
-            return Some(());
+            return self.mask_write(126, &e);
         }
         let dst = if d.encoding == Encoding::Vop3 { d.get("vdst")? } else { 106 };
-        let target = match enc::src(dst) {
-            Src::VccLo => self.mask_name(106),
-            Src::Sgpr(n) => self.mask_name(n),
-            _ => return None,
-        };
-        self.line(format!("{target} = {e};"));
-        Some(())
+        if !matches!(enc::src(dst), Src::VccLo | Src::Sgpr(_)) {
+            return None;
+        }
+        self.mask_write(dst, &e)
     }
 }
 
@@ -1055,19 +1348,40 @@ pub fn lift(insts: &[Instruction]) -> Lifted {
 
 /// Translates a straight-line program of a given stage, with its root parameters if known.
 pub fn lift_stage<'a>(insts: &[Instruction], stage: Stage<'a>, bind: Option<Bindings<'a>>) -> Lifted {
-    let mut l = Lifter { out: Lifted::default(), stage, bind, descs: BTreeMap::new(), desc_words: BTreeSet::new(), why: None, table_of: BTreeMap::new(), consts: BTreeMap::new() };
-    for i in insts {
-        l.why = None;
-        if l.inst(i).is_none() {
-            let n = i.name().unwrap_or("?").to_string();
-            l.out.unsupported.push((i.offset, match l.why.take() {
-                Some(w) => format!("{n} ({w})"),
-                None => n,
-            }));
-            let _ = writeln!(l.out.body, "    // not translated: {}", i.name().unwrap_or("?"));
+    let mut l = Lifter::new(stage, bind, true);
+    let live = cfg::scc_live_straight(insts);
+    l.run(insts, &live);
+    l.out
+}
+
+/// Translates a whole program, with control flow (v1): blocks from its branches, structured into HLSL
+/// `if`/loops ([`cfg`]). `wave64` is the console's wave size for this program (lane-mask ops are `_b64`).
+/// An irreducible graph or a branch kind not translated is named in [`Lifted::unsupported`].
+pub fn lift_program<'a>(insts: &[Instruction], stage: Stage<'a>, bind: Option<Bindings<'a>>, wave64: bool) -> Lifted {
+    let l = Lifter::new(stage, bind, wave64);
+    cfg::lift(l, insts)
+}
+
+impl<'a> Lifter<'a> {
+    fn new(stage: Stage<'a>, bind: Option<Bindings<'a>>, wave64: bool) -> Self {
+        Lifter { out: Lifted::default(), stage, bind, f: FlowState::default(), why: None, wave64, scc_live: false, dpp: None }
+    }
+
+    /// Lifts instructions in order; `live[k]` says whether SCC is read after instruction k.
+    fn run(&mut self, insts: &[Instruction], live: &[bool]) {
+        for (k, i) in insts.iter().enumerate() {
+            self.why = None;
+            self.scc_live = live.get(k).copied().unwrap_or(true);
+            if self.inst(i).is_none() {
+                let n = i.name().unwrap_or("?").to_string();
+                self.out.unsupported.push((i.offset, match self.why.take() {
+                    Some(w) => format!("{n} ({w})"),
+                    None => n,
+                }));
+                let _ = writeln!(self.out.body, "    // not translated: {}", i.name().unwrap_or("?"));
+            }
         }
     }
-    l.out
 }
 
 /// The register declarations a lifted body needs (all registers start at 0; inputs are assigned after).

@@ -101,7 +101,7 @@ impl Lifter<'_> {
         let p = match self.table_origin(base) {
             Some(ud) => bind.layout.iter().find(|p| p.user_data == ud)?,
             None => match bind.param_at(base) {
-                Some(p) if !self.out.written.contains(&base) => p,
+                Some(p) if !self.f.may_written.contains(&base) => p,
                 Some(_) => {
                     self.why = Some("base computed from no table".into());
                     return None;
@@ -127,18 +127,20 @@ impl Lifter<'_> {
         };
         let stride = if heap == Heap::Sampler { 16 } else { 32 };
         self.out.sgprs.insert(base);
-        if !self.out.written.contains(&base) {
+        if self.f.stale.contains(&base) {
+            self.why = Some("a lane mask read as data".into());
+            return None;
+        }
+        if !self.f.written.contains(&base) {
             self.out.live_in.insert(base);
         }
         self.out.sgprs.insert(dst);
-        self.out.written.insert(dst);
-        self.consts.remove(&dst);
+        self.wrote(dst);
         let _ = writeln!(self.out.body, "    s{dst} = (uint)((int)s{base} + {byte_off}) / {stride}u;");
-        self.descs.insert(dst, Desc { heap, dwords, user_data: p.user_data });
+        self.f.descs.insert(dst, Desc { heap, dwords, user_data: p.user_data });
         for k in 1..dwords {
-            self.desc_words.insert(dst + k);
-            self.out.written.insert(dst + k);
-            self.consts.remove(&(dst + k));
+            self.wrote(dst + k);
+            self.f.desc_words.insert(dst + k);
         }
         Some(())
     }
@@ -154,7 +156,10 @@ impl Lifter<'_> {
             "s_buffer_load_dwordx16" => 16,
             _ => return None,
         };
-        let desc = *self.descs.get(&base)?;
+        let Some(desc) = self.f.descs.get(&base).copied() else {
+            self.why = Some("descriptor not traced".into());
+            return None;
+        };
         if desc.heap != Heap::Resource || off < 0 {
             return None;
         }
@@ -175,10 +180,7 @@ impl Lifter<'_> {
         for k in 0..n {
             let s = dst + k;
             self.out.sgprs.insert(s);
-            self.out.written.insert(s);
-            self.consts.remove(&s);
-            self.desc_words.remove(&s);
-            self.descs.remove(&s);
+            self.wrote(s);
             let i = dw + u32::from(k);
             let e = match (&reg, cbv) {
                 (None, true) => format!("c.d[{}].{}", i / 4, ["x", "y", "z", "w"][i as usize % 4]),
@@ -215,7 +217,7 @@ impl Lifter<'_> {
             return None;
         }
         let rsrc = (d.get("srsrc")? * 4) as u8;
-        let Some(res) = self.descs.get(&rsrc).copied() else {
+        let Some(res) = self.f.descs.get(&rsrc).copied() else {
             self.why = Some("descriptor not traced".into());
             return None;
         };
@@ -252,7 +254,7 @@ impl Lifter<'_> {
                 format!("v{}", vdata + k)
             }).collect();
             let value = if n == 1 { vals[0].clone() } else { format!("uint{n}({})", vals.join(", ")) };
-            let mut cond = if self.out.exec_narrowed { "ex".to_string() } else { "true".to_string() };
+            let mut cond = if self.f.narrowed { "ex".to_string() } else { "true".to_string() };
             if idxen {
                 cond = format!("{cond} && v{vaddr} < sh.y");
             }
@@ -292,7 +294,7 @@ impl Lifter<'_> {
             return None;
         }
         let rsrc = (d.get("srsrc")? * 4) as u8;
-        let Some(res) = self.descs.get(&rsrc).copied() else {
+        let Some(res) = self.f.descs.get(&rsrc).copied() else {
             self.why = Some("descriptor not traced".into());
             return None;
         };
@@ -314,7 +316,7 @@ impl Lifter<'_> {
                     }
                 })
                 .collect();
-            let guard = if self.out.exec_narrowed { "if (ex) " } else { "" };
+            let guard = if self.f.narrowed { "if (ex) " } else { "" };
             // only the channels the instruction names change: read, merge, write
             let merge: Vec<String> = (0..n).map(|k| format!("o.{} = {};", ch[k as usize], vals[k as usize])).collect();
             let _ = writeln!(
@@ -348,7 +350,7 @@ impl Lifter<'_> {
         // NSA: address k is vaddr for k = 0, else the k-th extra register byte (padding bytes are never read)
         let nsa: Vec<u16> = d.nsa.iter().map(|&b| b as u16).collect();
         let rsrc = (d.get("srsrc")? * 4) as u8;
-        let Some(res) = self.descs.get(&rsrc).copied() else {
+        let Some(res) = self.f.descs.get(&rsrc).copied() else {
             self.why = Some("descriptor not traced".into());
             return None;
         };
@@ -406,9 +408,9 @@ impl Lifter<'_> {
         };
         let sampler = |l: &mut Self| -> Option<String> {
             let s = (d.get("ssamp")? * 4) as u8;
-            let Some(sd) = l.descs.get(&s).copied() else {
+            let Some(sd) = l.f.descs.get(&s).copied() else {
                 // an immediate sampler: the four words are constants the code wrote
-                let words: Option<Vec<u32>> = (0..4u8).map(|k| l.consts.get(&(s + k)).copied()).collect();
+                let words: Option<Vec<u32>> = (0..4u8).map(|k| l.f.consts.get(&(s + k)).copied()).collect();
                 let Some(w) = words else {
                     l.why = Some("sampler not traced".into());
                     return None;
@@ -447,6 +449,56 @@ impl Lifter<'_> {
                 let s = sampler(self)?;
                 let b = addr(self, 0);
                 format!("t.SampleBias({s}, {}, asfloat({b}))", fcoord(self, 1))
+            }
+            // the address is (z-compare, coordinates); the comparison result is one channel
+            "image_sample_c_lz" | "image_sample_c" => {
+                if cube {
+                    self.why = Some("cube compare".into());
+                    return None;
+                }
+                let s = sampler(self)?;
+                // a heap sampler is read as a comparison sampler; an immediate one is declared as one
+                let smp = match s.strip_prefix("sir_smp") {
+                    Some(n) => format!("sir_cmp{n}"),
+                    None => {
+                        let k: usize = s.strip_prefix("sir_imm")?.parse().ok()?;
+                        self.out.immediate_compare.insert(k);
+                        s
+                    }
+                };
+                let (dref, c) = (fcomp(self, 0), fcoord(self, 1));
+                let f = if name == "image_sample_c_lz" { "SampleCmpLevelZero" } else { "SampleCmp" };
+                format!("t.{f}({smp}, {c}, {dref}).xxxx")
+            }
+            // the address is (derivatives along x, derivatives along y, coordinates)
+            "image_sample_d" => {
+                if cube {
+                    self.why = Some("cube gradients".into());
+                    return None;
+                }
+                let g = match d.get("dim")? {
+                    0 | 4 => 1u16,
+                    1 | 5 => 2,
+                    _ => 3,
+                };
+                let s = sampler(self)?;
+                let vec = |l: &mut Self, first: u16| -> String {
+                    let parts: Vec<String> = (0..g).map(|k| fcomp(l, first + k)).collect();
+                    format!("float{g}({})", parts.join(", ")).replace("float1(", "(")
+                };
+                let (dx, dy) = (vec(self, 0), vec(self, g));
+                let c = fcoord(self, 2 * g);
+                format!("t.SampleGrad({s}, {c}, {dx}, {dy})")
+            }
+            // (the clamped level, the unclamped level)
+            "image_get_lod" => {
+                if !matches!(self.stage, super::Stage::Ps(_)) {
+                    self.why = Some("level of detail outside a pixel shader".into());
+                    return None;
+                }
+                let s = sampler(self)?;
+                let c = fcoord(self, 0);
+                format!("float4(t.CalculateLevelOfDetail({s}, {c}), t.CalculateLevelOfDetailUnclamped({s}, {c}), 0.0f, 0.0f)")
             }
             "image_gather4_lz" => {
                 let s = sampler(self)?;
@@ -487,25 +539,29 @@ impl Lifter<'_> {
                         "0.0f".into()
                     }
                 }).collect();
-                let guard = if self.out.exec_narrowed { "if (ex) " } else { "" };
+                let guard = if self.f.narrowed { "if (ex) " } else { "" };
                 let _ = writeln!(self.out.body, "    {{ {rw}<float4> t = ResourceDescriptorHeap[s{rsrc}]; {guard}t[{c}] = float4({}); }}", vals.join(", "));
                 return Some(());
             }
             _ => return None,
         };
-        let smp = match result.find("sir_smp") {
-            Some(i) => {
+        let smp = match (result.find("sir_smp"), result.find("sir_cmp")) {
+            (Some(i), _) => {
                 let n: String = result[i + 7..].chars().take_while(|c| c.is_ascii_digit()).collect();
                 format!(" SamplerState sir_smp{n} = SamplerDescriptorHeap[s{n}];")
             }
-            None => String::new(),
+            (None, Some(i)) => {
+                let n: String = result[i + 7..].chars().take_while(|c| c.is_ascii_digit()).collect();
+                format!(" SamplerComparisonState sir_cmp{n} = SamplerDescriptorHeap[s{n}];")
+            }
+            _ => String::new(),
         };
         let _ = writeln!(self.out.body, "    {{ {ty}<float4> t = ResourceDescriptorHeap[s{rsrc}];{smp} float4 r = {result};");
         let mut k = 0u16;
         for c in 0..4u8 {
             if dmask >> c & 1 == 1 {
                 self.out.vgprs.insert(vdata + k);
-                let guard = if self.out.exec_narrowed { "if (ex) " } else { "" };
+                let guard = if self.f.narrowed { "if (ex) " } else { "" };
                 let _ = writeln!(self.out.body, "      {guard}v{} = asuint(r.{});", vdata + k, ["x", "y", "z", "w"][c as usize]);
                 k += 1;
             }

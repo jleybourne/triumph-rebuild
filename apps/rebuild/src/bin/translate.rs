@@ -9,6 +9,11 @@
 //! untranslated, and the untranslated opcodes by how many programs they block. `ps` lifts the v0 pixel
 //! shaders with their inputs and outputs, assembles each program from its signatures and compiles it with
 //! DXC (`ps_6_6`, `-O3`), outputs under `REBUILD_TRANSLATE_OUT` (default `D:\victory-data\translate`).
+//! Beside each `<hash>.<stage>.dxil` goes `<hash>.<stage>.samplers`: the immediate samplers' console words
+//! (u32 count, then four u32 per sampler, little-endian, in `sir_imm<k>` order, then a u32 whose bit k is set when
+//! sampler k is read by a comparison).
+//! `v1` does the same for every agnostic VS, PS and CS, straight-line or not, through the control-flow
+//! translator (`rebuild_sir::lift::lift_program`), and reports each stage split into one block and several.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -87,9 +92,15 @@ fn main() {
     match mode.as_str() {
         "coverage" => coverage(&picked.iter().map(|(s, o, _, _)| (*s, o.clone())).collect::<Vec<_>>()),
         "lift" => lift_report(&picked),
-        "ps" => ps_report(&walk, "ps"),
-        "vs" => ps_report(&walk, "vs"),
-        "cs" => ps_report(&walk, "cs"),
+        "ps" => ps_report(&walk, "ps", false),
+        "vs" => ps_report(&walk, "vs", false),
+        "cs" => ps_report(&walk, "cs", false),
+        "v1" => {
+            for k in ["ps", "vs", "cs"] {
+                ps_report(&walk, k, true);
+                println!();
+            }
+        }
         m => {
             eprintln!("translate: unknown mode {m}");
             std::process::exit(2);
@@ -175,7 +186,8 @@ fn dxc() -> Option<std::path::PathBuf> {
 
 /// The v0 pixel shaders: lifted with IO, assembled, compiled.
 /// `ps` (pixel shaders) or `vs` (vertex shaders that run as the hardware VS): lift with IO, assemble, compile.
-fn ps_report(walk: &census::Walk, kind: &str) {
+/// `v1`: every agnostic program of the stage, with control flow, through `lift_program`.
+fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
     let vs = kind == "vs";
     use rebuild_shader::native::StageIo;
     use rebuild_shader::signature;
@@ -186,6 +198,9 @@ fn ps_report(walk: &census::Walk, kind: &str) {
     let tally: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
     let compiled = AtomicUsize::new(0);
     let total = AtomicUsize::new(0);
+    // v1: (programs, compiled) with one block, and with several
+    let single = [AtomicUsize::new(0), AtomicUsize::new(0)];
+    let multi = [AtomicUsize::new(0), AtomicUsize::new(0)];
     let failures: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
     std::thread::scope(|s| {
         for _ in 0..8 {
@@ -204,16 +219,26 @@ fn ps_report(walk: &census::Walk, kind: &str) {
                         continue;
                     }
                     let row = features::analyse(&p.native, &mut f);
-                    if row.blocks != 1 || row.class() != WaveClass::Agnostic || row.decode_error.is_some() {
+                    if (row.blocks != 1 && !v1) || row.class() != WaveClass::Agnostic || row.decode_error.is_some() {
                         continue;
                     }
                     total.fetch_add(1, Ordering::Relaxed);
+                    let bind = rebuild_sir::lift::Bindings { hw: p.native.stage, layout: &p.native.layout, used: &p.native.used };
+                    let split = if row.blocks == 1 { &single } else { &multi };
+                    split[0].fetch_add(1, Ordering::Relaxed);
+                    let wave64 = p.native.wave64;
+                    let lift = |insts: &[gfx10::Instruction], st| {
+                        if v1 {
+                            rebuild_sir::lift::lift_program(insts, st, Some(bind), wave64)
+                        } else {
+                            rebuild_sir::lift::lift_stage(insts, st, Some(bind))
+                        }
+                    };
                     let bump = |k: String| *tally.lock().unwrap().entry(k).or_default() += 1;
                     let Ok(insts) = gfx10::decode(&p.native.patched_code()) else {
                         bump("patched code does not decode".into());
                         continue;
                     };
-                    let bind = rebuild_sir::lift::Bindings { hw: p.native.stage, layout: &p.native.layout, used: &p.native.used };
                     // compute programs have no signatures
                     let sig = |b: &[u8]| if kind == "cs" { Ok(Vec::new()) } else { signature::parse(b) };
                     let (Ok(isg1), Ok(osg1)) = (sig(&p.isg1), sig(&p.osg1)) else {
@@ -223,18 +248,18 @@ fn ps_report(walk: &census::Walk, kind: &str) {
                     let (l, result) = match &p.native.io {
                         StageIo::Ps { inputs, input_addr, .. } => {
                             let stage = || rebuild_sir::lift::PsStage { inputs, input_addr: *input_addr };
-                            let l = rebuild_sir::lift::lift_stage(&insts, rebuild_sir::lift::Stage::Ps(stage()), Some(bind));
+                            let l = lift(&insts, rebuild_sir::lift::Stage::Ps(stage()));
                             let r = rebuild_sir::lift::ps_program(&l, &stage(), Some(&bind), &isg1, &osg1);
                             (l, r)
                         }
                         StageIo::Vs { inputs, outputs } => {
                             let stage = || rebuild_sir::lift::VsStage { inputs, outputs };
-                            let l = rebuild_sir::lift::lift_stage(&insts, rebuild_sir::lift::Stage::Vs(stage()), Some(bind));
+                            let l = lift(&insts, rebuild_sir::lift::Stage::Vs(stage()));
                             let r = rebuild_sir::lift::vs_program(&l, &stage(), Some(&bind), &isg1, &osg1);
                             (l, r)
                         }
                         StageIo::Cs(io) => {
-                            let l = rebuild_sir::lift::lift_stage(&insts, rebuild_sir::lift::Stage::Cs(*io), Some(bind));
+                            let l = lift(&insts, rebuild_sir::lift::Stage::Cs(*io));
                             let r = rebuild_sir::lift::cs_program(&l, io, Some(&bind));
                             (l, r)
                         }
@@ -269,6 +294,16 @@ fn ps_report(walk: &census::Walk, kind: &str) {
                     let hl = out.join(format!("{}.{ext}.hlsl", p.hash));
                     let obj = out.join(format!("{}.{ext}.dxil", p.hash));
                     std::fs::write(&hl, &src).expect("write hlsl");
+                    // the immediate samplers beside the program, so a pipeline build need not re-read the archive:
+                    // `<hash>.<stage>.samplers` = count (u32 LE), then 4 u32 LE words per sampler, in register order
+                    let mut sm = (l.immediate_samplers.len() as u32).to_le_bytes().to_vec();
+                    for w in l.immediate_samplers.iter().flatten() {
+                        sm.extend(w.to_le_bytes());
+                    }
+                    // then one u32: bit k set when sampler k is read by a comparison (SampleCmp*)
+                    let cmp = l.immediate_compare.iter().filter(|k| **k < 32).fold(0u32, |m, k| m | 1 << k);
+                    sm.extend(cmp.to_le_bytes());
+                    std::fs::write(out.join(format!("{}.{ext}.samplers", p.hash)), sm).expect("write samplers");
                     let r = std::process::Command::new(&dxc)
                         .args(["-T", &format!("{kind}_6_6"), "-E", "main", "-O3", "-enable-16bit-types", "-Fo"])
                         .arg(&obj)
@@ -277,6 +312,7 @@ fn ps_report(walk: &census::Walk, kind: &str) {
                         .expect("run dxc");
                     if r.status.success() {
                         compiled.fetch_add(1, Ordering::Relaxed);
+                        split[1].fetch_add(1, Ordering::Relaxed);
                     } else {
                         let err = String::from_utf8_lossy(&r.stderr);
                         let first = err.lines().find(|l| l.contains("error")).unwrap_or("dxc failed").to_string();
@@ -288,7 +324,13 @@ fn ps_report(walk: &census::Walk, kind: &str) {
         }
     });
     let (n, ok) = (total.load(Ordering::Relaxed), compiled.load(Ordering::Relaxed));
-    if kind == "cs" {
+    if v1 {
+        println!("translate v1 {kind} — every agnostic program, control flow structured, compiled by DXC ({kind}_6_6, -O3)");
+        for (what, x) in [("one block (v0)", &single), ("several blocks", &multi)] {
+            let (a, b) = (x[0].load(Ordering::Relaxed), x[1].load(Ordering::Relaxed));
+            println!("  {what:<16} {b} / {a} ({:.1} %)", 100.0 * b as f64 / a.max(1) as f64);
+        }
+    } else if kind == "cs" {
         println!("translate cs — v0 compute programs, lifted with IO and compiled by DXC (cs_6_6, -O3)");
     } else if vs {
         println!("translate vs — v0 vertex shaders (hardware VS), lifted with IO and compiled by DXC (vs_6_6, -O3)");

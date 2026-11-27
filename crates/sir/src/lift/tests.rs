@@ -163,9 +163,14 @@ fn every_translated_form_compiles_with_dxc() {
     ];
     let l = lift(&program(&parts));
     assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    compile_cs(&dxc, &l, "lift");
+}
+
+/// Wraps a lifted body in a compute program (registers loaded from and stored to a buffer) and compiles it.
+fn compile_cs(dxc: &std::path::Path, l: &Lifted, name: &str) {
     let mut src = String::from(PRELUDE);
     src.push_str("RWStructuredBuffer<uint> io : register(u0);\n[WaveSize(32)] [numthreads(32, 1, 1)]\nvoid main(uint t : SV_DispatchThreadID) {\n");
-    src.push_str(&declarations(&l));
+    src.push_str(&declarations(l));
     for r in &l.sgprs {
         src.push_str(&format!("    s{r} = io[{r}];\n"));
     }
@@ -179,7 +184,7 @@ fn every_translated_form_compiles_with_dxc() {
     src.push_str("}\n");
     let dir = std::env::temp_dir().join("rebuild-sir-lift");
     std::fs::create_dir_all(&dir).unwrap();
-    let (hl, out) = (dir.join("lift.hlsl"), dir.join("lift.dxil"));
+    let (hl, out) = (dir.join(format!("{name}.hlsl")), dir.join(format!("{name}.dxil")));
     std::fs::write(&hl, &src).unwrap();
     let r = Command::new(dxc)
         .args(["-T", "cs_6_6", "-E", "main", "-O3", "-enable-16bit-types", "-Fo"])
@@ -189,3 +194,6 @@ fn every_translated_form_compiles_with_dxc() {
         .unwrap();
     assert!(r.status.success(), "dxc failed:\n{}\n{src}", String::from_utf8_lossy(&r.stderr));
 }
+
+#[path = "tests_cfg.rs"]
+mod cfg_tests;

@@ -179,15 +179,10 @@ impl Lifter<'_> {
         let packed = d.get("src0")?;
         let (attr, chan, high) = ((packed & 0x3f) as u8, (packed >> 6 & 3) as u8, packed >> 8 & 1 == 1);
         let input = ps.inputs.iter().find(|i| i.attr == attr)?;
-        let row = if high {
-            if !input.pack2 {
-                self.why = Some("high half of an unpacked attribute".into());
-                return None;
-            }
-            input.row2
-        } else {
-            input.row
-        };
+        // components are packed two per dword: channel `chan`'s half `high` is component 2 * chan + high, the
+        // first four in `row`, the rest in `row2` (the same row for a single-row input)
+        let c = 2 * chan + u8::from(high);
+        let (row, chan) = if c < 4 { (input.row, c) } else { (if input.pack2 { input.row2 } else { input.row }, c - 4) };
         let vsrc = match enc::src(d.get("src1")?) {
             Src::Vgpr(v) => v as usize,
             _ => return None,
@@ -270,7 +265,7 @@ impl Lifter<'_> {
         let Stage::Ps(_) = &self.stage else { return None };
         match target {
             0..=8 => {
-                if done && self.out.exec_narrowed {
+                if done && self.f.narrowed {
                     self.out.io.discard = true;
                     self.line("if (!ex) discard;".into());
                 }
@@ -287,7 +282,7 @@ impl Lifter<'_> {
             }
             9 => {
                 // null: only the discard, for a program that exports nothing else
-                if done && self.out.exec_narrowed {
+                if done && self.f.narrowed {
                     self.out.io.discard = true;
                     self.line("if (!ex) discard;".into());
                 }
@@ -341,7 +336,8 @@ pub fn ps_program(l: &Lifted, ps: &PsStage, bind: Option<&super::Bindings>, isg1
     }
     let mut s = String::from(super::PRELUDE);
     for k in 0..l.immediate_samplers.len() {
-        let _ = writeln!(s, "SamplerState sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
+        let ty = if l.immediate_compare.contains(&k) { "SamplerComparisonState" } else { "SamplerState" };
+        let _ = writeln!(s, "{ty} sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
     }
     if l.uses_shadow {
         let _ = writeln!(s, "ByteAddressBuffer sir_shadow : register(t0, space{});", super::SHADOW_SPACE);
@@ -447,10 +443,16 @@ pub fn ps_program(l: &Lifted, ps: &PsStage, bind: Option<&super::Bindings>, isg1
         let _ = writeln!(s, "    float4 t{target} : SV_Target{target};");
         let _ = writeln!(returns, "    r.t{target} = asfloat(o{target});");
     }
-    if l.io.exports.is_empty() && osg1.is_empty() {
-        s.push_str("    float4 unused : SV_Target0;\n");
+    // no exports and no output signature (it writes through UAVs only): no output at all, so a bound target 0
+    // is never written
+    let no_out = l.io.exports.is_empty() && osg1.is_empty();
+    if no_out {
+        let k = s.rfind("struct Out {\n").expect("pushed above");
+        s.truncate(k);
+        s.push_str("void main(In i) {\n");
+    } else {
+        s.push_str("};\nOut main(In i) {\n");
     }
-    s.push_str("};\nOut main(In i) {\n");
     s.push_str(&super::declarations(l));
     s.push_str(&user_init);
     for t in l.io.exports.keys() {
@@ -469,9 +471,12 @@ pub fn ps_program(l: &Lifted, ps: &PsStage, bind: Option<&super::Bindings>, isg1
         let _ = writeln!(s, "    v{k} = {e};");
     }
     s.push_str(&body);
-    s.push_str("    Out r = (Out)0;\n");
-    s.push_str(&returns);
-    s.push_str("    return r;\n}\n");
+    if !no_out {
+        s.push_str("    Out r = (Out)0;\n");
+        s.push_str(&returns);
+        s.push_str("    return r;\n");
+    }
+    s.push_str("}\n");
     Ok(s)
 }
 
@@ -492,7 +497,8 @@ pub fn vs_program(l: &Lifted, vs: &VsStage, bind: Option<&super::Bindings>, isg1
     }
     let mut s = String::from(super::PRELUDE);
     for k in 0..l.immediate_samplers.len() {
-        let _ = writeln!(s, "SamplerState sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
+        let ty = if l.immediate_compare.contains(&k) { "SamplerComparisonState" } else { "SamplerState" };
+        let _ = writeln!(s, "{ty} sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
     }
     if l.uses_shadow {
         let _ = writeln!(s, "ByteAddressBuffer sir_shadow : register(t0, space{});", super::SHADOW_SPACE);
@@ -615,7 +621,8 @@ pub fn cs_program(l: &Lifted, cs: &ComputeIo, bind: Option<&super::Bindings>) ->
     }
     let mut s = String::from(super::PRELUDE);
     for k in 0..l.immediate_samplers.len() {
-        let _ = writeln!(s, "SamplerState sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
+        let ty = if l.immediate_compare.contains(&k) { "SamplerComparisonState" } else { "SamplerState" };
+        let _ = writeln!(s, "{ty} sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
     }
     if l.uses_shadow {
         let _ = writeln!(s, "ByteAddressBuffer sir_shadow : register(t0, space{});", super::SHADOW_SPACE);
