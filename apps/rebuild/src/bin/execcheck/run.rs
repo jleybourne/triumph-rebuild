@@ -539,6 +539,10 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
     // as many as fit
     let mut shadow = vec![0u8; super::gpu::HEAP_SLOTS as usize * 16];
     for (slot, v) in &pl.slots {
+        // each slot holds the view the program reads it as, so a buffer's alternate (its own kind: the UAV or typed
+        // view translated code reads at the entry's third word) is the slot itself; the lead (fourth word) is 0
+        let at = *slot as usize * 16;
+        shadow[at + 8..at + 12].copy_from_slice(&slot.to_le_bytes());
         if matches!(v, View::Raw | View::RwRaw) || (*v == View::Cbv && pl.strides.contains_key(slot)) {
             let stride = pl.strides.get(slot).copied().unwrap_or(16);
             let at = *slot as usize * 16;

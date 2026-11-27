@@ -888,8 +888,10 @@ mod tests {
             return;
         };
         let out = std::env::var_os("REBUILD_TRANSLATE_OUT").map_or_else(|| PathBuf::from(r"D:\victory-data\translate"), PathBuf::from);
-        // compute programs translate v1 compiled (so DXC accepts them), none of them in the tiny library
-        let progs = crate::translate::compute_containers(&rpf, 3, |h| out.join(format!("{h:016x}.cs.dxil")).exists());
+        // compute programs translate compiled (so DXC accepts them), none of them in the tiny library; agnostic ones
+        // only (a `translate v2` output also holds wave-class programs, and `[WaveSize(32)]` is refused on WARP)
+        let agnostic = |h: u64| std::fs::read_to_string(out.join(format!("{h:016x}.cs.hlsl"))).is_ok_and(|s| !s.contains("[WaveSize("));
+        let progs = crate::translate::compute_containers(&rpf, 3, |h| out.join(format!("{h:016x}.cs.dxil")).exists() && agnostic(h));
         if progs.is_empty() {
             eprintln!("skipped: no translate v1 compute output in {}", out.display());
             return;

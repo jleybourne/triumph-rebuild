@@ -498,7 +498,7 @@ impl Lifter<'_> {
         ) {
             return None;
         }
-        let (lo, hi) = self.src64(code, d.literal, wide)?;
+        let (lo, hi) = self.src_pair(code, d.literal, wide)?;
         let (e, scc) = match name.trim_end_matches("_b64").trim_end_matches("_b32") {
             "s_bcnt1_i32" => (format!("countbits({lo}) + countbits({hi})"), true),
             "s_bcnt0_i32" => (format!("{}u - countbits({lo}) - countbits({hi})", if wide { 64 } else { 32 }), true),
@@ -520,7 +520,7 @@ impl Lifter<'_> {
     }
 
     /// A 64-bit scalar operand as two dwords (the high one `0u` for a 32-bit operation).
-    fn src64(&mut self, code: u32, literal: Option<u32>, wide: bool) -> Option<(String, String)> {
+    fn src_pair(&mut self, code: u32, literal: Option<u32>, wide: bool) -> Option<(String, String)> {
         let lo = self.src(code, literal)?;
         if !wide {
             return Some((lo, "0u".into()));

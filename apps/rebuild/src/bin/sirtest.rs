@@ -4,7 +4,10 @@
 //! Memory is Build 1's: two reserved 4 GiB windows with the test pages mapped as 64 KiB tiles, read
 //! and written by the shaders through `ResourceDescriptorHeap[window]` at 32-bit offsets.
 //!
-//! cargo run --release --bin sirtest [-- --programs N]
+//! cargo run --release --bin sirtest [-- --programs N] [--warp]
+//! `--warp` runs on WARP (Microsoft's software rasteriser) instead of the card, with 1 MiB windows. WARP's
+//! waves are 4 lanes, so there only the lifted checks run (`rebuild_sir::lift::check`), not the wave32 random
+//! programs. Every fence wait is bounded at 5 s; a timeout fails the run instead of hanging.
 //! DXC: the newest `dxc.exe` in the Windows SDK, or `REBUILD_DXC`.
 
 use std::path::PathBuf;
@@ -23,6 +26,8 @@ use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Graphics::Direct3D::*;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory2, IDXGIAdapter, IDXGIFactory4, DXGI_CREATE_FACTORY_FLAGS};
+use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
 const PAGE_BYTES: usize = 64 << 10;
 
@@ -95,14 +100,27 @@ struct Gpu {
     back: ID3D12Resource,
     pages_up: ID3D12Resource,
     pages_back: ID3D12Resource,
+    /// the device's wave lane counts (min, max)
+    lanes: (u32, u32),
 }
 
 impl Gpu {
-    fn new() -> Gpu {
+    fn new(warp: bool) -> Gpu {
         unsafe {
             let mut device: Option<ID3D12Device> = None;
-            D3D12CreateDevice(None::<&windows::core::IUnknown>, D3D_FEATURE_LEVEL_12_0, &mut device).expect("device");
+            if warp {
+                let f: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).expect("dxgi factory");
+                let a: IDXGIAdapter = f.EnumWarpAdapter().expect("WARP adapter");
+                D3D12CreateDevice(&a, D3D_FEATURE_LEVEL_12_0, &mut device).expect("device (WARP)");
+            } else {
+                D3D12CreateDevice(None::<&windows::core::IUnknown>, D3D_FEATURE_LEVEL_12_0, &mut device).expect("device");
+            }
             let device = device.unwrap();
+            let mut o1 = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+            let lanes = match device.CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, &mut o1 as *mut _ as *mut _, std::mem::size_of_val(&o1) as u32) {
+                Ok(()) => (o1.WaveLaneCountMin, o1.WaveLaneCountMax),
+                Err(_) => (0, 0),
+            };
             let queue: ID3D12CommandQueue = device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC { Type: D3D12_COMMAND_LIST_TYPE_COMPUTE, ..Default::default() }).unwrap();
             let alloc: ID3D12CommandAllocator = device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE).unwrap();
             let list: ID3D12GraphicsCommandList = device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, &alloc, None).unwrap();
@@ -133,7 +151,9 @@ impl Gpu {
             let signature: ID3D12RootSignature = device.CreateRootSignature(0, bytes).expect("signature");
 
             // Build 1: two windows, the test pages mapped
-            let mut tiles = Tiles::new(&device, &queue, 2).expect("tiles");
+            // WARP cannot reserve 4 GiB windows: 1 MiB ones there (the tests map pages 1-3, and read page 5 unmapped)
+            let window = if warp { 1u64 << 20 } else { WINDOW as u64 };
+            let mut tiles = Tiles::new_sized(&device, &queue, 2, window).expect("tiles");
             let mut uma = Uma::new(2, 64 << 20);
             for &(w, page) in &MAPPED {
                 let (_, mapped) = uma.place(w as u64 * WINDOW as u64 + page as u64 * PAGE as u64, PAGE).expect("place");
@@ -146,7 +166,7 @@ impl Gpu {
             let inc = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) as usize;
             for (w, win) in tiles.windows.iter().enumerate() {
                 let mut u = D3D12_UNORDERED_ACCESS_VIEW_DESC { Format: DXGI_FORMAT_R32_TYPELESS, ViewDimension: D3D12_UAV_DIMENSION_BUFFER, ..Default::default() };
-                u.Anonymous.Buffer = D3D12_BUFFER_UAV { FirstElement: 0, NumElements: (WINDOW / 4) as u32, StructureByteStride: 0, CounterOffsetInBytes: 0, Flags: D3D12_BUFFER_UAV_FLAG_RAW };
+                u.Anonymous.Buffer = D3D12_BUFFER_UAV { FirstElement: 0, NumElements: (window / 4) as u32, StructureByteStride: 0, CounterOffsetInBytes: 0, Flags: D3D12_BUFFER_UAV_FLAG_RAW };
                 let at = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: heap.GetCPUDescriptorHandleForHeapStart().ptr + w * inc };
                 device.CreateUnorderedAccessView(win, None, Some(&u), at);
             }
@@ -155,7 +175,7 @@ impl Gpu {
             let back = buffer(&device, D3D12_HEAP_TYPE_READBACK, 4096, false, D3D12_RESOURCE_STATE_COPY_DEST);
             let pages_up = buffer(&device, D3D12_HEAP_TYPE_UPLOAD, (MAPPED.len() * PAGE_BYTES) as u64, false, D3D12_RESOURCE_STATE_GENERIC_READ);
             let pages_back = buffer(&device, D3D12_HEAP_TYPE_READBACK, (MAPPED.len() * PAGE_BYTES) as u64, false, D3D12_RESOURCE_STATE_COPY_DEST);
-            let mut g = Gpu { device, queue, alloc, list, fence, value: 0, signature, heap, tiles, input, output, back, pages_up, pages_back };
+            let mut g = Gpu { device, queue, alloc, list, fence, value: 0, signature, heap, tiles, input, output, back, pages_up, pages_back, lanes };
             g.submit(|_| {});
             g
         }
@@ -170,7 +190,15 @@ impl Gpu {
             self.queue.ExecuteCommandLists(&[Some(self.list.cast().unwrap())]);
             self.value += 1;
             self.queue.Signal(&self.fence, self.value).unwrap();
-            self.fence.SetEventOnCompletion(self.value, HANDLE::default()).unwrap();
+            // bounded: a hung GPU fails the run in 5 s instead of wedging the machine
+            let event: HANDLE = CreateEventW(None, false, false, None).expect("event");
+            self.fence.SetEventOnCompletion(self.value, event).unwrap();
+            if self.fence.GetCompletedValue() < self.value && WaitForSingleObject(event, 5000).0 != 0 {
+                let _ = windows::Win32::Foundation::CloseHandle(event);
+                println!("FAILED    fence wait timed out after 5 s");
+                std::process::exit(1);
+            }
+            let _ = windows::Win32::Foundation::CloseHandle(event);
         }
     }
 
@@ -238,6 +266,7 @@ impl Gpu {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let programs: usize = args.iter().position(|a| a == "--programs").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(200);
+    let warp = args.iter().any(|a| a == "--warp");
     let dxc = match dxc() {
         Ok(d) => d,
         Err(e) => {
@@ -247,8 +276,9 @@ fn main() {
     };
     let dir = std::env::temp_dir().join("rebuild-sirtest");
     std::fs::create_dir_all(&dir).unwrap();
-    let mut gpu = Gpu::new();
+    let mut gpu = Gpu::new(warp);
     println!("sirtest — the shader core on the card: IR → HLSL → DXC → GPU, against the 64-lane interpreter");
+    println!("device    {}, waves of {}-{} lanes", if warp { "WARP (software)" } else { "the card" }, gpu.lanes.0, gpu.lanes.1);
     println!("dxc       {}", dxc.display());
     println!("memory    2 tiled windows (Build 1), pages {MAPPED:?} mapped, page 5 never");
 
@@ -256,6 +286,14 @@ fn main() {
     let (mut agnostic, mut doubled, mut wrong) = (0usize, 0usize, 0usize);
     let (mut host_branches, mut predicated) = (0usize, 0usize);
     let (mut loads, mut stores, mut halves) = (0usize, 0usize, 0usize);
+    // the random programs are wave32 ([WaveSize(32)]); a device with narrower waves (WARP: 4) runs only the
+    // lifted checks below, which do not depend on the wave size
+    let programs = if gpu.lanes.0 <= 32 && 32 <= gpu.lanes.1 {
+        programs
+    } else {
+        println!("skipped   random programs: they need 32-lane waves, this device has {}-{}", gpu.lanes.0, gpu.lanes.1);
+        0
+    };
     for n in 0..programs {
         // four kinds in turn: wave-wide or agnostic, straight-line or with nested branches
         let wave = n % 2 == 0;
@@ -336,10 +374,61 @@ fn main() {
             }
         }
     }
+    // lifted GFX10 forms (rebuild_sir::lift::check): each program over 64 lanes against the console's result
+    let mut lift_runs = 0usize;
+    let mut lift_skipped = 0usize;
+    for (k, case) in rebuild_sir::lift::check::cases().iter().enumerate() {
+        // WARP's f32 -> f16 conversion rounds toward zero (overflow to the largest finite): the checks that
+        // round to f16 run on the card only
+        if warp && case.half_nan {
+            lift_skipped += 1;
+            continue;
+        }
+        let dxil = match compile(&dxc, &case.hlsl, &dir, 100_000 + k) {
+            Ok(d) => d,
+            Err(e) => {
+                println!("FAILED    lift check {}: {e}", case.name);
+                std::process::exit(1);
+            }
+        };
+        let lanes: Vec<[u32; 3]> = (0..64).map(|l| rebuild_sir::lift::check::inputs(0x5EED_0000 + k as u64, l)).collect();
+        let mut input = Vec::new();
+        for r in 0..3 {
+            for v in &lanes {
+                input.extend_from_slice(&v[r].to_le_bytes());
+            }
+        }
+        let mem = gen::memory(&mut rng);
+        let (got, _) = match gpu.run(&dxil, &input, case.outputs, &mem) {
+            Ok(g) => g,
+            Err(e) => {
+                println!("FAILED    lift check {}: {e}", case.name);
+                std::process::exit(1);
+            }
+        };
+        for (l, v) in lanes.iter().enumerate() {
+            let want = case.expect(*v);
+            for (o, w) in want.iter().enumerate() {
+                if !case.matches(got[o][l], *w) {
+                    wrong += 1;
+                    if wrong <= 3 {
+                        println!("WRONG     lift check {}: lane {l} inputs {v:#x?} output {o}: got {:#x}, want {w:#x}", case.name, got[o][l]);
+                    }
+                }
+            }
+        }
+        lift_runs += 1;
+    }
+    println!("lifted    {lift_runs} GFX10 checks (bit scans, perm, SDWA, 16-bit and packed ops, carries, 64-bit, buffer formats) × 64 lanes against the console's result");
+    if lift_skipped > 0 {
+        println!("skipped   {lift_skipped} lifted checks that round to f16: WARP's f32 -> f16 conversion rounds toward zero (the card rounds to nearest even, as the console)");
+    }
     println!("ran       {agnostic} agnostic (wave32, one console lane per thread) + {doubled} doubled (two console lanes per thread, EXEC as data)");
     println!("branches  {host_branches} lowered to host branches (uniform condition, or no cross-lane op inside) · {predicated} predicated (EXEC as data)");
     println!("ops       {loads} loads, {stores} stores through the windows (mapped and unmapped pages, uniform and varying windows) · {halves} packed half-precision ops");
-    if wrong == 0 {
+    if wrong == 0 && programs == 0 {
+        println!("PROVEN    the lifted checks match the console's result on every lane");
+    } else if wrong == 0 {
         println!("PROVEN    every lane of every output and every word of the 4 mapped pages match the 64-lane console interpreter, on the card");
         println!("PROVEN    console addresses are window offsets: no page directory; unmapped tiles read 0 and drop writes");
         println!("PROVEN    native half precision (float16_t) matches round-to-nearest-even bit for bit");

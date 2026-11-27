@@ -410,14 +410,14 @@ fn buffer_views_round_trip_with_a_raw_mirror_and_a_shadow_entry() {
     assert_eq!(&shadow(5)[..2], &[4, 100]);
     assert_eq!(&shadow(6)[..2], &[12, 8]);
     // alternates: the descriptor's own kind
-    assert_eq!(alt(0).describe(), format!("cbv {:#x} 512", base + 512));
+    assert_eq!(shadow(0)[2], p, "a CBV is only its raw SRV in a shader-visible heap: no alternate");
     assert_eq!(shadow(1)[2], p, "a raw SRV needs no alternate: the null slot");
     assert_eq!(shadow(2)[2], p);
     assert_eq!(alt(3).describe(), format!("srv typed 0x0 fmt 2 first {} n 5", (off + 32) / 16));
     assert_eq!(alt(4).describe(), format!("uav raw 0x0 fmt 39 first {} n 32", (off + 64) / 4));
     assert_eq!(alt(5).describe(), format!("uav typed 0x0 fmt 42 first {} n 100", (off + 16) / 4));
     assert!(alt(6).describe().starts_with("uav raw"));
-    for i in [0, 3, 4, 5, 6] {
+    for i in [3, 4, 5, 6] {
         assert!(shadow(i)[2] > p, "alternates live past the null slot");
     }
     assert_eq!(rig.r.stats().views_created, 7);
@@ -426,7 +426,7 @@ fn buffer_views_round_trip_with_a_raw_mirror_and_a_shadow_entry() {
 }
 
 #[test]
-fn a_constant_buffer_off_256_keeps_its_raw_view_and_a_null_cbv() {
+fn a_constant_buffer_off_256_keeps_its_raw_view() {
     let rig = rig();
     let b = buffer(&rig.r, KIB_64);
     let base = rig.r.console_resource(b).unwrap().address;
@@ -434,10 +434,46 @@ fn a_constant_buffer_off_256_keeps_its_raw_view_and_a_null_cbv() {
     let st = rig.r.heap_state(h).unwrap();
     unsafe { rig.r.create_cbv(&D3D12_CONSTANT_BUFFER_VIEW_DESC { BufferLocation: base + 100, SizeInBytes: 64 }, start) };
     let sh = st.shadow.as_ref().unwrap().read(0);
-    assert_eq!(rig.fake.at(st.host.cpu_at(sh[2])).unwrap().describe(), "null cbv");
+    assert_eq!(sh[2], st.null_index, "no alternate");
     assert!(rig.fake.at(st.host.cpu_at(0)).unwrap().is_raw_srv());
     assert_eq!(sh[3], 4, "100 = 96 + 4");
     assert_eq!(st.stats.misaligned.load(Ordering::Relaxed), 1);
+    release(b);
+    release(h);
+}
+
+/// GBV on WARP: "Descriptor Type in Heap: SRV, Register Type: CBV". Console descriptors are untyped, so a slot
+/// the title fills with a CBV may be read as a buffer and the other way round; translated shaders read every
+/// heap buffer raw, so a CBV into a shader-visible view heap is a raw SRV over the same bytes (R32_TYPELESS,
+/// RAW, from the 16-byte aligned start below it with the lead in the shadow table) and no CBV is written
+/// anywhere in that heap; a null CBV is a null raw SRV.
+#[test]
+fn a_cbv_into_a_view_heap_slot_is_a_raw_srv() {
+    let rig = rig();
+    let b = buffer(&rig.r, KIB_64);
+    let base = rig.r.console_resource(b).unwrap().address;
+    let off = base - rig.mem.base();
+    let (h, start) = heap(&rig, 0, 4, true, true);
+    let st = rig.r.heap_state(h).unwrap();
+    unsafe {
+        rig.r.create_cbv(&D3D12_CONSTANT_BUFFER_VIEW_DESC { BufferLocation: base + 256, SizeInBytes: 512 }, start);
+        rig.r.create_cbv(std::ptr::null(), start + 32);
+        rig.r.create_cbv(&D3D12_CONSTANT_BUFFER_VIEW_DESC { BufferLocation: 0, SizeInBytes: 256 }, start + 64);
+    }
+    let v = rig.fake.at(st.host.cpu_at(0)).unwrap();
+    let HostView::Srv { desc, .. } = v else { panic!("not an SRV: {}", v.describe()) };
+    let buf = unsafe { desc.Anonymous.Buffer };
+    assert_eq!(desc.Format, DXGI_FORMAT_R32_TYPELESS);
+    assert_ne!(buf.Flags.0 & D3D12_BUFFER_SRV_FLAG_RAW.0, 0);
+    assert_eq!((buf.FirstElement, buf.NumElements), ((off + 256) / 4, 512 / 4), "offset / 4, size / 4");
+    let sh = st.shadow.as_ref().unwrap().read(0);
+    assert_eq!(sh, [1, 512, st.null_index, 0]);
+    for i in [1, 2] {
+        assert_eq!(rig.fake.at(st.host.cpu_at(i)).unwrap().describe(), "null buffer", "slot {i}: a null raw SRV");
+        assert_eq!(st.shadow.as_ref().unwrap().read(i)[2], st.null_index);
+    }
+    let cbvs = rig.fake.writes.lock().unwrap().values().filter(|v| matches!(v, HostView::Cbv { .. } | HostView::NullCbv)).count();
+    assert_eq!(cbvs, 0, "no CBV anywhere in a shader-visible heap");
     release(b);
     release(h);
 }
@@ -585,8 +621,16 @@ fn records_copied_as_bytes_are_mirrored_at_their_new_index() {
     unsafe { rig.r.copy_descriptors(1, dsts.as_ptr(), dsizes.as_ptr(), 2, srcs.as_ptr(), sizes.as_ptr(), 0) };
     assert_eq!(record_at(gstart + 6 * 32), record_at(cstart));
     assert_eq!(record_at(gstart + 7 * 32), record_at(cstart + 32));
+    // a CBV copied into a shader-visible heap is a raw SRV there, with no alternate (never a CBV)
+    assert!(rig.fake.at(cst.host.cpu_at(0)).unwrap().describe().starts_with("cbv"), "a CPU-only heap keeps the CBV");
     let sh6 = st.shadow.as_ref().unwrap().read(6);
-    assert!(rig.fake.at(st.host.cpu_at(sh6[2])).unwrap().describe().starts_with("cbv"));
+    assert!(rig.fake.at(st.host.cpu_at(6)).unwrap().is_raw_srv());
+    assert_eq!(sh6[2], st.null_index);
+    // and by the title's byte copy too
+    unsafe { std::ptr::copy_nonoverlapping(cstart as *const u8, (gstart + 3 * 32) as *mut u8, 32) };
+    rig.r.sync(gstart, 8 * 32);
+    assert!(rig.fake.at(st.host.cpu_at(3)).unwrap().is_raw_srv());
+    assert_eq!(st.shadow.as_ref().unwrap().read(3)[2], st.null_index);
     for o in [b, cpu_heap, gpu_heap] {
         release(o);
     }
@@ -619,22 +663,22 @@ fn the_titles_heap_of_1245184_views_keeps_indices_and_counts_what_does_not_fit()
     let p = r.view_index_limit();
     assert_eq!(p, 750_000);
     let b = buffer(r, KIB_64);
-    let base = r.console_resource(b).unwrap().address;
     let (h, start) = heap(&rig, 0, 1_245_184, true, true);
     let st = r.heap_state(h).unwrap();
     assert_eq!((st.mirrored, st.host.count, st.null_index), (750_000, 1_000_000, 750_000));
     let binding = r.binding(h).unwrap();
     assert_eq!(binding.console_bytes, 750_000 * 32, "the list translator maps only mirrored indices");
     assert_eq!(binding.console_stride, 32);
-    let cbv = |i: u64| unsafe { r.create_cbv(&D3D12_CONSTANT_BUFFER_VIEW_DESC { BufferLocation: base, SizeInBytes: 256 }, start + 32 * i) };
-    cbv(0);
-    cbv(720_000);
+    // a typed SRV has an alternate (a CBV has none: it is only its raw SRV)
+    let typed = |i: u64| unsafe { r.create_srv(b, &srv_buffer(0, 16, 0, false, DXGI_FORMAT_R32G32B32A32_FLOAT), start + 32 * i) };
+    typed(0);
+    typed(720_000);
     let a0 = st.shadow.as_ref().unwrap().read(0)[2];
     let a1 = st.shadow.as_ref().unwrap().read(720_000)[2];
     assert!(a0 > p && a1 > p && a0 != a1, "pooled alternates");
     assert!(rig.fake.at(st.host.cpu_at(720_000)).unwrap().is_raw_srv(), "index kept: console 720,000 is host 720,000");
     // an index past the mirror: recorded in the title's memory, counted and noted, never mirrored
-    cbv(800_000);
+    typed(800_000);
     assert!(record_at(start + 32 * 800_000).is_some());
     assert_eq!(st.stats.beyond.load(Ordering::Relaxed), 1);
     assert_eq!(st.stats.highest.load(Ordering::Relaxed), 800_000);
@@ -644,7 +688,7 @@ fn the_titles_heap_of_1245184_views_keeps_indices_and_counts_what_does_not_fit()
     // overwriting a slot with a view that needs no alternate gives its alternate back
     unsafe { r.create_srv(b, &srv_buffer(0, 4, 0, true, DXGI_FORMAT_R32_TYPELESS), start) };
     assert_eq!(st.shadow.as_ref().unwrap().read(0)[2], p);
-    cbv(1);
+    typed(1);
     assert_eq!(st.shadow.as_ref().unwrap().read(1)[2], a0, "the freed alternate is reused");
     release(b);
     release(h);

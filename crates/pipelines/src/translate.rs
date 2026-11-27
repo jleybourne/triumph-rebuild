@@ -97,11 +97,13 @@ pub fn lift_hlsl(p: &NativeProgram, isg1: &[u8], osg1: &[u8], v1: bool) -> Resul
     use rebuild_sir::lift;
     let stage = host_stage(p).ok_or_else(|| Refused::new(format!("a {:?} program is not translated", p.stage)))?;
     let bind = lift::Bindings { hw: p.stage, layout: &p.layout, used: &p.used };
-    let insts = gfx10::decode(&p.patched_code()).map_err(|_| Refused::new("patched code does not decode"))?;
+    let code = p.patched_code();
+    let insts = gfx10::decode(&code).map_err(|_| Refused::new("patched code does not decode"))?;
     let wave64 = p.wave64;
-    // how console lanes map to host lanes, by the program's wave class (agnostic programs: as before)
+    // how console lanes map to host lanes, by the program's wave class (agnostic programs: as before); v1 gets
+    // the code bytes too: data embedded after the program (read through s_getpc_b64)
     let wave = wave_of(p, &insts);
-    let run = |st| if v1 { lift::lift_program_wave(&insts, st, Some(bind), wave64, wave) } else { lift::lift_stage(&insts, st, Some(bind)) };
+    let run = |st| if v1 { lift::lift_program_full(&insts, &code, st, Some(bind), wave64, wave) } else { lift::lift_stage(&insts, st, Some(bind)) };
     // compute programs have no signatures
     let sig = |b: &[u8]| if stage == Stage::Cs { Ok(Vec::new()) } else { signature::parse(b) };
     let (Ok(isg1), Ok(osg1)) = (sig(isg1), sig(osg1)) else { return Err(Refused::new("signature unreadable")) };
