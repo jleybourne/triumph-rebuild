@@ -1,0 +1,60 @@
+uploadbench — Build 0 (a): write-watch + 64 B diff + upload, our own code
+gpu       NVIDIA GeForce RTX 4070 Ti (11994 MiB VRAM)
+cpu       16 hardware threads
+title     rewrites 115 MiB a frame in a 1024 MiB region · 20 timed frames after 3 warm-up · medians
+gpu ms    copy-queue and compute timestamps
+ceiling   one 115 MiB copy, staging -> video memory: 9.54 ms = 12.64 GB/s
+
+change            diff   path     T |  pages     runs      MB |  watch   diff gather record    gpu |    wall     p95 | check
+100% of chunks    shadow copy     1 |  36802     9315   108.5 |   5.67  17.82   9.44   3.09   9.18 |   45.46   47.83 | verified
+100% of chunks    shadow copy     4 |  36802     9318   108.5 |   5.84  13.98   7.46   3.13  17.24 |   48.13   51.55 | verified
+100% of chunks    shadow scatter  1 |  36802     9315   108.5 |   5.67  17.22   9.59   0.06  18.66 |   52.71   56.50 | verified
+100% of chunks    shadow scatter  4 |  36802     9318   108.5 |   5.71  13.43   7.16   0.06  13.67 |   40.34   42.26 | verified
+100% of chunks    hash   copy     1 |  36802     9315   108.5 |   5.78  14.90   9.73   3.11  17.42 |   51.81   59.96 | verified
+100% of chunks    hash   copy     4 |  36802     9318   108.5 |   5.75   7.04   7.07   3.09  17.44 |   41.34   59.51 | verified
+100% of chunks    hash   scatter  1 |  36802     9315   108.5 |   5.61  13.99   9.14   0.06  19.03 |   50.64   70.13 | verified
+100% of chunks    hash   scatter  4 |  36802     9318   108.5 |   5.66   6.86   7.04   0.06  13.39 |   33.83   39.07 | verified
+ 50% of chunks    shadow copy     1 |  36802   439990    55.8 |   5.67  21.12   8.24 146.16  27.78 |  209.65  221.57 | verified
+ 50% of chunks    shadow copy     4 |  36802   439990    55.8 |   5.86  13.42   5.94 146.39  13.79 |  185.96  209.60 | verified
+ 50% of chunks    shadow scatter  1 |  36802   439990    55.8 |   5.75  22.02  12.00   0.06   6.60 |   46.17   50.59 | verified
+ 50% of chunks    shadow scatter  4 |  36802   439990    55.8 |   5.65  11.68   6.14   0.06   9.50 |   34.97   48.48 | verified
+ 50% of chunks    hash   copy     1 |  36802   439990    55.8 |   5.73  19.62   8.53 145.25  28.29 |  208.80  213.19 | verified
+ 50% of chunks    hash   copy     4 |  36802   439990    55.8 |   5.79   9.06   5.80 146.28  14.03 |  185.60  204.33 | verified
+ 50% of chunks    hash   scatter  1 |  36802   439990    55.8 |   5.61  19.38  10.52   0.05   7.01 |   44.58   47.42 | verified
+ 50% of chunks    hash   scatter  4 |  36802   439990    55.8 |   5.68  10.29   6.27   0.06   6.86 |   30.05   32.40 | verified
+ 10% of chunks    shadow copy     1 |  36802   166814    11.4 |   5.63  17.58   3.19  54.56   3.70 |   84.35   89.29 | verified
+ 10% of chunks    shadow copy     4 |  36802   166814    11.4 |   5.67  10.36   1.92  55.33   2.35 |   75.77   79.21 | verified
+ 10% of chunks    shadow scatter  1 |  36802   166814    11.4 |   5.75  17.71   3.78   0.06   1.22 |   29.01   33.01 | verified
+ 10% of chunks    shadow scatter  4 |  36802   166814    11.4 |   5.75  10.99   2.15   0.06   1.93 |   21.46   24.20 | verified
+ 10% of chunks    hash   copy     1 |  36802   166814    11.4 |   5.71  14.83   3.34  55.21   3.06 |   82.56   85.12 | verified
+ 10% of chunks    hash   copy     4 |  36802   166814    11.4 |   5.64   6.98   1.81  54.64   3.70 |   72.69   79.75 | verified
+ 10% of chunks    hash   scatter  1 |  36802   166814    11.4 |   5.65  14.37   3.60   0.05   1.93 |   26.38   28.86 | verified
+ 10% of chunks    hash   scatter  4 |  36802   166814    11.4 |   5.64   7.11   1.98   0.06   1.18 |   16.41   19.52 | verified
+ 10% of ranges    shadow copy     1 |  36802     1038    11.5 |   5.69  17.42   1.01   0.38   0.97 |   25.61   28.77 | verified
+ 10% of ranges    shadow copy     4 |  36802     1038    11.5 |   5.70  10.89   1.02   0.38   1.82 |   20.09   24.16 | verified
+ 10% of ranges    shadow scatter  1 |  36802     1038    11.5 |   5.62  17.31   1.06   0.06   1.17 |   25.54   30.28 | verified
+ 10% of ranges    shadow scatter  4 |  36802     1038    11.5 |   5.73  11.00   1.01   0.06   1.19 |   20.01   22.88 | verified
+ 10% of ranges    hash   copy     1 |  36802     1038    11.5 |   5.68  13.69   1.01   0.38   0.97 |   21.85   23.75 | verified
+ 10% of ranges    hash   copy     4 |  36802     1038    11.5 |   5.70   6.93   0.96   0.38   1.82 |   15.98   16.58 | verified
+ 10% of ranges    hash   scatter  1 |  36802     1038    11.5 |   5.70  13.39   0.97   0.05   1.20 |   21.86   23.69 | verified
+ 10% of ranges    hash   scatter  4 |  36802     1038    11.5 |   5.67   6.50   0.92   0.06   1.22 |   14.83   16.32 | verified
+  0% of chunks    shadow copy     1 |  36802        0     0.0 |   5.63  15.60   0.00   0.00   0.00 |   21.12   25.23 | verified
+  0% of chunks    shadow copy     4 |  36802        0     0.0 |   5.85  11.15   0.41   0.00   0.00 |   17.35   20.98 | verified
+  0% of chunks    shadow scatter  1 |  36802        0     0.0 |   5.81  17.89   0.00   0.00   0.00 |   23.78   27.82 | verified
+  0% of chunks    shadow scatter  4 |  36802        0     0.0 |   6.21  12.05   0.40   0.00   0.00 |   18.69   20.73 | verified
+  0% of chunks    hash   copy     1 |  36802        0     0.0 |   8.22  26.72   0.00   0.00   0.00 |   37.04   69.80 | verified
+  0% of chunks    hash   copy     4 |  36802        0     0.0 |   8.13  78.20 114.73   0.00   0.00 |  203.09  560.41 | verified
+  0% of chunks    hash   scatter  1 |  36802        0     0.0 |   8.09  30.79   0.00   0.00   0.00 |   40.81   54.24 | verified
+  0% of chunks    hash   scatter  4 |  36802        0     0.0 |   7.86  86.62 133.77   0.00   0.00 |  227.52  397.59 | verified
+
+columns   ms, medians; wall = watch start -> fence complete (the title's own writes excluded)
+
+re-run of the 0 % scenario (`--change chunks:0`), same build, after the full matrix:
+  0% of chunks    shadow copy     1 |  36802        0     0.0 |   5.85  20.96   0.00   0.00   0.00 |   26.78   30.32 | verified
+  0% of chunks    shadow copy     4 |  36802        0     0.0 |   6.04  12.43   0.45   0.00   0.00 |   18.81   23.02 | verified
+  0% of chunks    shadow scatter  1 |  36802        0     0.0 |   6.30  22.80   0.00   0.00   0.00 |   29.18   33.68 | verified
+  0% of chunks    shadow scatter  4 |  36802        0     0.0 |   6.79  14.00   0.47   0.00   0.00 |   21.15   23.88 | verified
+  0% of chunks    hash   copy     1 |  36802        0     0.0 |   6.50  17.81   0.00   0.00   0.00 |   24.92   28.33 | verified
+  0% of chunks    hash   copy     4 |  36802        0     0.0 |   6.51   9.99   0.46   0.00   0.00 |   17.15   18.77 | verified
+  0% of chunks    hash   scatter  1 |  36802        0     0.0 |   7.68  20.64   0.00   0.00   0.00 |   28.33   31.62 | verified
+  0% of chunks    hash   scatter  4 |  36802        0     0.0 |   7.97  14.44   8.87   0.00   0.00 |   31.12   38.15 | verified

@@ -1,136 +1,150 @@
-# HANDOFF — review this before any more code is written
+# HANDOFF — review this before more code is written
 
 You are being asked to check a plan, not to write code. Be blunt. The owner has explicitly asked for
-errors to be found, and the author of this handoff has asked to be corrected where he is wrong.
+errors to be found, and the author has asked to be corrected where he is wrong.
 
 ## The machine
 
 ```
-CPU   i7-10700KF        GPU  RTX 4070 Ti, 12,282 MiB       RAM 64 GB
+CPU   i7-10700KF (8C/16T)   GPU  RTX 4070 Ti, 12,282 MiB      RAM 64 GB
+PCIe  3.0 x16 — measured 12.64 GB/s staging -> VRAM (runs/build0a-upload.md)
 BAR1  16,384 MiB, 16,355 used — aperture fully mapped, ReBAR healthy (measured)
-OS    Windows 11        Shell: git-bash
+OS    Windows 11        Shell: git-bash / PowerShell
 ```
 
 ## What this repository is
 
-`D:\Developer\triumph-rebuild` — a from-scratch Rust rewrite of an Xbox-Series-to-Windows compatibility
-layer, built around one decision: **the title's memory is the GPU's memory**. It exists because the
-previous layer (`D:\Developer\fxceless-victory`) is dominated by emulating shared memory with copies, and
-nineteen measured attempts to tune that away all failed.
+`D:\Developer\triumph-rebuild` — a from-scratch Rust rebuild of an Xbox-Series-to-Windows compatibility
+layer: loader, console runtime, memory, shader recompiler, D3D12.X device, lists, descriptors, present,
+upscaler. Target: **30 fps in-world (33.3 ms) at a stated output resolution and upscaler mode, on NVIDIA
+with DLSS and on AMD with FSR**, at or above a minimum spec. Intel GPUs are not supported.
+
+It learns from two layers by reading their design, never by copying code:
+
+```
+D:\Developer\xcl                    sibling layer (GPL-2.0)
+D:\Developer\fxceless-victory       the layer being replaced; the owner's fork of it is
+                                    github jleybourne/Triumph = git remote `triumph` (branch triumph/main)
+```
 
 Read, in this order:
 
 ```
-README.md                    what it is, what's proven, what isn't
-thoughts.md                  the reasoning and the arithmetic
-plan.md                      the five decisions, work order, what we refuse to build
-tasks.md                     the build list, each item closed by a measurement
-crates/uma/src/lib.rs        address space: 4 GiB windows, 64 KiB pages, placement, sharing (8 tests)
-crates/uma/src/windows.rs    the GPU/CPU shared-memory proof (D3D12)
-apps/rebuild/src/bin/gputest.rs   the proof binary
+README.md                         what it is, what's proven, what isn't
+progress.md                       done / not done, % by build step, open problems
+plan.md                           the six decisions, work order (Builds 0-9), what we refuse to build
+tasks.md                          every task with the number that closes it; known traps from the fork
+runs/build0a-upload.md            Build 0 (a): the upload benchmark and its verdict
+thoughts.md                       the original reasoning (written before plan.md's corrections)
+crates/uma/src/lib.rs             address space bookkeeping (8 tests)
+crates/uma/src/chunks.rs          64-byte diff, gather, chunk indices (7 tests)
+crates/uma/src/upload.rs          the Build 0 (a) benchmark: write-watch, diff, copy and scatter paths
+crates/uma/src/windows.rs         the GPU->CPU proof (D3D12)
 ```
 
-## What is actually proven (this ran on the card above)
+## The plan in one screen (plan.md)
 
 ```
-$ cargo test         8 tests green  (page-per-page backing, sharing by address, lifetime by user
-                                    count, atomic refusal, window-relative addresses, covering page)
-$ cargo run --bin gputest
-backend   D3D12 custom heap (WRITE_BACK, L0), persistently mapped
-cpu read  [CA, FA, BE, BA, 00, 00, 00, 00, 2A, 00, 00, 00]
-RESULT    the GPU wrote into memory the CPU reads, with no copy
-
-$ cargo run --bin gputest -- --bare
-RESULT    a bare dispatch completes: the device is healthy
+1  GPU-owned memory in tiled VRAM at console addresses, never copied back; CPU-written memory
+   uploaded as dirty 64-byte chunks on an async queue; a small explicit GPU->CPU region
+2  descriptors in the title's memory, dirty list, no per-frame scan
+3  lists recorded as data, translated on workers; cache only if the hit rate pays
+4  nothing compiles in a frame; wave64 lowered to wave32 for every vendor
+5  one upscaler interface, DLSS (Streamline) on NVIDIA, FSR (FidelityFX SDK) on AMD
+6  every number from one frame line: fps · ms · draws · dropped · upload · translation · res · mode · vendor
 ```
 
-The control run matters: the first three attempts removed the device (`0x887A0005`) and the control proved
-the machine was healthy, which is how the real bug was found — a `RWByteAddressBuffer` needs a **raw UAV**
-(`DXGI_FORMAT_R32_TYPELESS` + `BUFFER_UAV_FLAG_RAW`), otherwise the dispatch removes the device.
+Build 0 comes before any more code and answers three questions on our own code: (a) the cost of dirty
+uploads at real volume, (b) per-draw translation cost against 7.4 µs, (c) the title's real GPU time.
 
-## The numbers this plan is built on (measured on the machine above)
+## What is actually proven (on the machine above)
 
-From the previous layer's own runs (`D:\victory-work\wt-docs\ROADBLOCK.md`, and its `docs/runs.md`):
+```
+$ cargo test --release -p rebuild-uma      15 tests green
+$ cargo run --bin gputest                  RESULT the GPU wrote into memory the CPU reads, with no copy
+$ cargo run --bin gputest -- --bare        RESULT a bare dispatch completes: the device is healthy
+$ cargo run --release --bin uploadbench    Build 0 (a), 40 configurations, 40 verified byte-exact
+```
+
+**Build 0 (a), the result** (`runs/build0a-upload.md`):
+
+```
+ceiling        115 MiB in one copy: 9.54 ms = 12.64 GB/s
+best method    hash diff + compute scatter + 4 workers
+               108.5 MB all changed, 9.3k runs      33.8 ms wall, 13.4 ms of it GPU
+                55.8 MB, 440k runs                  30.1 ms wall,  6.9 ms GPU
+                11.4 MB, 167k runs                  16.4 ms wall,  1.2 ms GPU
+               nothing changed, 36.8k pages written ~17-31 ms     (the detection floor)
+rejected       one CopyBufferRegion per run: 146 ms just to record 440k copies
+verdict        decision 1 holds only if the upload is scatter-based AND runs on workers a frame
+               ahead; serially it is a whole frame
+```
+
+The fork measured what the title really sends: **~48 MB changed of 115 MB copied, exact CPU-owned
+ranges 226,099 a frame / 31.3 MB**. That sits between the 10 % and 50 % rows above.
+
+## The numbers the plan rests on
+
+From the layer being replaced (`D:\victory-work\wt-docs\ROADBLOCK.md`, fork `docs/`):
 
 ```
 frame            131.3 ms · 7.6 fps median · ~4,500 draws · 356 dropped
-                 best seen 111.3 ms / 9.00 fps at 3,962 draws
-preparing        85-110 ms   copies 31-48 ms (83-115 MB) · textures ~6 ms
+preparing        85-110 ms   copies 31-48 ms (83-115 MB, ~11,500 copies) · textures ~6 ms
 copying back     48-54 ms    (60-65 MB)
-on the GPU       ~71-90 ms   ~26 ms attributed to the layer's own hashing, ~45 ms the title's work
-list calls       20,293 a frame = 243.2 ms on the submitting thread
-present wait     ~68 ms, while the submit thread copies ~72 MB up
-a copy           5.5 us each, of which ~1 us is bytes
+on the GPU       ~71-90 ms   title lists 43-63 ms across runs (RT lighting off); ~80 ms card busy
+list calls       20,293 a frame = 243.2 ms, spread over the title's 5 recording threads
 descriptor sync  203,127 slots examined to mirror 12,027 records
 ```
 
-Measured and did not help, all A/B on the same machine: copy merging (4 attempts), double buffering
-(refused from code), barrier de-duplication, `rep movsb` copies with a fault handler, runtime-precompiled
-pipelines (0.115 vs 0.029 ms/draw), VRS (inert — zero shading-rate calls), FSR quality 4 (black screen),
-GPU upload heaps (2× slower, −1,370 draws), guard epochs, present tickets, ordered copies, wide prepare.
-Wave64 divergence is 16.5 % of 4.64 M instructions, so removing all of it caps at 13.2 fps.
+## Fork findings that contradict plan.md (verify these first)
+
+1. **Decision 5's premise is wrong.** Method 0x218 creates compute pipelines from shader containers; it is
+   not an upscale call with inputs. Run as a Series X, the title never loads the FidelityFX loader. Its FSR
+   is ordinary compute dispatches, which must be recognised by their bindings (fork commit `ee0b94a3`).
+2. **No known way to lower the internal resolution.** The scene is 2560x1440 at `fsrQuality` 3 and 4 alike.
+   Resizing the title's targets from the layer made it assert at load (fork `docs/research/resolution.md`).
+3. **The ~45 ms title GPU figure is low.** The fork's per-list timestamps give 43-63 ms, with RT lighting off.
+4. **The 7.4 µs serial per-draw budget may be the wrong frame.** The 243 ms is on 5 recording threads, 0 ms
+   on the render thread, and the recorders wait 70 % of the time on the title's own scheduler.
+5. **The title caps itself at 30 fps** (menus run at exactly 33-34 ms). This matters only for 60.
 
 ## The claims to check
 
-**A.** The five decisions in `plan.md` — one memory/no mirror; CPU writes as 64-byte chunks on an async
-ring; descriptors in the title's own memory with dirty lists; list calls recorded, translated in parallel
-and cached; nothing compiling during a frame — are sufficient to reach **33.3 ms / 30 fps** at ~4,500
-draws with the title's own FSR doing the upscaling.
+**A.** Decisions 1-6 are sufficient for **33.3 ms / 30 fps at ~4,500 draws** on the RTX 4070 Ti with DLSS,
+at a resolution the owner would accept, given fork findings 1-3.
 
-**B.** Memory work alone reaches roughly 22 fps (the card's ~45 ms); the upscaler is required for 30.
+**B.** Build 0 (a) supports decision 1 as amended (scatter, on workers, a frame ahead). Check the
+benchmark is a fair model: write pattern, region size, synchronous frames, default heap rather than
+tiles. Does the detection floor (~13-17 ms of 4 workers) fit beside the title's own CPU work on 8 cores?
 
-**C.** A rewrite in Rust is the right vehicle, versus retrofitting the existing layer's memory model.
+**C.** A full rebuild in Rust is the right vehicle, versus a hybrid that keeps the fork's working loader,
+runtime and 100 %-census shader translator and replaces only the memory model.
 
-**D.** `crates/uma/src/windows.rs` demonstrates what it claims, and is a meaningful first step rather
-than a toy.
+**D.** Wave32 everywhere (decision 4) is safe, given the fork's census: 25,694 / 25,694 programs translated,
+7 pipelines still refused because they need 64-lane waves.
 
-**E.** `tasks.md` has nothing material missing between the current state and a running title.
+**E.** `tasks.md` has nothing material missing between the current state and 30 fps on NVIDIA.
 
 ## Where the author already thinks he is weak (attack these first)
 
-1. **"30 fps at what internal resolution?"** The sibling layer's README claims "steady 30 fps" without
-   stating resolution or the FSR level used. If that 30 is at a much lower internal resolution, our
-   33.3 ms target silently inherits that assumption. Draw count staying constant does not mean pixels do.
-2. **The ~45 ms card number is the weakest in the brief.** It came from a frame line reporting ~71-90 ms
-   "on the GPU", with ~26 ms attributed to our hashing by subtraction — not from per-pass timestamp
-   measurements, which were never successfully captured. If the real split is different, the 22 fps
-   intermediate is wrong by up to 15 ms.
-3. **Rewrite vs hybrid is under-priced.** A rewrite must re-earn the loader, the console runtime, the
-   descriptor model and the shader recompiler — the parts that took the existing layer months — while only
-   the memory layer must change. A hybrid that keeps the working translator and replaces the allocator and
-   copy path may reach the same result with far less risk. The plan asserts rewrite without costing that.
-4. **The proof is narrower than the architecture.** One buffer, one custom heap, one dispatch. It does not
-   demonstrate tiled placement, page sharing across two resources at one address, or a title's arbitrary
-   commit pattern at scale.
-5. **`tasks.md` is missing whole surfaces**: console descriptor heaps (T#/V#), the title's own DLLs (Bink,
-   the FSR upscaler, GDK HTTP), audio, input, and the loop for discovering which GDK calls this title
-   actually makes.
-
-## The reference implementation to compare against
-
-`D:\Developer\xcl` (GPL-2.0) — a sibling layer whose README claims a retail title at steady 30 fps on PC
-with *"title graphics memory shared by CPU and GPU without copies, up to 16 GB (4 GiB windows)"* and the
-console FSR 4 upscaler running natively. Read it as design, not code:
-
-```
-crates/xcl/src/gpu/uma.rs              unified block and sparse windows
-crates/xcl/src/hle/d3d12x/sparse.rs    tiles, commits, write-watch, 64-byte chunk uploads on a ring
-crates/xcl/src/hle/d3d12x/vram.rs      tiled placement of targets at console addresses, page sharing
-crates/xcl/src/hle/d3d12x/console_heap.rs   console descriptor heaps and the PC descriptors beside them
-```
+1. **The upscaler route** — fork findings 1 and 2. If the internal resolution cannot be lowered, DLSS buys
+   little, and 30 fps rests on the title's own GPU time alone (43-63 ms).
+2. **Build 0 (b) and (c) are not done.** The CPU half and the GPU half of the frame are both still estimates.
+3. **Rewrite vs hybrid is still not costed.**
+4. **The proof is narrower than the architecture.** There are no tiles yet, no sharing on the GPU, and no
+   real title commit pattern.
+5. **The minimum spec is blank**, so "on every supported PC" cannot be checked yet.
 
 ## What to return
 
 1. A verdict on each of A-E, and the reasoning that would change your mind.
 2. Every place the documents overstate what is proven, or quote a number the runs do not support.
 3. The single biggest technical risk between here and 30 fps, and the cheapest evidence that settles it.
-4. What the reference implementation does that this plan has missed, and what it does that this plan
-   should deliberately not copy.
-5. A blunt verdict: will this plan reach 30+ fps on this hardware, and if not, what specifically changes.
+4. What the reference layers do that this plan has missed, and what it should deliberately not copy.
+5. A blunt verdict: will this plan reach 30 fps on this hardware, and if not, what specifically changes.
 
-## The test nobody has run yet
+## What we do not do
 
-**Run `D:\Developer\xcl` against this same title and measure it.** If it reaches 30 on this machine, the
-target is real and its architecture is worth adopting mechanism-for-mechanism. If it does not, the central
-assumption of this plan is wrong and the plan should change before more code is written. Everything else
-here is cheaper than that answer.
+We do not build or run xcl or the old layer's current builds; we measure only our own code against the
+baseline already recorded. Questions that only a run of theirs could answer become Build 0 questions on
+ours.

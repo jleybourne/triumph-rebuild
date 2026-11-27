@@ -11,8 +11,13 @@
 //! page nobody covers costs nothing. This module is the bookkeeping only; the
 //! Windows side maps the pages it names into a reserved (tiled) resource.
 
+pub mod chunks;
+
 #[cfg(windows)]
 pub mod windows;
+
+#[cfg(windows)]
+pub mod upload;
 
 pub const PAGE: usize = 64 << 10;
 pub const WINDOW: usize = 4 << 30;

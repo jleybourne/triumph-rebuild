@@ -1,7 +1,7 @@
 # REVIEW-PROMPT — the exact brief to give an independent model
 
-Copy the block below into a fresh session with Claude (or any other reviewer) from this directory. It is
-self-contained: the reviewer does not need this conversation.
+Copy the block below into a fresh session from this directory. It is self-contained: the reviewer does not
+need this conversation.
 
 ## Run it
 
@@ -14,40 +14,49 @@ claude                           # interactive, then paste the prompt below
 or one-shot, non-interactive:
 
 ```powershell
-claude -p "Read HANDOFF.md and answer its questions. Check the claims against this repo and D:\Developer\xcl. Be blunt — the owner wants errors found, not agreement. Do not modify files." --model opus --max-turns 25
+claude -p "Read HANDOFF.md and answer its questions. Check the claims against this repo, D:\Developer\xcl and the fork at D:\Developer\fxceless-victory (git remote triumph, branch triumph/main). Be blunt — the owner wants errors found, not agreement. Do not modify files, and do not build or run xcl or the old layer." --model opus --max-turns 30
 ```
 
 ## The prompt
 
-> Read `HANDOFF.md` in this repository, then read `plan.md`, `thoughts.md`, `tasks.md`,
-> `crates/uma/src/lib.rs`, `crates/uma/src/windows.rs` and `apps/rebuild/src/bin/gputest.rs`.
-> Then read `D:\Developer\xcl` as the reference implementation (`crates/xcl/src/gpu/uma.rs`,
-> `crates/xcl/src/hle/d3d12x/sparse.rs`, `vram.rs`, `console_heap.rs`) and
-> `D:\victory-work\wt-docs\ROADBLOCK.md` for the measured behaviour of the layer being replaced.
+> Read `HANDOFF.md` in this repository, then `plan.md`, `tasks.md`, `progress.md`,
+> `runs/build0a-upload.md` (with its raw output `runs/build0a-upload.txt`), and the code in
+> `crates/uma/src/` (`lib.rs`, `chunks.rs`, `upload.rs`, `windows.rs`) and `apps/rebuild/src/bin/`.
+> You may run `cargo test --release -p rebuild-uma` and `cargo run --release --bin uploadbench -- --quick`.
 >
-> Answer the five questions at the end of `HANDOFF.md`. Verify claims against the code and against the
-> numbers, not against the prose. Say plainly where the documents overstate what is proven. Attack, in
-> particular, the five weak points the author lists — starting with "30 fps at what internal resolution?".
+> Reference material, read as design only: `D:\Developer\xcl` (`crates/xcl/src/hle/d3d12x/sparse.rs`,
+> `vram.rs`, `console_heap.rs`) and the owner's fork of the replaced layer, `D:\Developer\fxceless-victory`,
+> through git without checking out (`git show triumph/main:<path>`): `ROADBLOCK.md`, `CLAUDE.md`,
+> `docs/runs.md`, `docs/gpu-time.md`, `docs/design/recording-cost.md`, `docs/design/tracking-cost.md`,
+> `docs/design/card-budget.md`, `docs/research/resolution.md`, and commit `ee0b94a3`.
 >
-> Be blunt. The owner wants errors found, not agreement. Do not modify any file.
+> Answer the five questions at the end of `HANDOFF.md`. Verify claims against the code and the numbers,
+> not the prose. Check whether the Build 0 (a) benchmark is a fair model of the title before accepting its
+> verdict. Attack the five weak points the author lists, starting with the upscaler route.
+>
+> Be blunt. The owner wants errors found, not agreement. Do not modify any file, and do not build or run
+> xcl or the old layer.
 
 ## What the author expects it to say
 
-Recorded up front so that a review which only repeats this is judged as adding nothing:
+Recorded up front, so that a review which only repeats this is judged as adding nothing:
 
-1. **Internal resolution is unstated.** The sibling layer's "steady 30 fps" does not say at what
-   resolution or FSR level. Our 33.3 ms target may be inheriting an assumption about pixels, not draws.
-2. **The ~45 ms card figure is soft.** It was derived by subtracting an attributed hashing cost from a
-   single "on the GPU" line, never from per-pass timestamps.
-3. **Rewrite versus hybrid is under-priced.** A rewrite re-earns the loader, runtime, descriptor model and
-   shader recompiler; only the memory layer must change.
-4. **The proof is narrower than the architecture.** One buffer, one heap, one dispatch — not tiled
-   placement, not sharing, not a title's real commit pattern.
-5. **`tasks.md` is missing whole surfaces** — console descriptor heaps, the title's own DLLs, audio,
-   input, and the GDK discovery loop.
+1. **Decision 5 needs rewriting.** 0x218 is pipeline creation; the title's FSR must be found by bindings.
+   And with no way yet to lower the internal resolution, the upscaler's gain is unproven.
+2. **The GPU half is probably worse than 45 ms** (43-63 ms in the fork, RT off), so 30 fps depends on 1.
+3. **The upload verdict is conditional.** It holds only with scatter and a frame of overlap, and the
+   benchmark did not measure that overlap, used a default heap rather than tiles, and spawns threads per
+   frame. The ~13-17 ms detection floor competes with the title for 8 cores.
+4. **The 7.4 µs serial budget is the wrong frame.** Translation runs on the title's recording threads,
+   which mostly wait on the title's own scheduler.
+5. **Rewrite versus hybrid is still not costed**, now that the fork translates 100 % of the shader census.
 
-## The one test that settles it
+## The questions only our own code can settle
 
-Run `D:\Developer\xcl` against this same title on this machine and measure it. If it reaches 30 here, the
-target is real and its architecture should be adopted mechanism-for-mechanism. If it does not, the central
-assumption of `plan.md` is wrong and the plan changes before more code is written.
+We do not run the reference layers. Build 0 answers on our code instead:
+
+```
+(a) upload at real volume       done — runs/build0a-upload.md
+(b) per-draw translation cost   todo — the CPU half
+(c) the title's GPU time        todo — per-list timestamps, RT on and off
+```

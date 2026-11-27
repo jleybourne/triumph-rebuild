@@ -2,13 +2,17 @@
 
 **A self rebuild of the compatibility layer for Xbox Series, in my own method, focused on performance.**
 
+[**Progress: `[██░░░░░░░░░░░░░░░░░░]` 8 %**](progress.md) — work toward 30 fps, by build step · no title frame measured yet
+
 A console-to-Windows layer for a current-generation title, built around one decision that the layers it
-learned from make differently: **the title's memory is the GPU's memory.**
+learned from make differently: **GPU-owned memory lives in VRAM at the title's addresses and is never
+copied back; only what the CPU really changed goes up, in 64-byte chunks, off the submit thread.**
 
 ```
 crates/uma        the address space: windows, 64 KiB pages, placement, sharing
 apps/rebuild     the launcher
 apps/gputest      the proof: the GPU writes, the CPU reads, nothing is copied
+apps/uploadbench  Build 0 (a): write-watch + 64 B diff + upload, timed at the old layer's volume
 ```
 
 
@@ -21,7 +25,7 @@ apps/gputest      the proof: the GPU writes, the CPU reads, nothing is copied
 
 success    30+ fps in-world (33.3 ms), measured as fps · ms · draws · dropped
 baseline    131.3 ms · 7.6 fps · ~4,500 draws   (the layer being replaced)
-route       one memory (no mirror) + parallel, cached list translation + the title's own FSR
+route       GPU-owned in VRAM, CPU changes as dirty chunks + parallel list translation + DLSS / FSR
 ```
 
 **"Better than both" is specific, not a slogan.** Where they made a choice that costs frame time we take
@@ -59,6 +63,10 @@ apps/gputest            PROVEN on the development card (RTX 4070 Ti):
 
 apps/gputest --bare     control: a dispatch with no bindings completes, so a device
                         removal is never blamed on the machine
+
+apps/uploadbench        Build 0 (a), runs/build0a-upload.md: 12.64 GB/s over PCIe 3.0;
+                        hash diff + compute scatter on 4 workers: 34 ms at 108 MB all
+                        changed, ~16-30 ms at the title's real shape; 40/40 verified
 ```
 
 ## What is not built yet
