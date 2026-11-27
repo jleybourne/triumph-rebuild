@@ -36,6 +36,8 @@ pub fn install() {
         return;
     };
     ADDRESS.store(a & !7, Ordering::Relaxed);
+    // a hit can land inside the host heap: reports must not allocate (no DbgHelp names for host frames)
+    crate::crash::NO_SYMBOLS.store(true, Ordering::Relaxed);
     unsafe {
         AddVectoredExceptionHandler(1, Some(handler));
     }
