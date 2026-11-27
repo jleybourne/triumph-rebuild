@@ -28,7 +28,7 @@ claude -p "Read HANDOFF.md and answer its questions. Check the claims against th
 > `vram.rs`, `console_heap.rs`) and the owner's fork of the replaced layer, `D:\Developer\fxceless-victory`,
 > through git without checking out (`git show triumph/main:<path>`): `ROADBLOCK.md`, `CLAUDE.md`,
 > `docs/runs.md`, `docs/gpu-time.md`, `docs/design/recording-cost.md`, `docs/design/tracking-cost.md`,
-> `docs/design/card-budget.md`, `docs/research/resolution.md`, and commit `ee0b94a3`.
+> `docs/design/card-budget.md`, `docs/research/resolution.md`, and commit `ee0b94a3` (local branch `dlss-hook`: `git show ee0b94a3`).
 >
 > Answer the five questions at the end of `HANDOFF.md`. Verify claims against the code and the numbers,
 > not the prose. Check whether the Build 0 (a) benchmark is a fair model of the title before accepting its

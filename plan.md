@@ -118,7 +118,7 @@ translated, validated, built as a pipeline, wave32, and matches the oracle.
 
 The previous premise was wrong. Console method 0x218 creates pipelines; it is not an upscale call. Run as
 a Series X, the title never loads the FidelityFX loader. Its FSR is ordinary compute dispatches (fork
-commit `ee0b94a3`). So the layer **recognises the title's temporal upscale pass by its bindings**: the
+commit `ee0b94a3`, local branch `dlss-hook`, not pushed). So the layer **recognises the title's temporal upscale pass by its bindings**: the
 dispatch that writes a colour target at an upscale ratio of the render-size textures it reads. Its inputs
 are what the passes before it read: colour, depth (2560x1440), motion vectors (2560x1440
 R16G16_FLOAT), and jitter and vector scale from its FSR constant block. That pass is replaced by:

@@ -110,7 +110,7 @@ decision 4.
 
 | state | work | closes when |
 |---|---|---|
-| todo | find the title's temporal upscale pass and its inputs **by bindings** — colour, depth (2560x1440), motion vectors (2560x1440 R16G16_FLOAT), jitter and vector scale from its FSR constant block. Method 0x218 is pipeline creation, not an upscale call (fork `ee0b94a3`); plan.md decision 5 needs correcting | inputs logged and visualised for one frame |
+| todo | find the title's temporal upscale pass and its inputs **by bindings** — colour, depth (2560x1440), motion vectors (2560x1440 R16G16_FLOAT), jitter and vector scale from its FSR constant block. Method 0x218 is pipeline creation, not an upscale call (fork `ee0b94a3`, local branch `dlss-hook`); plan.md decision 5 needs correcting | inputs logged and visualised for one frame |
 | todo | a way to lower the internal resolution: resizing the title's targets from the layer made it assert while loading (fork `docs/research/resolution.md`) | internal resolution below 2560x1440 with the title running |
 | todo | DLSS through NVIDIA Streamline | correct picture on the RTX 4070 Ti; internal resolution drops |
 | todo | FSR through the FidelityFX SDK (driver-upgradable to FSR 4) | FSR 3.1 correct on the RTX 4070 Ti beside DLSS |

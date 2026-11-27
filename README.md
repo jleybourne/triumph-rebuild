@@ -5,17 +5,17 @@ built around the right memory model from the first line, aiming at 30 frames a s
 
 <p align="center">
   <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-19%25-yellow?style=for-the-badge"></a>
-  <img alt="frame" src="https://img.shields.io/badge/title%20frame-not%20yet-lightgrey?style=for-the-badge">
-  <img alt="shaders" src="https://img.shields.io/badge/shaders-0%20%2F%2025%2C694-lightgrey?style=for-the-badge">
-  <img alt="target" src="https://img.shields.io/badge/target-30%20fps-blue?style=for-the-badge">
+  <a href="progress.md"><img alt="frame" src="https://img.shields.io/badge/title%20frame-not%20yet-lightgrey?style=for-the-badge"></a>
+  <a href="tasks.md"><img alt="shaders" src="https://img.shields.io/badge/shaders-0%20%2F%2025%2C694-lightgrey?style=for-the-badge"></a>
+  <a href="plan.md"><img alt="target" src="https://img.shields.io/badge/target-30%20fps-blue?style=for-the-badge"></a>
 </p>
 
 <p align="center">
-  <img alt="Rust" src="https://img.shields.io/badge/Rust-1.100-000000?logo=rust">
-  <img alt="Direct3D 12" src="https://img.shields.io/badge/Direct3D-12-0078D4">
-  <img alt="GPU" src="https://img.shields.io/badge/tested%20on-RTX%204070%20Ti-76B900?logo=nvidia">
-  <img alt="tests" src="https://img.shields.io/badge/tests-26%20green-brightgreen">
-  <img alt="licence" src="https://img.shields.io/badge/licence-GPL--3.0--only-blue">
+  <a href="https://www.rust-lang.org"><img alt="Rust" src="https://img.shields.io/badge/Rust-1.100-000000?logo=rust"></a>
+  <a href="https://learn.microsoft.com/windows/win32/direct3d12/directx-12-programming-guide"><img alt="Direct3D 12" src="https://img.shields.io/badge/Direct3D-12-0078D4"></a>
+  <a href="HANDOFF.md"><img alt="GPU" src="https://img.shields.io/badge/tested%20on-RTX%204070%20Ti-76B900?logo=nvidia"></a>
+  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-27%20green-brightgreen"></a>
+  <a href="LICENSE"><img alt="licence" src="https://img.shields.io/badge/licence-GPL--3.0--only-blue"></a>
 </p>
 
 <p align="center"><a href="progress.md"><b>Progress <code>[████░░░░░░░░░░░░░░░░]</code> 19 %</b></a><br>
@@ -26,7 +26,7 @@ built around the right memory model from the first line, aiming at 30 frames a s
     <td align="center"><a href="progress.md"><b>📈 Progress</b></a><br><sub>done, not done, one entry per upload</sub></td>
     <td align="center"><a href="plan.md"><b>🗺️ The plan</b></a><br><sub>six decisions, Builds 0-9</sub></td>
     <td align="center"><a href="tasks.md"><b>✅ Tasks</b></a><br><sub>every task and the number that closes it</sub></td>
-    <td align="center"><a href="runs/"><b>📊 Runs</b></a><br><sub>every measurement, raw output beside it</sub></td>
+    <td align="center"><a href="runs/README.md"><b>📊 Runs</b></a><br><sub>every measurement, raw output beside it</sub></td>
     <td align="center"><a href="HANDOFF.md"><b>🔍 Review brief</b></a><br><sub>for an independent reviewer</sub></td>
     <td align="center"><a href="thoughts.md"><b>💭 Thoughts</b></a><br><sub>the first reasoning</sub></td>
   </tr>
@@ -57,7 +57,7 @@ Measured on one machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB RAM, PCIe 3.0, Win
 | **Descriptors** | ✅ 12,027 a frame from a dirty list: 2.0 ms | no scan |
 | **Shaders** | 0 / 25,694; our own core, designed for GPU time (the fork translates all 25,694) | 25,694, wave32, 0 refused |
 | **Upscaler** | not started; plan corrected (the title's upscale pass is found by bindings) | DLSS on NVIDIA, FSR on AMD |
-| **Tests** | 26 green (`crates/uma` 21, `crates/xlist` 5) | |
+| **Tests** | 27 green (`crates/uma` 22, `crates/xlist` 5) | |
 
 Every result is reported as **fps · ms · draws · dropped** together, with resolution and upscaler mode.
 A faster frame that draws less of the scene is not a win.
@@ -92,7 +92,7 @@ what that means       the copies exist because the layer gives the title plain C
 The layer has to give the GPU the title's memory **from the first allocation**. In the old tree that is a
 retrofit into the allocator, the guard bookkeeping and the shadows all at once, and its own attempt failed
 for exactly that reason: "0 regions placed", because the title's heap arrives page by page
-(`ROADBLOCK.md` in the fork). Changing the memory model changes everything built on it, so we rebuild
+([`ROADBLOCK.md`](https://github.com/jleybourne/Triumph/blob/main/ROADBLOCK.md) in the fork). Changing the memory model changes everything built on it, so we rebuild
 around the right model instead of retrofitting the old one.
 
 **Why not take the sibling layer (xcl) as it is:** its licence is GPL-2.0 and ours is GPL-3.0-only, and
@@ -138,14 +138,14 @@ Full status with outcomes: **[tasks](tasks.md)** · **[progress](progress.md)**.
 - **The upload must be a scatter, not copies.** One `CopyBufferRegion` per changed range took 146 ms just to
   record at 440k ranges.
 - **The title's FSR isn't an API call.** Method 0x218 creates pipelines; the upscale passes are ordinary
-  dispatches found by their bindings (fork commit `ee0b94a3`). Plan decision 5 needs rewriting.
+  dispatches found by their bindings (fork commit `ee0b94a3`, on its local `dlss-hook` branch, not pushed). Plan decision 5 is corrected.
 
 ## ▶️ Running it
 
 Requirements: Windows 10/11 x64, a Direct3D 12 GPU with tiled resources tier 2 or higher, and Rust.
 
 ```powershell
-cargo test --release                                  # 26 tests, no GPU or game data needed
+cargo test --release                                  # 27 tests, no GPU or game data needed
 cargo run --release --bin gputest                     # the GPU writes, the CPU reads, no copy
 cargo run --release --bin gputest -- --bare           # control: never blame the machine
 cargo run --release --bin gputest -- --tiled          # Build 1: tiles, console addresses, sharing
@@ -173,7 +173,7 @@ runs/             every measurement: a write-up and the raw output beside it
   always together.
 - **One change per run.** Batches cannot be attributed, and they have already cost a night.
 - **No claiming a mechanism works until a test or a run shows it.** Proofs are binaries, not paragraphs.
-- **Read other layers for design, never for code.** The trees this learns from carry other licences.
+- **Read other layers for design, never for code.** The trees this learns from carry other licences. The one exception is decode code that carries no performance, vendored with credit.
 - **Every upload updates [progress](progress.md)** with its own bar and notes.
 
 ## 📚 Documentation
@@ -183,6 +183,6 @@ runs/             every measurement: a write-up and the raw output beside it
 | 📈 | [Progress](progress.md) | done / not done, % by build step, the shader bar, one entry per upload |
 | 🗺️ | [Plan](plan.md) | the six decisions, the build order, what we refuse to build |
 | ✅ | [Tasks](tasks.md) | every task with the number that closes it; known traps from the fork |
-| 📊 | [Runs](runs/) | Build 0 (a) upload, Build 0 (b) translation, Build 1 tiles |
+| 📊 | [Runs](runs/README.md) | Build 0 (a) upload, Build 0 (b) translation, Build 1 tiles |
 | 🔍 | [Handoff](HANDOFF.md) · [Review prompt](REVIEW-PROMPT.md) | the brief for an independent review |
 | 💭 | [Thoughts](thoughts.md) | the first reasoning, before the plan's corrections |

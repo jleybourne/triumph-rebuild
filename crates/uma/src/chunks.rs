@@ -100,9 +100,24 @@ pub fn diff_hash(page: &[u8], sent: &mut [u64], offset: usize, out: &mut Vec<Run
     }
 }
 
+std::thread_local! {
+    static SUBMIT_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mark the calling thread as the submit thread: from now on, copying title memory on it is a bug,
+/// and it panics if it happens (one thread-local read per gather; kept in every build).
+pub fn mark_submit_thread() {
+    SUBMIT_THREAD.with(|f| f.set(true));
+}
+
+pub fn is_submit_thread() -> bool {
+    SUBMIT_THREAD.with(|f| f.get())
+}
+
 /// Copy every run's bytes out of `region` into `dst`, packed back to back. Returns the bytes
-/// written. `dst` must hold at least the sum of the run lengths.
+/// written. `dst` must hold at least the sum of the run lengths. Never on the submit thread.
 pub fn gather(region: &[u8], runs: &[Run], dst: &mut [u8]) -> usize {
+    assert!(!is_submit_thread(), "title memory copied on the submit thread");
     let mut at = 0;
     for run in runs {
         dst[at..at + run.len].copy_from_slice(&region[run.offset..run.offset + run.len]);
@@ -217,6 +232,14 @@ mod tests {
         let mut idx = vec![0u32; 3];
         assert_eq!(chunk_indices(&runs, &mut idx), 3);
         assert_eq!(idx, vec![1, 64, 65]);
+    }
+
+    #[test]
+    #[should_panic(expected = "title memory copied on the submit thread")]
+    fn the_submit_thread_never_copies_title_memory() {
+        mark_submit_thread();
+        let region = vec![0u8; 128];
+        gather(&region, &[Run { offset: 0, len: 64 }], &mut [0u8; 64]);
     }
 
     #[test]

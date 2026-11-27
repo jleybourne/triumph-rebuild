@@ -100,7 +100,7 @@ descriptor sync  203,127 slots examined to mirror 12,027 records
 
 1. **Decision 5's premise is wrong.** Method 0x218 creates compute pipelines from shader containers; it is
    not an upscale call with inputs. Run as a Series X, the title never loads the FidelityFX loader. Its FSR
-   is ordinary compute dispatches, which must be recognised by their bindings (fork commit `ee0b94a3`).
+   is ordinary compute dispatches, which must be recognised by their bindings (fork commit `ee0b94a3`, local branch `dlss-hook`, not pushed to GitHub).
 2. **No known way to lower the internal resolution.** The scene is 2560x1440 at `fsrQuality` 3 and 4 alike.
    Resizing the title's targets from the layer made it assert at load (fork `docs/research/resolution.md`).
 3. **The ~45 ms title GPU figure is low.** The fork's per-list timestamps give 43-63 ms, with RT lighting off.
