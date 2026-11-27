@@ -17,6 +17,7 @@ use windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY;
 use windows::Win32::Graphics::Direct3D12::*;
 
 use super::alloc::{self, AllocatorState};
+use super::indirect;
 use super::slots::{self, Fp};
 use super::{Backend, HeapBinding, Header, LabelValue, LabelWrite, ListHost, MemoryRange, MemoryWait, Raw, UserMap, UserSource, WaitAction, CONSOLE_RTV_INCREMENT, TITLE_BYTES, USER_DWORDS};
 
@@ -1085,23 +1086,68 @@ unsafe extern "system" fn dispatch_mesh(this: Raw, x: u32, y: u32, z: u32) {
 
 /// 0x1e8 ExecuteIndirect `(signature, max count, args, args offset, count buffer, count offset)`.
 unsafe extern "system" fn execute_indirect(this: Raw, signature: Raw, max: u32, args: Raw, args_offset: u64, count: Raw, count_offset: u64) {
+    use std::sync::atomic::Ordering::Relaxed;
     let s = enter(this);
+    INDIRECT[indirect::CALLS].fetch_add(1, Relaxed);
     if s.sh.pso_missing || skip::on(skip::INDIRECT) {
         s.stats.skipped += 1;
+        INDIRECT[indirect::NO_PIPELINE].fetch_add(1, Relaxed);
         return;
     }
-    if !s.bind_library(s.sh.pso_side) {
+    let Some(host) = s.host.command_signature(signature) else {
+        s.stats.refused += 1;
+        // which pipeline side such a signature runs with (a console-only argument type: dispatch or mesh?)
+        INDIRECT_REFUSED[s.sh.pso_side.min(1)].fetch_add(1, Relaxed);
+        return;
+    };
+    let shape = host.shape;
+    INDIRECT[usize::from(shape.work.min(5))].fetch_add(1, Relaxed);
+    // the side its work runs on must be the bound pipeline's (one pipeline state on the host)
+    let Some(k) = shape.side().filter(|&k| k == s.sh.pso_side) else {
+        s.stats.refused += 1;
+        INDIRECT[indirect::SIDE].fetch_add(1, Relaxed);
+        return;
+    };
+    if k == 0 && s.topology_mismatch() {
         s.stats.skipped += 1;
         return;
     }
-    s.work();
-    s.stats.draws += 1;
-    let Some(sig) = s.host.command_signature(signature) else {
+    // console GPU addresses in the arguments: the host would read them as its own
+    if shape.buffer_views {
         s.stats.refused += 1;
-        // which pipeline side such a signature runs with (a console-only argument type: dispatch or mesh?)
-        INDIRECT_REFUSED[s.sh.pso_side.min(1)].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        INDIRECT[indirect::BUFFER_VIEWS].fetch_add(1, Relaxed);
         return;
+    }
+    // a signature that changes root parameters runs only under the root they belong to
+    let mut library_stages = 0;
+    let sig = if !shape.changes_root() {
+        host.signature
+    } else if let Some(map) = s.sh.user[k] {
+        // the library root is bound: the arguments rewritten into its user-data constants
+        match s.host.library_signature(signature, s.sh.root[k], map) {
+            Some(l) => {
+                INDIRECT[indirect::MAPPED].fetch_add(1, Relaxed);
+                library_stages = l.stages;
+                l.signature
+            }
+            None => {
+                s.stats.refused += 1;
+                INDIRECT[indirect::UNMAPPABLE].fetch_add(1, Relaxed);
+                return;
+            }
+        }
+    } else if shape.root_views || host.root.is_null() || host.root != s.sh.root[k] {
+        // the title's layout, but a root view is a console address, or another root is bound
+        s.stats.refused += 1;
+        INDIRECT[indirect::WRONG_ROOT].fetch_add(1, Relaxed);
+        return;
+    } else {
+        host.signature
     };
+    if !s.bind_library(k) {
+        s.stats.skipped += 1;
+        return;
+    }
     let Some(a) = s.resource(args) else {
         s.stats.refused += 1;
         return;
@@ -1118,7 +1164,16 @@ unsafe extern "system" fn execute_indirect(this: Raw, signature: Raw, max: u32, 
             }
         }
     };
+    s.work();
+    s.stats.draws += 1;
     call!(s.ExecuteIndirect(sig, max.min(skip::MAX_INDIRECT), a, args_offset, c, count_offset));
+    // the commands left their own words in the stages they wrote: the next direct draw writes the title's again
+    for st in 0..2 {
+        if library_stages >> st & 1 != 0 {
+            s.sh.user_valid[k][st] = false;
+            s.sh.user_dirty[k] = true;
+        }
+    }
 }
 
 unsafe extern "system" fn copy_buffer_region(this: Raw, dst: Raw, dst_offset: u64, src: Raw, src_offset: u64, bytes: u64) {
@@ -1166,6 +1221,10 @@ unsafe extern "system" fn discard(this: Raw, resource: Raw, region: *const D3D12
 }
 
 // ---- fixed-function state ----
+
+/// ExecuteIndirect calls with a host signature: 0-5 by its work argument ([`super::IndirectShape`] `WORK_*`), then
+/// those mapped into the library layout and those refused, at the indices in [`indirect`].
+pub static INDIRECT: [std::sync::atomic::AtomicU64; indirect::COUNTERS] = [const { std::sync::atomic::AtomicU64::new(0) }; indirect::COUNTERS];
 
 /// ExecuteIndirect calls refused for want of a host signature, by the bound pipeline's side (graphics, compute).
 pub static INDIRECT_REFUSED: [std::sync::atomic::AtomicU64; 2] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];

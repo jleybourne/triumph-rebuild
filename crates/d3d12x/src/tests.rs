@@ -1133,6 +1133,7 @@ fn query_heaps_and_command_signatures_are_device_children_with_host_objects() {
     }
     assert_eq!(crate::signature::query_heap_of(q).map(|h| h.desc.Count), Some(4));
     assert_eq!(crate::signature::of(c).map(|s| (s.stride, s.arguments.len())), Some((12, 1)));
+    assert_eq!(crate::signature::of(c).map(|s| (s.shape.side(), s.shape.changes_root(), s.host_root.is_none())), Some((Some(1), false, true)), "a dispatch: no root named");
     assert!(rig.r.host_command_signature(c).is_none());
     assert_eq!((release(q), release(c)), (0, 0));
 

@@ -41,6 +41,11 @@ fn release(obj: Raw) -> u32 {
     unsafe { method::<U0>(obj, 0x10)(obj) }
 }
 
+/// A host signature of one draw-indexed argument (it changes no root argument).
+fn draw_signature(host: Raw) -> HostSignature {
+    HostSignature { signature: host, root: std::ptr::null_mut(), shape: IndirectShape { work: IndirectShape::WORK_DRAW_INDEXED, ..Default::default() } }
+}
+
 #[derive(Default)]
 struct TestHost {
     traps: Mutex<Vec<(&'static str, usize)>>,
@@ -69,8 +74,8 @@ impl ListHost for TestHost {
     fn cpu_descriptor(&self, console: usize) -> Option<usize> {
         (console != 0xBAD).then_some(console + 0x100)
     }
-    fn command_signature(&self, console: Raw) -> Option<Raw> {
-        Some(console)
+    fn command_signature(&self, console: Raw) -> Option<HostSignature> {
+        Some(draw_signature(console))
     }
     fn memory(&self, va: u64) -> Option<MemoryRange> {
         let r = MemoryRange { console: MEM, bytes: 1 << 30, host_va: MEM_HOST, resource: 0x77 as Raw, resource_offset: 0x100 };
@@ -598,6 +603,9 @@ const SEAM_OTHER_GFX: Raw = 0x6B00 as Raw;
 const LIB_GFX_ROOT: Raw = 0x7100 as Raw;
 const LIB_CS_ROOT: Raw = 0x7200 as Raw;
 const TITLE_ROOT: Raw = 0x7300 as Raw;
+const OTHER_TITLE_ROOT: Raw = 0x7400 as Raw;
+/// a pipeline in the title's own layout (no user-data map): the title's root signature is the one bound
+const SEAM_TITLE_GFX: Raw = 0x6D00 as Raw;
 const SEAM_BASE: u64 = 0x1000_0000;
 const SEAM_SAMPLERS: Raw = 0xD100 as Raw;
 const SAMPLER_BASE: u64 = 0x3000_0000;
@@ -606,6 +614,23 @@ const SHADOW: u64 = 0xA_BC00_0000;
 #[derive(Default)]
 struct SeamHost {
     synced: Mutex<Vec<(u64, u64)>>,
+    /// `library_signature` calls: (console signature, root, map)
+    library: Mutex<Vec<(usize, usize, usize)>>,
+}
+
+/// Console command signatures the seam host knows (host signature = console | 1).
+const SIG_DRAW: Raw = 0x5100 as Raw;
+const SIG_CONSTS: Raw = 0x5200 as Raw;
+const SIG_VB: Raw = 0x5300 as Raw;
+const SIG_DISPATCH: Raw = 0x5400 as Raw;
+const SIG_CBV: Raw = 0x5500 as Raw;
+/// `SIG_CONSTS` in the library layout
+const SIG_CONSTS_LIB: Raw = 0x5202 as Raw;
+/// the title root's host object (`SeamHost::root_signature`)
+const TITLE_ROOT_HOST: Raw = 0x7301 as Raw;
+
+fn shape(work: u8, constants: bool, root_views: bool, buffer_views: bool) -> IndirectShape {
+    IndirectShape { work, constants, root_views, buffer_views, other: false }
 }
 
 fn seam_maps() -> (&'static UserMap, &'static UserMap) {
@@ -634,6 +659,7 @@ impl PipelineSource for SeamHost {
         match console {
             SEAM_GFX | SEAM_OTHER_GFX => Some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: LIB_GFX_ROOT, compute: false, user: Some(g), topology: 0 }),
             SEAM_CS => Some(HostPipeline { pso: 0x8000_6C00 as Raw, root_signature: LIB_CS_ROOT, compute: true, user: Some(c), topology: 0 }),
+            SEAM_TITLE_GFX => Some(HostPipeline { pso: 0x8000_6D00 as Raw, root_signature: std::ptr::null_mut(), compute: false, user: None, topology: 0 }),
             _ => None,
         }
     }
@@ -641,7 +667,11 @@ impl PipelineSource for SeamHost {
 
 impl ListHost for SeamHost {
     fn root_signature(&self, console: Raw) -> Option<Raw> {
-        (console == TITLE_ROOT).then_some(0x7301 as Raw)
+        match console {
+            TITLE_ROOT => Some(TITLE_ROOT_HOST),
+            OTHER_TITLE_ROOT => Some(0x7401 as Raw),
+            _ => None,
+        }
     }
     fn resource(&self, console: Raw) -> Option<Raw> {
         Some(console)
@@ -662,6 +692,23 @@ impl ListHost for SeamHost {
     fn sync_descriptors(&self, start: u64, len: u64) -> u32 {
         self.synced.lock().unwrap().push((start, len));
         (len / 32) as u32
+    }
+    fn command_signature(&self, console: Raw) -> Option<HostSignature> {
+        const DI: u8 = IndirectShape::WORK_DRAW_INDEXED;
+        let (shape, root) = match console {
+            SIG_DRAW => (shape(DI, false, false, false), std::ptr::null_mut()),
+            SIG_CONSTS => (shape(DI, true, false, false), TITLE_ROOT_HOST),
+            SIG_VB => (shape(DI, false, false, true), std::ptr::null_mut()),
+            SIG_DISPATCH => (shape(IndirectShape::WORK_DISPATCH, false, false, false), std::ptr::null_mut()),
+            SIG_CBV => (shape(DI, false, true, false), TITLE_ROOT_HOST),
+            _ => return None,
+        };
+        Some(HostSignature { signature: (console as usize | 1) as Raw, root, shape })
+    }
+    fn library_signature(&self, console: Raw, root: Raw, map: &'static UserMap) -> Option<LibrarySignature> {
+        self.library.lock().unwrap().push((console as usize, root as usize, map as *const UserMap as usize));
+        // the constants signature maps (into both stages); the root CBV one is refused here
+        (console == SIG_CONSTS).then_some(LibrarySignature { signature: SIG_CONSTS_LIB, stages: 0b11 })
     }
 }
 
@@ -871,8 +918,8 @@ impl ListHost for BenchHost {
     fn cpu_descriptor(&self, console: usize) -> Option<usize> {
         (console == BENCH_RTV).then_some(self.rtv)
     }
-    fn command_signature(&self, console: Raw) -> Option<Raw> {
-        (console == BENCH_SIGNATURE).then_some(self.indirect as Raw)
+    fn command_signature(&self, console: Raw) -> Option<HostSignature> {
+        (console == BENCH_SIGNATURE).then_some(draw_signature(self.indirect as Raw))
     }
     fn memory(&self, va: u64) -> Option<MemoryRange> {
         self.memory.map(va).map(|_| self.memory)
@@ -923,6 +970,167 @@ unsafe fn record(l: Raw, a: Raw, cmds: &[crate::Cmd], lay: &crate::frame::Layout
         }
         let _ = method::<Hr0>(l, 0x48)(l);
     }
+}
+
+// ---- ExecuteIndirect: a signature runs only under the root it fits ----
+
+fn arg_constant(slot: u32, dest: u32, n: u32) -> D3D12_INDIRECT_ARGUMENT_DESC {
+    D3D12_INDIRECT_ARGUMENT_DESC {
+        Type: D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT,
+        Anonymous: D3D12_INDIRECT_ARGUMENT_DESC_0 {
+            Constant: D3D12_INDIRECT_ARGUMENT_DESC_0_1 { RootParameterIndex: slot, DestOffsetIn32BitValues: dest, Num32BitValuesToSet: n },
+        },
+    }
+}
+
+fn arg_view(t: D3D12_INDIRECT_ARGUMENT_TYPE, slot: u32) -> D3D12_INDIRECT_ARGUMENT_DESC {
+    D3D12_INDIRECT_ARGUMENT_DESC { Type: t, Anonymous: D3D12_INDIRECT_ARGUMENT_DESC_0 { ConstantBufferView: D3D12_INDIRECT_ARGUMENT_DESC_0_0 { RootParameterIndex: slot } } }
+}
+
+fn arg(t: D3D12_INDIRECT_ARGUMENT_TYPE) -> D3D12_INDIRECT_ARGUMENT_DESC {
+    D3D12_INDIRECT_ARGUMENT_DESC { Type: t, ..Default::default() }
+}
+
+/// (type, parameter, offset, count) of each argument.
+fn described(args: &[D3D12_INDIRECT_ARGUMENT_DESC]) -> Vec<(i32, u32, u32, u32)> {
+    args.iter()
+        .map(|a| match a.Type {
+            D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT => {
+                let c = unsafe { a.Anonymous.Constant };
+                (a.Type.0, c.RootParameterIndex, c.DestOffsetIn32BitValues, c.Num32BitValuesToSet)
+            }
+            t => (t.0, 0, 0, 0),
+        })
+        .collect()
+}
+
+#[test]
+fn a_signatures_shape_names_its_work_and_what_it_changes() {
+    use D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH as DISPATCH;
+    use D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED as DRAW_INDEXED;
+    // the title's own: one draw, draw-indexed, dispatch or mesh argument each
+    for (t, work, side) in [
+        (D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, IndirectShape::WORK_DRAW, Some(0)),
+        (DRAW_INDEXED, IndirectShape::WORK_DRAW_INDEXED, Some(0)),
+        (DISPATCH, IndirectShape::WORK_DISPATCH, Some(1)),
+        (D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH, IndirectShape::WORK_MESH, Some(0)),
+    ] {
+        let s = IndirectShape::of(&[arg(t)]);
+        assert_eq!((s.work, s.side(), s.changes_root(), s.buffer_views, s.other), (work, side, false, false, false));
+    }
+    let s = IndirectShape::of(&[arg_constant(3, 0, 2), arg(DRAW_INDEXED)]);
+    assert!(s.constants && s.changes_root() && !s.root_views);
+    let s = IndirectShape::of(&[arg_view(D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW, 1), arg(DISPATCH)]);
+    assert!(s.root_views && s.changes_root());
+    let s = IndirectShape::of(&[arg_view(D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW, 0), arg(DRAW_INDEXED)]);
+    assert!(s.buffer_views && !s.changes_root());
+    // a console-only type (the title's 0x69), work not last, two works: no side to run on
+    let s = IndirectShape::of(&[arg(D3D12_INDIRECT_ARGUMENT_TYPE(0x69))]);
+    assert!(s.other && s.side().is_none());
+    assert_eq!(IndirectShape::of(&[arg(DISPATCH), arg_constant(0, 0, 1)]).side(), None);
+    assert_eq!(IndirectShape::of(&[arg(DISPATCH), arg(DISPATCH)]).side(), None);
+    assert_eq!(IndirectShape::of(&[]).side(), None);
+}
+
+#[test]
+fn root_arguments_are_rewritten_into_the_library_user_data() {
+    use super::indirect::{library_arguments, Unmappable};
+    use D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT as C;
+    use D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED as DRAW_INDEXED;
+    let (gfx, cs) = seam_maps();
+    // the seam's graphics map: VS reads constant 1 of slot 3 at dword 0 and the CBV at slot 2 at dwords 2, 3;
+    // PS reads constant 0 of slot 3 at dword 0 (VS reads 5 dwords, PS 3: spare dwords start at VS 5 and PS 3)
+    let l = library_arguments(&[arg_constant(3, 1, 1), arg_constant(3, 0, 1), arg(DRAW_INDEXED)], gfx).unwrap();
+    assert_eq!(described(&l.arguments), vec![(C.0, 0, 0, 1), (C.0, 1, 0, 1), (DRAW_INDEXED.0, 0, 0, 0)]);
+    assert_eq!(l.stages, 0b11);
+    // the host takes constants in rising (parameter, dword) order only: the PS's dword 0 before the VS's is refused
+    assert_eq!(library_arguments(&[arg_constant(3, 0, 2), arg(DRAW_INDEXED)], gfx).err(), Some(Unmappable::Order));
+    // the root CBV's address: two dwords the VS reads in order, one argument
+    let l = library_arguments(&[arg_view(D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW, 2), arg(DRAW_INDEXED)], gfx).unwrap();
+    assert_eq!(described(&l.arguments), vec![(C.0, 0, 2, 2), (DRAW_INDEXED.0, 0, 0, 0)]);
+    assert_eq!(l.stages, 0b01);
+    // dwords no stage reads still consume their bytes: into spare dwords at or past the last write
+    let l = library_arguments(&[arg_constant(3, 1, 3), arg_constant(9, 0, 3), arg(DRAW_INDEXED)], gfx).unwrap();
+    assert_eq!(described(&l.arguments), vec![(C.0, 0, 0, 1), (C.0, 0, 5, 2), (C.0, 0, 7, 3), (DRAW_INDEXED.0, 0, 0, 0)]);
+    assert_eq!(l.stages, 0b01);
+    // past the VS's spare room: the PS's
+    let l = library_arguments(&[arg_constant(9, 0, 10), arg_constant(9, 0, 4), arg(DRAW_INDEXED)], gfx).unwrap();
+    assert_eq!(described(&l.arguments), vec![(C.0, 0, 5, 10), (C.0, 1, 3, 4), (DRAW_INDEXED.0, 0, 0, 0)]);
+    assert_eq!(l.stages, 0);
+    // compute: constant 0 of slot 1 at dword 5
+    let l = library_arguments(&[arg_constant(1, 0, 1), arg(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH)], cs).unwrap();
+    assert_eq!(described(&l.arguments), vec![(C.0, 0, 5, 1), (D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH.0, 0, 0, 0)]);
+
+    // refused: buffer views (console addresses), no work, a console type
+    assert_eq!(library_arguments(&[arg_view(D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW, 0), arg(DRAW_INDEXED)], gfx).err(), Some(Unmappable::BufferView));
+    assert_eq!(library_arguments(&[arg_constant(3, 0, 1)], gfx).err(), Some(Unmappable::Other));
+    assert_eq!(library_arguments(&[arg(D3D12_INDIRECT_ARGUMENT_TYPE(0x69))], gfx).err(), Some(Unmappable::Other));
+    // a dword both stages read: one argument cannot write two places
+    let mut both = *gfx;
+    both.stages[1].src[1] = UserSource::Constant { slot: 3, dword: 1 };
+    assert_eq!(library_arguments(&[arg_constant(3, 1, 1), arg(DRAW_INDEXED)], &both).err(), Some(Unmappable::ReadTwice));
+    // every dword read: no room for one no stage reads
+    let mut full = *cs;
+    full.stages[0].dwords = USER_DWORDS as u32;
+    assert_eq!(library_arguments(&[arg_constant(9, 0, 1), arg(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH)], &full).err(), Some(Unmappable::NoRoom));
+}
+
+#[test]
+fn execute_indirect_runs_a_signature_only_under_the_root_it_fits() {
+    let h = Arc::new(SeamHost::default());
+    let backend = fake::backend_keeping_words();
+    let a = alloc::create_on(0, backend, h.clone()).unwrap();
+    let l = create_list(0, a, std::ptr::null_mut()).unwrap();
+    let f = fake::host_of(l);
+    let (gfx, _) = seam_maps();
+    let indirect = method::<unsafe extern "system" fn(Raw, Raw, u32, Raw, u64, Raw, u64)>(l, 0x1e8);
+    let ei = |sig: Raw| unsafe { indirect(l, sig, 8, 0xA000 as Raw, 0, std::ptr::null_mut(), 0) };
+    let ran = || (f.count(host::EXECUTE_INDIRECT), f.last(host::EXECUTE_INDIRECT, 0));
+    unsafe {
+        method::<unsafe extern "system" fn(Raw, u32, *const Raw)>(l, 0x100)(l, 1, &HEAP);
+        method::<SetRaw>(l, 0x110)(l, TITLE_ROOT);
+        method::<SetRaw>(l, 0xc8)(l, SEAM_GFX);
+        method::<SetConsts>(l, 0x140)(l, 3, 2, [11u32, 22].as_ptr(), 0);
+    }
+    // a draw-only signature runs under the library root, its user data and shadow table written first
+    ei(SIG_DRAW);
+    assert_eq!(ran(), (1, SIG_DRAW as u64 | 1));
+    assert_eq!(words_since(f, 0).len(), 2, "both stages written before the call");
+    assert_eq!(f.count(host::SET_GRAPHICS_ROOT_SRV), 1);
+    // root constants under the library root: the signature rewritten into its layout
+    ei(SIG_CONSTS);
+    assert_eq!(ran(), (2, SIG_CONSTS_LIB as u64));
+    assert_eq!(h.library.lock().unwrap().clone(), vec![(SIG_CONSTS as usize, LIB_GFX_ROOT as usize, gfx as *const UserMap as usize)]);
+    // its commands left their own words: the next direct draw writes the title's again
+    unsafe { method::<Draw4>(l, 0x60)(l, 3, 1, 0, 0) };
+    assert_eq!(words_since(f, 2), vec![(host::SET_GRAPHICS_ROOT_CONSTANTS, 0, vec![22, 0, 0, 0, 0]), (host::SET_GRAPHICS_ROOT_CONSTANTS, 1, vec![11, 0, 0])]);
+    // refused, never run: a root CBV the library mapping refuses, buffer views, a dispatch under a graphics pipeline
+    for sig in [SIG_CBV, SIG_VB, SIG_DISPATCH, 0x9999 as Raw] {
+        ei(sig);
+        assert_eq!(ran().0, 2, "signature {sig:?} ran");
+    }
+
+    // a pipeline in the title's own layout: its root signature is bound
+    unsafe { method::<SetRaw>(l, 0xc8)(l, SEAM_TITLE_GFX) };
+    unsafe { method::<SetRaw>(l, 0x110)(l, TITLE_ROOT) };
+    assert_eq!(f.last(host::SET_GRAPHICS_ROOT_SIGNATURE, 0), TITLE_ROOT_HOST as u64);
+    // constants in the title's layout under the root they were made against: as they are
+    ei(SIG_CONSTS);
+    assert_eq!(ran(), (3, SIG_CONSTS as u64 | 1));
+    // a root CBV in the title's layout holds a console address: refused
+    ei(SIG_CBV);
+    assert_eq!(ran().0, 3);
+    // another title root bound: the signature's parameters are not its parameters
+    unsafe { method::<SetRaw>(l, 0x110)(l, OTHER_TITLE_ROOT) };
+    ei(SIG_CONSTS);
+    assert_eq!(ran().0, 3);
+    ei(SIG_DRAW);
+    assert_eq!(ran(), (4, SIG_DRAW as u64 | 1));
+    assert_eq!(h.library.lock().unwrap().len(), 2, "the CBV one asked once, refused");
+    let st = rebuild_xlist_stats(l);
+    assert_eq!(st.draws, 5, "four indirect and one direct");
+    assert_eq!(release(l), 0);
+    assert_eq!(release(a), 0);
 }
 
 // ---- on the card (by hand, while agents\MEASURING is absent) ----
