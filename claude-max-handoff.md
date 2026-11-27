@@ -164,3 +164,8 @@ ebuild-oracle (backup in oracle-swapped-backup); `apps/rebuild/src/bin/oracle.rs
   Still running: shader-cf (v1 control flow + 2 translator bugs + sampler sidecar), cmdlist. 360 tests green.
   Open for the owner: D5b needs real BCPack data (capture during a title run, or a helper reads packages read-only).
   Launcher redesign mockups (dark/light, 7 screens + top-bar variant): https://claude.ai/artifact/C4JarmJgfw9jAdFdGnJZLY
+- #25 cmdlist merged: `rebuild_xlist::console::{create_allocator, create_list, segments, host_list, traps}`; the lead
+  implements `ListHost` (pipeline, resource, descriptor_heap, cpu_descriptor, memory; optional label, memory_wait).
+  Submit with segments(l): each segment's waits -> queue Wait on the label fence, then execute. Host resources must
+  start in the state the title believes. 0x4a0 memory belongs to the allocator (freed at allocator Reset).
+  Still running: shader-cf, launcher L6. Next for the lead: the device object + queue + fence + ListHost impl.
