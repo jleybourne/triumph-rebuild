@@ -38,9 +38,9 @@ Stopped, per round 2: loader, vfs, input, upscale, xg (no new work). **dstorage 
 
 | lane | job | branch | worktree | state |
 |:--|:--|:--|:--|:--|
-| **launcher** | L6: top-bar redesign (owner), dark/light, all sections, session diagnostics with retention | `agent/launcher-l6` | `D:\Developer\triumph-rebuild-launcher` | running |
+| **launcher** | L6: top-bar redesign (owner), dark/light, all sections, session diagnostics with retention | `agent/launcher-l6` | `D:\Developer\triumph-rebuild-launcher` | ✅ merged (#28) |
 | **resources** | Build 5: resources, descriptor heaps, views, shadow table, raw buffer mirrors (`crates/d3d12x`) | `agent/resources` | `D:\Developer\triumph-rebuild-resources` | running |
-| **pipelines** | async PSO creation, ID3D12PipelineLibrary cache, prewarm | `agent/pipelines-2` | `D:\Developer\triumph-rebuild-pipelines` | running |
+| **pipelines** | async PSO creation, ID3D12PipelineLibrary cache, prewarm | `agent/pipelines-2` | `D:\Developer\triumph-rebuild-pipelines` | ✅ merged (#27) |
 
 ### Round 1 (all merged by the lead: PRs #1–#13)
 

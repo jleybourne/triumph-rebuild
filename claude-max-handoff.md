@@ -172,3 +172,8 @@ ebuild-oracle (backup in oracle-swapped-backup); `apps/rebuild/src/bin/oracle.rs
 - #26 shader-cf merged: v1 7,402 / 9,128 agnostic compile (runs/build4-v1.md); crates/sir is the lead's again.
   Next shader items: VS s_buffer_load from code-built 64-bit descriptors (638, window addressing), then the list in
   runs/build4-v1.md. Gather4 now guards inactive lanes (lead).
+- #27 pipelines-2 merged (Pool::request/get/wait, PsoCache, prewarm; 12 workers: 1,491 cold PSOs in 0.6 s). #28 launcher
+  L6 merged (top bar, themes, session folders; contract in docs/design/launcher.md "L6 built": REBUILD_SESSION_DIR,
+  frame-line.log `key value | ...` fields fps ms gpu draws dropped upload xlate upscale wait + resolution segment;
+  summary.toml [summary] avg_fps low1_fps frame_ms gpu_ms upload_ms frames seconds measured_from; capture.request).
+  BCPack: decoder bound, capture via REBUILD_BCPACK_CAPTURE (D5b in tasks.md). Running: resources. 406 tests green.
