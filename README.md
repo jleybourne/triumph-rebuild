@@ -228,6 +228,7 @@ runs/             every measurement: a write-up and the raw output beside it
 
 | | page | what it holds |
 |:--:|:--|:--|
+| 🔬 | [Deep dive](deepdive.md) | the whole repository in depth: a title run end to end, every crate and bin, memory, GPU, shaders, env vars, gaps |
 | 📈 | [Progress](progress.md) | done / not done, % by build step, the shader bar, one entry per upload |
 | 🗺️ | [Plan](plan.md) | the six decisions, the build order, what we refuse to build |
 | ✅ | [Tasks](tasks.md) | every task with the number that closes it; known traps from the fork |
