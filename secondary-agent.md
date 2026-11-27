@@ -70,6 +70,12 @@ The title is at `game_dir` in `D:\Developer\fxceless-victory\victory.toml` (shad
 committed code. Treat the game folder as **read-only**: never write into it, and hash it before and after
 a run if your tool opens files there.
 
+**Inspect game files only by one explicit path at a time, never a shell wildcard** (`*`, `?`, `{a,b}`), and only
+with code that opens them read-only (`open(p, 'rb')`, `File::open`). Many tools take a second argument as an
+**output file**: on 2026-11-27 `xxd -l 512 ui/*.ttpf` matched two files and overwrote the second with a hex dump.
+The original had to be re-dumped, which cost the owner four hours. Never run a shell command whose current
+folder is inside the game folder.
+
 ## 5. The lanes
 
 ### Lane `loader` — Build 3, first half: PE loader and the import census

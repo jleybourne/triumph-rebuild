@@ -15,7 +15,7 @@ Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives w
 | **gdk** | GDK runtime behind `xgameruntime.dll` (G1–G4) | `agent/gdk` | `D:\Developer\triumph-rebuild-gdk` | 🔄 started 14:15 | — |
 | **audio** | A5, our own XMA2 decoder | `agent/audio-xma` | `D:\Developer\triumph-rebuild-audio` | 🔄 started 14:15 | — |
 | **files** | F4 CRT file functions, F5 links, WER and vfs gaps | `agent/files-2` | `D:\Developer\triumph-rebuild-files` | 🔄 started 14:15 | — |
-| **shader** | S6, `oraclediff` | `agent/shader-s6` | `D:\Developer\triumph-rebuild-shader` | 🔄 started 14:15 | — |
+| **shader** | S6, `oraclediff` | `agent/shader-s6` | `D:\Developer\triumph-rebuild-shader` | ✅ **S6 closed, PR open**: oracle vs itself 0 diffs over 25,694 (17.8 s, 4 threads); every injected binding, signature and wave-op mutation caught | [#15](https://github.com/jleybourne/triumph-rebuild/pull/15) |
 | **launcher** | U6, Add tile fit; plus the idle fix the owner asked for | `agent/launcher-idle` | `D:\Developer\triumph-rebuild-launcher` | ✅ **done by the coordinator, PR open** | [#14](https://github.com/jleybourne/triumph-rebuild/pull/14) |
 
 Stopped, per round 2: loader, vfs, input, upscale, xg (no new work). **dstorage D5 (BCPack decoder and cache) is run by the lead's own helper agent, not the coordinator**, so it is not tracked here.
@@ -158,6 +158,7 @@ From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f)
 
 | time | event |
 |:--|:--|
+| 14:30 | **shader S6** done: `oraclediff` PR #15 open (0 self-diffs over 25,694; all mutations caught; our own bitcode reader resolves 297,657 `dx.op` calls in a 1-in-50 audit). |
 | 14:22 | Master 927942b: BCPack decided (our own decoder, tables outside git, decode cache) as dstorage D5, **run by the lead's own helper**; the coordinator does not start it. No other new work. |
 | 14:20 | All 13 round-1 PRs merged. Round 2 started: **gdk** (new), **audio** A5, **files** F4–F5, **shader** S6. Launcher U6 and the idle fix done by the coordinator: PR #14. |
 | 14:10 | **launcher** done: PR #13 open. **All 12 helper jobs have handed back**: 4 merged, PRs #5–#13 open for the lead. |
