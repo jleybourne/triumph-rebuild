@@ -175,9 +175,9 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, after merging lane loader (PR #1) and answering the coordinator's items
-progress  33 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
-tests     59 green, 0 warnings: cargo test --release  (uma 24, xlist 5, sir 11, config 6, loader 13)
+updated   2026-11-27, after memory lowering and native f16 in the shader core (section 9 step 2 done)
+progress  34 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
+tests     61 green, 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 13)
 ```
 
 | build | state | where | proof |
@@ -231,7 +231,7 @@ If the owner hands you the whole job, you are the lead. Read `README.md`, `plan.
 | # | step | closes when |
 |:--:|:--|:--|
 | 1 | ✅ `sir`: live-mask analysis (done: 601 GPU runs exact, 182 host branches + 124 predicated) | — |
-| 2 | `sir`: memory lowering to window descriptors (`ResourceDescriptorHeap[windows + (addr >> 32)]`, 32-bit offset, uniform window via `WaveReadLaneFirst`), native 16-bit, quad ops | `sirtest` extended with loads/stores into a tiled window |
+| 2 | ✅ `sir`: memory lowering and native 16-bit (done: 342 loads + 331 stores through tiled windows and 650 half ops exact on the card) | — |
 | 3 | merge lane `shader` (S1-S4), then GFX10 → `sir`: CFG, SSA, structurize; agnostic programs first | census column "emitted"; the shader bar in `progress.md` starts moving |
 | 4 | oracle diff harness against the fork's translations, per hash | programs count toward 25,694 only when they match |
 | 5 | ✅ lane `loader` merged. Build 3's second half: kernel (threads, events, waits, timers, TLS), files with a write overlay, the GDK discovery loop from `agents/loader-imports.csv` **plus every `GetProcAddress` miss** | the title's startup path runs to its first render call |

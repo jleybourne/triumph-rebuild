@@ -113,7 +113,7 @@ load    = ResourceDescriptorHeap[windows + window].Load(offset)
 
 There is no page-directory load, no bounds clamp and no fault store. Unmapped tiles read zero and drop
 writes (tiled resources tier 2+, proven in Build 1). Fork estimate for its current per-access lookup:
-2-5 ms.
+2-5 ms. **Built and proven on the card** (`sirtest`: loads and stores through two tiled windows, exact).
 
 ## Native operations
 

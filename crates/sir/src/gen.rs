@@ -31,6 +31,9 @@ struct Frame {
 pub fn program_with(rng: &mut Rng, len: usize, wave_ops: bool, branches: bool) -> Program {
     let mut p = Program::default();
     let mut outer: Vec<V> = vec![p.push(Op::VInput(0)), p.push(Op::VInput(1)), p.push(Op::SInput(0))];
+    // lane × 4: each lane's own address column; finite half pairs for 16-bit maths
+    let lane4 = p.push(Op::VInput(2));
+    let halves = p.push(Op::VInput(3));
     if wave_ops {
         outer.push(p.push(Op::LaneId));
     }
@@ -84,6 +87,47 @@ pub fn program_with(rng: &mut Rng, len: usize, wave_ops: bool, branches: bool) -
             continue;
         }
         let (a, b, c) = (pick(rng), pick(rng), pick(rng));
+        // memory and 16-bit maths, one in four instructions
+        if rng.below(4) == 0 {
+            let v = match rng.below(4) {
+                0 | 1 => {
+                    // an address in this lane's column of a page: mapped in window 0 (pages 1, 2),
+                    // window 1 (pages 1, 3), or nowhere (page 5); window uniform or varying
+                    let page = [1u32, 2, 3, 5][rng.below(4) as usize];
+                    let off = p.push(Op::Const(page << 16 | (rng.below(64) as u32) << 8));
+                    let lo = p.push(Op::Add(lane4, off));
+                    let hi = match rng.below(3) {
+                        0 => p.push(Op::Const(0)),
+                        1 => p.push(Op::Const(1)),
+                        _ => {
+                            let half = p.push(Op::Const(128));
+                            let below = p.push(Op::Lt(lane4, half)); // lanes 0..31
+                            let (w0, w1) = (p.push(Op::Const(0)), p.push(Op::Const(1)));
+                            p.push(Op::Select(below, w0, w1))
+                        }
+                    };
+                    if rng.below(2) == 0 {
+                        Some(p.push(Op::Load(lo, hi)))
+                    } else {
+                        p.push(Op::Store(lo, hi, a));
+                        None
+                    }
+                }
+                _ => {
+                    let k = p.push(Op::Const([0x3C00_3C00u32, 0xC000_3800, 0x0001_7BFF, 0x8400_0400][rng.below(4) as usize]));
+                    let (x, y) = if rng.below(2) == 0 { (halves, k) } else { (halves, halves) };
+                    Some(p.push(if rng.below(2) == 0 { Op::PkAddF16(x, y) } else { Op::PkMulF16(x, y) }))
+                }
+            };
+            if let Some(v) = v {
+                match frames.last_mut() {
+                    Some(f) if f.in_else => f.else_vals.push(v),
+                    Some(f) => f.then_vals.push(v),
+                    None => outer.push(v),
+                }
+            }
+            continue;
+        }
         let choice = if wave_ops { rng.below(16) } else { [0, 1, 2, 3, 4, 5, 6, 7, 15, 14][rng.below(10) as usize] };
         let op = match choice {
             0 => Op::Const(rng.next() as u32 & 0xFF),
@@ -131,13 +175,31 @@ pub fn exec(rng: &mut Rng) -> u64 {
     .max(1)
 }
 
-pub fn inputs(rng: &mut Rng) -> ([u32; 1], [[u32; 64]; 2]) {
+pub fn inputs(rng: &mut Rng) -> ([u32; 1], [[u32; 64]; 4]) {
     let sin = [rng.next() as u32];
-    let mut vin = [[0u32; 64]; 2];
-    for w in vin.iter_mut() {
+    let mut vin = [[0u32; 64]; 4];
+    for w in vin.iter_mut().take(2) {
         for l in w.iter_mut() {
             *l = rng.next() as u32 & if rng.below(3) == 0 { 0xF } else { u32::MAX };
         }
     }
+    for l in 0..64 {
+        vin[2][l] = l as u32 * 4;
+        // two finite halves (exponent field below 31: no infinities or NaNs in, subnormals included)
+        let h = |r: u64| (r as u16) & 0xBFFF;
+        vin[3][l] = h(rng.next()) as u32 | (h(rng.next()) as u32) << 16;
+    }
     (sin, vin)
+}
+
+/// The pages the tests map: window 0 pages 1 and 2, window 1 pages 1 and 3 (page 5: never), with
+/// random contents. The GPU harness maps the same pages in Build 1's tiles.
+pub const MAPPED: [(u32, u32); 4] = [(0, 1), (0, 2), (1, 1), (1, 3)];
+
+pub fn memory(rng: &mut Rng) -> crate::lanes::Memory {
+    let mut m = crate::lanes::Memory { seed: rng.next(), ..Default::default() };
+    for &(w, page) in &MAPPED {
+        m.pages.insert(((w as u64) << 32 | (page as u64) << 16) >> 16);
+    }
+    m
 }

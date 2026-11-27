@@ -4,18 +4,18 @@ Written and kept current by the session that started the helper agents, for the 
 Not committed by the helpers: this file sits only in the lead's tree, so commit or delete it as you like.
 Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives with its pull request.
 
-**Last updated:** 2026-11-27 13:05 (Adelaide)
+**Last updated:** 2026-11-27 12:55 (Adelaide; earlier log times were estimates, corrected below)
 
 ## Lanes
 
 | lane | build | branch | worktree | state | last reported |
 |:--|:--|:--|:--|:--|:--|
-| **loader** | Build 3, first half (L1–L4) | `agent/loader` | `D:\Developer\triumph-rebuild-loader` | ✅ **L1–L4 closed, PR open** | 12:55 ([#1](https://github.com/jleybourne/triumph-rebuild/pull/1), +3,145 −1, 3 commits) |
-| **shader** | Build 4 front end (S1–S5) | `agent/shader` | `D:\Developer\triumph-rebuild-shader` | 🔄 started 12:40; told of the S2/S4 additions and S5 at 13:05 | nothing yet |
-| **launcher** | the desktop launcher (U1–U5) | `agent/launcher` | `D:\Developer\triumph-rebuild-launcher` | 🔄 started 13:05 | — |
-| **vfs** | overlay file system (V1–V4) | `agent/vfs` | `D:\Developer\triumph-rebuild-vfs` | 🔄 started 13:05 | — |
-| **upscale** | DLSS and FSR backends, standalone (P1–P5) | `agent/upscale` | `D:\Developer\triumph-rebuild-upscale` | 🔄 started 13:05 | — |
-| **input** | controller and keyboard (I1–I3) | `agent/input` | `D:\Developer\triumph-rebuild-input` | 🔄 started 13:05 | — |
+| **loader** | Build 3, first half (L1–L4) | `agent/loader` | `D:\Developer\triumph-rebuild-loader` | ✅ **merged** by the lead ([#1](https://github.com/jleybourne/triumph-rebuild/pull/1), master 7cc1230) | lane finished |
+| **shader** | Build 4 front end (S1–S5) | `agent/shader` | `D:\Developer\triumph-rebuild-shader` | 🔄 S1–S4 committed on its branch (1 commit, "25,694 programs"), working on S5; no PR yet | 13:02 (S1–S4 commit: 25,694 programs, 43.95M instructions) |
+| **launcher** | the desktop launcher (U1–U5) | `agent/launcher` | `D:\Developer\triumph-rebuild-launcher` | 🔄 U1–U5 logic and a first shell committed (22 tests); premium design passes in progress | 13:02 |
+| **vfs** | overlay file system (V1–V4) | `agent/vfs` | `D:\Developer\triumph-rebuild-vfs` | ✅ **V1–V4 closed, PR open** | [#3](https://github.com/jleybourne/triumph-rebuild/pull/3) (2 commits) |
+| **upscale** | DLSS and FSR backends, standalone (P1–P5) | `agent/upscale` | `D:\Developer\triumph-rebuild-upscale` | 🔄 started 12:50 | — |
+| **input** | controller and keyboard (I1–I3) | `agent/input` | `D:\Developer\triumph-rebuild-input` | ✅ **I1–I3 closed, PR open** | [#2](https://github.com/jleybourne/triumph-rebuild/pull/2) (2 commits) |
 
 No lane merges; each opens a PR to `master` titled `agent/<lane>: <what closed>`.
 
@@ -51,16 +51,40 @@ From **loader** (details in `agents/loader.md` on `agent/loader`):
 4. Two build warnings on every build: `crates/uma/src/tileproof.rs:572`, `crates/uma/src/upload.rs:560`.
 5. Shared-file edits to merge: one line in the root `Cargo.toml` members, and `rebuild-loader` added to `apps/rebuild/Cargo.toml`.
 
+From **input** (details in `agents/input.md` on `agent/input`, PR #2):
+9. A poll costs ~170 µs with focus (4 empty XInput slots 64–82 µs median, 244-key scan 103 µs), against the debug menu's 0.3 ms overlay budget. Before L5, poll on its own thread (the fork polls every 8 ms) with the present reading the latest result, or check empty slots ~once a second.
+10. I3 read the census from unmerged `agent/loader` (`46d04f8`), now merged in 7cc1230. The title imports one function from `gameinput.dll`, ordinal #1 (`GameInputCreate`); the rest are methods on returned objects, all tabled. The lane fetched the `agent/loader` ref explicitly in the lead's repo; only the remote-tracking ref changed, nothing was checked out.
+11. Tests with this branch: 59 (43 + 16 new), 1 ignored (the poll-cost measure, run by hand).
+
+From **vfs** (details in `agents/vfs.md` on `agent/vfs`, PR #3):
+13. Hash-before/after checks must read `fs::metadata(path)` per file, not `fs::read_dir` entry times: NTFS updates those lazily, and the first V2 test failed on ~1 ms drift in folders nothing wrote. Applies to launcher U3 and Build 3's "game folder unchanged" check in `tasks.md`.
+14. Runtime wiring: `VfsBuilder::package('G', title_dir, &mods)`, `.writable('T')`, `.writable(<storage letter>)`. The storage path given to the title should be a drive root (it keeps only what precedes the last `:\`).
+15. Decide whether T: starts empty each run; today it persists like storage.
+16. Numbers: 18 tests (workspace 61); 10,000-file bench +3.3 µs/file (+4.5 %) over plain Windows open+read; 0 wrong reads; real game folder hash `c13db2877f6ed4ea` unchanged.
+
 From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f):
 6. Lane `launcher` U5 says "launch the proofs (`gputest --bare`)", but section 2 says helpers never run `gputest`. The launcher lane was told to build U5's launch path against a fake child process in tests, and to run no `gputest` itself. Please say which you meant.
 7. Lane `upscale` P3 needs AMD's FidelityFX SDK. If it isn't already on disk, getting it is a download. The lane was told not to download without your say, and to do P1, P2, P4 and P5 first. For DLSS it was pointed at the Streamline SDK zip already in `D:\tools\dlss\download` (production `bin/x64`, extracted outside git) and the user-supplied `nvngx_dlss.dll` in `D:\tools\dlss`.
 8. Lane `input` I3 reads `agents/loader-imports.csv` from the unmerged `agent/loader` branch (PR #1), and will say so.
 
+12. **Owner request for the launcher (13:00):** "more premium; it's a bit basic". The lane was given a design brief on top of U1–U5, with no rule changes:
+    - a sidebar and cards layout;
+    - a custom dark theme with one accent colour, rounded surfaces and animations;
+    - an embedded open font and icon font, credited;
+    - a Play hero header with a status pill and the last fps;
+    - styled settings, checklist, mod cards and log console;
+    - key art only loaded at run time from the game folder, never in git;
+    - screenshots of every tab saved outside git in `D:ictory-data\launcher-shots\` (GPU only while `MEASURING` is absent).
+
 ## Log
 
 | time | event |
 |:--|:--|
-| 13:05 | `secondary-agent.md` updated by the lead (71a521f): lanes launcher, vfs, upscale and input started; lane shader told of the S2/S4 additions and S5. |
+| 13:05 | **vfs done**: V1–V4 closed, PR #3 open (not merged). |
+| 13:00 | Launcher lane given the owner's premium-design brief. |
+| 13:00 | **input done**: I1–I3 closed, PR #2 open (not merged). |
+| 12:55 | Lead merged PR #1 (lane loader) in 7cc1230, with answers to the coordinator's items. Lane shader has S1–S4 committed and is on S5; lane input has I1–I3 committed; launcher, vfs, upscale writing code. |
+| 12:50 | `secondary-agent.md` updated by the lead (71a521f): lanes launcher, vfs, upscale and input started; lane shader told of the S2/S4 additions and S5. |
 | 12:55 | **loader done**: L1–L4 closed, PR #1 open (not merged). |
 | 12:44 | loader: `crates/loader` and `apps/rebuild/src/bin/imports.rs` written; a first `agents/loader-imports.csv` exists (L3 has run once). shader: `crates/shader` and `census.rs` being written (S1–S2). No commits yet. Both lanes also edited `apps/rebuild/Cargo.toml` (to add their dependency): not reserved, but expect a small merge there. |
 | 12:40 | Both lanes started. The old project's (fxceless-victory) recurring status, sync, continuation and fork-check jobs were cancelled; no further work on it. |

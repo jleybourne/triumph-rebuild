@@ -61,6 +61,15 @@ pub enum Op {
     EndIf,
     /// after an `EndIf`: per lane, cond != 0 ? then-value : else-value (the SSA merge)
     Phi(V, V, V),
+    /// the u32 at console address (hi << 32 | lo); `hi` is the 4 GiB window, `lo` the offset in it.
+    /// An unmapped page reads zero (tiled resources, Build 1).
+    Load(V, V),
+    /// store a value at (lo, hi) in active lanes only; a store into an unmapped page is dropped
+    Store(V, V, V),
+    /// two IEEE half-precision lanes packed in a u32 (lo bits 0-15, hi 16-31): add, rounded to nearest even
+    PkAddF16(V, V),
+    /// packed half-precision multiply
+    PkMulF16(V, V),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -81,7 +90,8 @@ impl Program {
         match *op {
             Const(_) | SInput(_) | VInput(_) | LaneId | Else | EndIf => vec![],
             If(c) => vec![c],
-            Add(a, b) | Mul(a, b) | And(a, b) | Or(a, b) | Xor(a, b) | Shr(a, b) | Lt(a, b) => vec![a, b],
+            Add(a, b) | Mul(a, b) | And(a, b) | Or(a, b) | Xor(a, b) | Shr(a, b) | Lt(a, b) | Load(a, b) | PkAddF16(a, b) | PkMulF16(a, b) => vec![a, b],
+            Store(a, b, c) => vec![a, b, c],
             Select(c, a, b) | Phi(c, a, b) => vec![c, a, b],
             WaveSum(a) | WaveMin(a) | BallotLo(a) | BallotHi(a) | ReadLane(a, _) | ReadFirstLane(a) | Swizzle(a, _) => vec![a],
         }

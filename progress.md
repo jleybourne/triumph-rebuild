@@ -22,13 +22,13 @@ second row and is the number that counts.
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
 | 3 | PE loader + console runtime | 15 | 30 % | 4.5 | PE loader, map-at-base and the title's import census done (lane `loader`, PR #1 merged); kernel, files and the discovery loop todo |
-| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 20 % | 3.0 | IR, classifier, lane model, control flow with live masks, and HLSL → DXC emission all proven on the card; decoder in lane `shader` |
+| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 25 % | 3.75 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; decoder in lane `shader` |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 0 % | 0 | plan corrected: the upscale pass is found by bindings; lowering the internal resolution is its own task |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **33.3 ≈ 33 %** | |
+| | **total** | **100** | | **34.05 ≈ 34 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -81,6 +81,26 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Shader core: memory through the tiled windows and native half precision, exact on the card
+
+```
+[███████░░░░░░░░░░░░░]  34 %   (was 33 %: +0.75 Build 4 memory and f16)
+shaders     0 / 25,694
+measured fps   none yet
+```
+
+- **Built:** `Load` / `Store` at console addresses and packed half-precision ops in `sir`, with a memory model
+  in both interpreters (unmapped tiles read 0 and drop writes). Memory lowers to `ResourceDescriptorHeap[window]`
+  plus a 32-bit offset: uniform windows through `WaveReadLaneFirst`, no page directory, no clamp. Half
+  precision lowers to native `float16_t2`. Region masks are now kept in both modes, so stores are always
+  masked.
+- **Measured:** 50,000 programs bit-exact between the interpreters, outputs and memory. On the card, against
+  two real Build 1 tiled windows: 600 runs, 342 loads + 331 stores + 650 half ops, every output lane and
+  every word of the 4 mapped pages exact. [`runs/build4-sirtest.md`](runs/build4-sirtest.md)
+- **This removes the fork's per-access page lookup** (its estimate: 2-5 ms of GPU time) and its f16 widening
+  (1-3 ms), by construction.
+- **Next:** section 9, step 3 waits for lane `shader`. Meanwhile, Build 3's second half: the console runtime.
 
 ### 2026-11-27 — Lane `loader` merged: the PE loader and the title's import census
 

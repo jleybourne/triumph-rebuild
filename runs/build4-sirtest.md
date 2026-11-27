@@ -35,6 +35,31 @@ Before the GPU, the interpreters agreed bit for bit on **100,000 random branched
 was fixed on the way: a `ReadFirstLane` with no lane active reads lane 0. Hardware never runs it, but both
 sides must agree. DXC's HLSL 2021 needs `and()` for `bool2` EXEC masks, not `&&`.
 
+## Then: memory through the windows, and native half precision (`runs/build4-sirtest-memory.txt`)
+
+The IR gained `Load` / `Store` at console addresses and packed half-precision add and multiply. Both
+interpreters gained a memory model with Build 1's semantics: unmapped pages read zero and drop writes, and
+stores happen in active lanes only. The emitter lowers memory to `ResourceDescriptorHeap[window]` at a
+32-bit offset: `WaveReadLaneFirst` for a wave-uniform window, `NonUniformResourceIndex` otherwise, with no
+page directory and no clamp. Half precision lowers to native `float16_t2`. Region masks are now kept in
+both modes, so stores are masked even under host branches.
+
+The GPU harness runs against **two real tiled windows** from Build 1, with pages (0,1) (0,2) (1,1) (1,3)
+mapped and page 5 never mapped. It uploads the starting contents, runs, and compares every output lane and
+every word of the four pages:
+
+```
+ran       200 agnostic + 400 doubled
+branches  191 host branches · 110 predicated
+ops       342 loads, 331 stores through the windows (mapped and unmapped pages, uniform and varying windows) · 650 packed half-precision ops
+PROVEN    every lane of every output and every word of the 4 mapped pages match the 64-lane console interpreter, on the card
+PROVEN    console addresses are window offsets: no page directory; unmapped tiles read 0 and drop writes
+PROVEN    native half precision (float16_t) matches round-to-nearest-even bit for bit
+```
+
+Before the GPU: 50,000 random programs with memory and half precision, bit-exact between the interpreters
+(outputs and memory), plus a round-to-nearest-even test over every finite half.
+
 ## Verdict
 
 - **The whole path works end to end:** IR, emission, DXC, a pipeline, the GPU, and an exact comparison. Agnostic

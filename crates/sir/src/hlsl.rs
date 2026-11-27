@@ -31,7 +31,8 @@ pub enum Lowering {
     Predicated,
 }
 
-pub const VIN: usize = 2;
+/// varying inputs: 0-1 random, 2 = lane × 4 (a per-lane address offset), 3 = finite half pairs
+pub const VIN: usize = 4;
 
 pub fn sin_offset() -> usize {
     VIN * 64 * 4
@@ -64,66 +65,70 @@ pub fn emit(p: &Program, mode: Mode) -> String {
     let pad = |n: usize| "    ".repeat(n);
     // the current EXEC expression (doubled mode), and the stack of (outer EXEC, region lowering)
     let mut exec = String::from("e");
-    let mut stack: Vec<(String, Lowering)> = Vec::new();
+    let mut stack: Vec<(String, Lowering, String, bool, crate::V)> = Vec::new();
     let mut masks = 0usize;
 
     for (i, op) in p.insts.iter().enumerate() {
         let v = |x: crate::V| format!("v{}", x.0);
         match *op {
             Op::If(c) => {
-                let (r, low) = by_at(i).unwrap();
-                let _ = r;
+                let (_, low) = by_at(i).unwrap();
                 let uni = uniform[c.0 as usize];
-                stack.push((exec.clone(), low));
-                match (mode, low) {
-                    (Mode::Agnostic, Lowering::HostBranch) => {
-                        body.push_str(&format!("{}if ({} != 0u) {{\n", pad(indent), v(c)));
-                        indent += 1;
-                    }
-                    (Mode::Agnostic, Lowering::Predicated) => {}
-                    (Mode::Doubled, Lowering::HostBranch) => {
-                        let test = if uni { format!("{}.x != 0u", v(c)) } else { format!("any({} != 0u)", v(c)) };
-                        body.push_str(&format!("{}if ({test}) {{\n", pad(indent)));
-                        indent += 1;
-                    }
-                    (Mode::Doubled, Lowering::Predicated) => {
-                        masks += 1;
-                        let m = format!("e{masks}");
-                        body.push_str(&format!("{}bool2 {m} = and({exec}, {} != 0u);\n", pad(indent), v(c)));
-                        exec = m;
-                    }
+                // both parts' EXEC, made here while the condition is at hand; kept in both modes so
+                // that stores are always masked, whether or not the region is a host branch
+                masks += 1;
+                let (et, ef) = (format!("e{masks}t"), format!("e{masks}f"));
+                match mode {
+                    Mode::Agnostic => body.push_str(&format!(
+                        "{p}bool {et} = {exec} && ({c} != 0u);
+{p}bool {ef} = {exec} && ({c} == 0u);
+",
+                        p = pad(indent),
+                        c = v(c)
+                    )),
+                    Mode::Doubled => body.push_str(&format!(
+                        "{p}bool2 {et} = and({exec}, {c} != 0u);
+{p}bool2 {ef} = and({exec}, {c} == 0u);
+",
+                        p = pad(indent),
+                        c = v(c)
+                    )),
                 }
+                stack.push((exec.clone(), low, ef, uni, c));
+                if low == Lowering::HostBranch {
+                    let test = match (mode, uni) {
+                        (Mode::Agnostic, _) => format!("{} != 0u", v(c)),
+                        (Mode::Doubled, true) => format!("{}.x != 0u", v(c)),
+                        (Mode::Doubled, false) => format!("any({} != 0u)", v(c)),
+                    };
+                    body.push_str(&format!("{}if ({test}) {{
+", pad(indent)));
+                    indent += 1;
+                }
+                exec = et;
                 continue;
             }
             Op::Else => {
-                let (outer, low) = stack.last().cloned().unwrap();
-                let (r, _) = by_at(i).unwrap();
-                let c = r.cond;
-                let uni = uniform[c.0 as usize];
-                match (mode, low) {
-                    (Mode::Agnostic, Lowering::HostBranch) => body.push_str(&format!("{}}} else {{\n", pad(indent - 1))),
-                    (Mode::Agnostic, Lowering::Predicated) => {}
-                    (Mode::Doubled, Lowering::HostBranch) => {
-                        if uni {
-                            body.push_str(&format!("{}}} else {{\n", pad(indent - 1)));
-                        } else {
-                            body.push_str(&format!("{}}}\n{}if (any({} == 0u)) {{\n", pad(indent - 1), pad(indent - 1), v(c)));
-                        }
-                    }
-                    (Mode::Doubled, Lowering::Predicated) => {
-                        masks += 1;
-                        let m = format!("e{masks}");
-                        body.push_str(&format!("{}bool2 {m} = and({outer}, {} == 0u);\n", pad(indent), v(c)));
-                        exec = m;
+                let (_, low, ef, uni, c) = stack.last().cloned().unwrap();
+                if low == Lowering::HostBranch {
+                    if mode == Mode::Agnostic || uni {
+                        body.push_str(&format!("{}}} else {{
+", pad(indent - 1)));
+                    } else {
+                        body.push_str(&format!("{}}}
+{}if (any({} == 0u)) {{
+", pad(indent - 1), pad(indent - 1), v(c)));
                     }
                 }
+                exec = ef;
                 continue;
             }
             Op::EndIf => {
-                let (outer, low) = stack.pop().unwrap();
+                let (outer, low, ..) = stack.pop().unwrap();
                 if low == Lowering::HostBranch {
                     indent -= 1;
-                    body.push_str(&format!("{}}}\n", pad(indent)));
+                    body.push_str(&format!("{}}}
+", pad(indent)));
                 }
                 exec = outer;
                 continue;
@@ -158,7 +163,6 @@ pub fn emit(p: &Program, mode: Mode) -> String {
                 3 => format!("QuadReadAcrossDiagonal({})", v(a)),
                 _ => v(a), // uniform operand: every lane holds the same value
             },
-            (Mode::Agnostic, op) => panic!("{op:?} is wave-wide; classify the program first"),
             (Mode::Doubled, Op::WaveSum(a)) => format!("WaveActiveSum(({e}.x ? {a}.x : 0u) + ({e}.y ? {a}.y : 0u)).xx", a = v(a)),
             (Mode::Doubled, Op::WaveMin(a)) => format!("WaveActiveMin(min({e}.x ? {a}.x : 0xFFFFFFFFu, {e}.y ? {a}.y : 0xFFFFFFFFu)).xx", a = v(a)),
             (Mode::Doubled, Op::BallotLo(a)) => format!("WaveActiveBallot({e}.x && {}.x != 0u).xx", v(a)),
@@ -174,6 +178,33 @@ pub fn emit(p: &Program, mode: Mode) -> String {
                 let (from_lo, from_hi) = if flip { ("y", "x") } else { ("x", "y") };
                 format!("uint2(WaveReadLaneAt({a}.{from_lo}, h ^ {xm}u), WaveReadLaneAt({a}.{from_hi}, h ^ {xm}u))", a = v(a))
             }
+            (Mode::Agnostic, Op::Load(lo, hi)) => format!("{}({}, {})", if uniform[hi.0 as usize] { "ldu" } else { "ld" }, v(lo), v(hi)),
+            (Mode::Doubled, Op::Load(lo, hi)) => {
+                let f = if uniform[hi.0 as usize] { "ldu" } else { "ld" };
+                format!("uint2({f}({lo}.x, {hi}.x), {f}({lo}.y, {hi}.y))", lo = v(lo), hi = v(hi))
+            }
+            (Mode::Agnostic, Op::Store(lo, hi, x)) => {
+                body.push_str(&format!("{}if ({e}) st({}, {}, {});
+", pad(indent), v(lo), v(hi), v(x)));
+                continue;
+            }
+            (Mode::Doubled, Op::Store(lo, hi, x)) => {
+                body.push_str(&format!(
+                    "{p}if ({e}.x) st({lo}.x, {hi}.x, {x}.x);
+{p}if ({e}.y) st({lo}.y, {hi}.y, {x}.y);
+",
+                    p = pad(indent),
+                    lo = v(lo),
+                    hi = v(hi),
+                    x = v(x)
+                ));
+                continue;
+            }
+            (Mode::Agnostic, Op::PkAddF16(a, b)) => format!("pkf16({}, {}, false)", v(a), v(b)),
+            (Mode::Agnostic, Op::PkMulF16(a, b)) => format!("pkf16({}, {}, true)", v(a), v(b)),
+            (Mode::Doubled, Op::PkAddF16(a, b)) => format!("uint2(pkf16({a}.x, {b}.x, false), pkf16({a}.y, {b}.y, false))", a = v(a), b = v(b)),
+            (Mode::Doubled, Op::PkMulF16(a, b)) => format!("uint2(pkf16({a}.x, {b}.x, true), pkf16({a}.y, {b}.y, true))", a = v(a), b = v(b)),
+            (Mode::Agnostic, op) => panic!("{op:?} is wave-wide; classify the program first"),
             (_, Op::If(_) | Op::Else | Op::EndIf) => unreachable!(),
         };
         body.push_str(&format!("{}v{i} = {rhs};\n", pad(indent)));
@@ -187,8 +218,36 @@ pub fn emit(p: &Program, mode: Mode) -> String {
             "uint2 rfl(uint2 a, bool2 e) {\n    uint bl = WaveActiveBallot(e.x).x;\n    uint bh = WaveActiveBallot(e.y).x;\n    uint r = bl != 0u ? WaveReadLaneAt(a.x, firstbitlow(bl)) : (bh != 0u ? WaveReadLaneAt(a.y, firstbitlow(bh)) : WaveReadLaneAt(a.x, 0u));\n    return r.xx;\n}\n",
         );
     }
+    if p.insts.iter().any(|o| matches!(o, Op::Load(..) | Op::Store(..))) {
+        // console memory: the window is a bindless raw buffer at heap slot `hi`; the offset is 32 bits.
+        // A wave-uniform window reads its descriptor once (WaveReadLaneFirst); a varying one is
+        // NonUniformResourceIndex. No page directory, no clamp: an unmapped tile reads 0, drops writes.
+        s.push_str(concat!(
+            "uint ld(uint lo, uint hi) { RWByteAddressBuffer w = ResourceDescriptorHeap[NonUniformResourceIndex(hi)]; return w.Load(lo & ~3u); }\n",
+            "uint ldu(uint lo, uint hi) { RWByteAddressBuffer w = ResourceDescriptorHeap[WaveReadLaneFirst(hi)]; return w.Load(lo & ~3u); }\n",
+            "void st(uint lo, uint hi, uint x) { RWByteAddressBuffer w = ResourceDescriptorHeap[NonUniformResourceIndex(hi)]; w.Store(lo & ~3u, x); }\n",
+        ));
+    }
+    if p.insts.iter().any(|o| matches!(o, Op::PkAddF16(..) | Op::PkMulF16(..))) {
+        // native half precision: two float16_t lanes in a u32, round to nearest even
+        s.push_str(concat!(
+            "uint pkf16(uint a, uint b, bool mul) {\n",
+            "    float16_t2 x = asfloat16(uint16_t2(uint16_t(a & 0xFFFFu), uint16_t(a >> 16)));\n",
+            "    float16_t2 y = asfloat16(uint16_t2(uint16_t(b & 0xFFFFu), uint16_t(b >> 16)));\n",
+            "    uint16_t2 r = asuint16(mul ? x * y : x + y);\n",
+            "    return uint(r.x) | (uint(r.y) << 16);\n",
+            "}\n",
+        ));
+    }
     match mode {
-        Mode::Agnostic => s.push_str("[numthreads(64, 1, 1)] [WaveSize(32)]\nvoid main(uint l : SV_GroupIndex) {\n"),
+        Mode::Agnostic => {
+            s.push_str("[numthreads(64, 1, 1)] [WaveSize(32)]\nvoid main(uint l : SV_GroupIndex) {\n");
+            s.push_str(&format!(
+                "    bool e = (((l < 32u) ? In.Load({lo}) : In.Load({hi})) >> (l & 31u)) & 1u;\n",
+                lo = exec_offset(),
+                hi = exec_offset() + 4
+            ));
+        }
         Mode::Doubled => {
             s.push_str("[numthreads(32, 1, 1)] [WaveSize(32)]\nvoid main(uint h : SV_GroupIndex) {\n");
             s.push_str(&format!(
@@ -200,7 +259,7 @@ pub fn emit(p: &Program, mode: Mode) -> String {
     }
     // every value declared up front, so values flow out of branches into phis
     for (i, op) in p.insts.iter().enumerate() {
-        if !matches!(op, Op::If(_) | Op::Else | Op::EndIf) {
+        if !matches!(op, Op::If(_) | Op::Else | Op::EndIf | Op::Store(..)) {
             s.push_str(&format!("    {t} v{i} = ({t})0;\n"));
         }
     }
@@ -264,7 +323,7 @@ mod tests {
         assert_eq!(plan(&branchy(true, true))[0].1, Lowering::HostBranch, "uniform condition");
         assert_eq!(plan(&branchy(true, false))[0].1, Lowering::Predicated, "wave op under a varying condition");
         let h = emit(&branchy(true, false), Mode::Doubled);
-        assert!(h.contains("bool2 e1 = and(e, v0 != 0u);") && h.contains("e1.x ? v0.x"), "{h}");
+        assert!(h.contains("bool2 e1t = and(e, v0 != 0u);") && h.contains("e1t.x ? v0.x"), "{h}");
         assert!(!h.contains("if ("), "a predicated region has no host branch:\n{h}");
     }
 }
