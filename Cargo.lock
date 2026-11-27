@@ -24,9 +24,14 @@ dependencies = [
 name = "rebuild"
 version = "0.1.0"
 dependencies = [
+ "rebuild-loader",
  "rebuild-uma",
  "rebuild-xlist",
 ]
+
+[[package]]
+name = "rebuild-loader"
+version = "0.1.0"
 
 [[package]]
 name = "rebuild-sir"
