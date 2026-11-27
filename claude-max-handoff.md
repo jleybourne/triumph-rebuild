@@ -86,6 +86,8 @@ The owner's rules, in their own words:
    - `crates/config`: keep explicit values and unknown keys, add `schema`, the launcher's registry entries
      (`secondary-agent.md` §10)
 4. Merge round-2 helper PRs as they arrive (gdk, audio A5, files F4-F5, shader S6, launcher U6) and bind them.
+   `dstorage` D5 (BCPack decoder, tables outside git, decode cache; owner-approved) runs as the lead's own
+   background agent in `D:\Developer\triumph-rebuild-dstorage`, branch `agent/dstorage-bcpack`; it opens a PR.
 
 ## Open threads
 

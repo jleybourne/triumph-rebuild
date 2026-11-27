@@ -227,8 +227,8 @@ New crate `crates/input` (package `rebuild-input`). No GPU.
 
 ### Round 2 (2026-11-27, the second lead session)
 
-Every round-1 lane has handed back and is merged. Lanes `loader`, `vfs`, `input`, `upscale`, `dstorage` and `xg`
-have no new work: stop them. The rules of sections 1-4 are unchanged. Each task ends in a test or a number.
+Every round-1 lane has handed back and is merged. Lanes `loader`, `vfs`, `input`, `upscale` and `xg`
+have no new work: stop them. `dstorage` D5 is run by the lead's own helper agent, not the coordinator. The rules of sections 1-4 are unchanged. Each task ends in a test or a number.
 
 #### New lane `gdk` — the GDK runtime behind `xgameruntime.dll` (Build 3 piece)
 
@@ -263,6 +263,17 @@ what the title's startup waits on.
 | # | task | closes when |
 |:--:|:--|:--|
 | S6 | `oraclediff`: given our DXIL for a hash and the oracle's (`D:\victory-data\rebuild-oracle`), compare what must match: input and output signatures, resource bindings and spaces, thread-group size, wave-size attribute, and a per-category instruction histogram (memory, wave ops, control flow). Report per hash to a CSV outside git. **No GPU**: the lead adds the execution check | the oracle against itself gives 0 diffs over 25,694; injected mutations (a binding moved, a signature element dropped, a wave op removed) are each caught |
+
+#### Lane `dstorage` — D5, BCPack (owner-approved 2026-11-27)
+
+The owner approved: our own decoder, the ~78 KB format tables loaded at run time from a file **outside git**, and a
+cache of decoded output so each texture is decoded once. `agents/dstorage.md` D4 is the background.
+
+| # | task | closes when |
+|:--:|:--|:--|
+| D5a | load the tables from the path in `REBUILD_BCPACK_TABLES` (the lead adds the registry entry `dstorage.bcpack_tables`); a missing or wrong-sized file keeps BCPack refused with a clear log line, never a crash. Record where the file comes from and its SHA-256 in `agents/dstorage.md`; never commit it | tests with synthetic tables; the real file's hash recorded |
+| D5b | **our own decoder** behind the `BcPack` trait: rANS lanes, models, back references, dictionaries, endpoint and index residuals, BC1/3/4/5/6H/7. The fork's `bcpack.rs` is a design reference (read, don't copy). Output stays in the console's tiled layout | on the title's real BCPack requests (read at test time, nothing committed), output equals the fork's decoder block for block, and **every difference is explained** (the fork's BC3/5/7 paths are suspects for red-block artefacts); MB/s per thread per format, aiming above the fork's 33-66 |
+| D5c | **the decode cache**: decoded output in `%LOCALAPPDATA%\triumph-rebuild\bcpack-cache`, keyed by a hash of the compressed bytes and the format, written atomically, read back on the next request instead of decoding; a size cap with oldest-first eviction | tests: hit, miss, a corrupted or partial entry ignored and rebuilt; the hit-path MB/s against decode MB/s |
 
 #### Lane `launcher` — U6
 
@@ -368,8 +379,8 @@ If the owner hands you the whole job, you are the lead. **Start with [`claude-ma
 **2026-11-27, second lead session, to items 26-62** (`agents/secondary-agents-updates.md`). PRs #5-#13 are all merged.
 
 - `dstorage` 26-27: agreed. The lead binds `DStorageGetFactory` and writes `Pages` over `runtime::physical` with a
-  retry for pages the title hasn't made yet. 28, BCPack: **an owner decision**, as the lane said. Until then
-  `E_NOTIMPL`, counted.
+  retry for pages the title hasn't made yet. 28, BCPack: **the owner decided** (D5): our own decoder, tables
+  from a file outside git, and a decode cache.
 - `loader` 30-32: agreed. `GetProcAddress` answers by name for `xgameruntime` (6), `gameplatformservices` (3),
   `WinHttpWebSocket*` (6) and `icu` (14). A load of `amd_fidelityfx_framegeneration_xbox.dll` fails cleanly. The GDK
   areas behind `QueryApiImpl` are the new lane `gdk`.

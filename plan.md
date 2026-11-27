@@ -154,6 +154,15 @@ Unknown keys are reported, and bad values are refused with their reason. This re
 untyped environment variables. Mods are folders layered by the overlay file system; the game folder is
 never written. Design: [`docs/design/launcher.md`](docs/design/launcher.md).
 
+### 8. Streamed textures: BCPack decoded once, then cached (owner-approved, 2026-11-27)
+
+BCPack is the console's lossless repacking of BCn texture blocks. The fork's CPU decoder ran 33-66 MB/s a thread,
+6-12x slower than zlib, so decoding on every load would make it the main CPU cost of streaming. The output is
+deterministic, so **each texture is decoded once, by our own decoder on DirectStorage's worker threads, and the
+result is cached on disk** (outside git). Later loads are plain reads at disk speed, straight into the
+GPU-owned tiles of decision 1. The ~78 KB format tables are loaded at run time from a file outside git. A GPU
+decoder for cache misses is built only if the frame line shows first-load stutter.
+
 ## Order of work — each step ends in a number
 
 | # | build | done when |
