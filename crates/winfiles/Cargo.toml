@@ -7,5 +7,3 @@ version.workspace = true
 [dependencies]
 rebuild-vfs = { path = "../vfs" }
 
-[dev-dependencies]
-rebuild-runtime = { path = "../runtime" }

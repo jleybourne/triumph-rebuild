@@ -6,6 +6,11 @@ version.workspace = true
 
 [dependencies]
 rebuild-loader = { path = "../loader" }
+rebuild-vfs = { path = "../vfs" }
+rebuild-winfiles = { path = "../winfiles" }
+rebuild-audio = { path = "../audio" }
+rebuild-dstorage = { path = "../dstorage" }
+rebuild-xg = { path = "../xg" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Threading", "Win32_Security"] }

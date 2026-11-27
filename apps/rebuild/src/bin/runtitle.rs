@@ -7,11 +7,21 @@
 //! The run stops at `D3D12XboxCreateDevice` (the first render call), or after `--seconds N` (default 60),
 //! and prints the discovery list: every unbuilt import the title called, in first-call order. The game
 //! folder is only read; prepared copies go to %LOCALAPPDATA%\triumph-rebuild\images.
+//!
+//! While it waits, a sampler stops the title's main thread every `--sample N` seconds (default 2) and prints
+//! its stack as image+rva, so a title that waits shows where. At the end, every thread is sampled once.
+//! File and DirectStorage calls go through the drives (`rebuild_runtime::drives`): G: the title's folder,
+//! read-only; T: emptied at start; S: storage, kept.
+
+#[path = "../sampler.rs"]
+mod sampler;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+use std::os::windows::io::AsRawHandle;
 
 use rebuild_runtime::exports::{on_create_device, set_alloc_hooks, set_command_line};
 use rebuild_runtime::modules::misses;
@@ -21,6 +31,13 @@ fn report(started: Instant) {
     println!("discovery ({:.1} s in): unbuilt imports the title called, first-call order", started.elapsed().as_secs_f64());
     for (dll, name, n) in trap_hits() {
         println!("  {n:>6}×  {dll}!{name}");
+    }
+    let d = rebuild_winfiles::discoveries();
+    if !d.is_empty() {
+        println!("paths the drives don't know: {}", d.len());
+        for x in d.iter().take(40) {
+            println!("          {x:?}");
+        }
     }
     let m = misses();
     if !m.is_empty() {
@@ -66,6 +83,7 @@ fn dependency_order(images: &[Loaded]) -> Vec<usize> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let run = args.iter().any(|a| a == "--run");
+    let every: u64 = args.iter().position(|a| a == "--sample").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(2);
     let seconds: u64 = args.iter().position(|a| a == "--seconds").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(60);
     let Some(dir) = std::env::var_os("REBUILD_GAME_DIR").map(PathBuf::from) else {
         println!("FAILED    set REBUILD_GAME_DIR to the title's folder (it is only read)");
@@ -93,6 +111,13 @@ fn main() {
         return;
     }
 
+    match rebuild_runtime::drives::install(&rebuild_runtime::drives::Drives::new(&dir)) {
+        Ok(_) => println!("drives    G: the title's folder (read-only), T: emptied, S: storage; files and DirectStorage on them"),
+        Err(e) => {
+            println!("FAILED    {e}");
+            std::process::exit(1);
+        }
+    }
     set_command_line(&format!(r"G:\{}", exe.name));
     // the title's own allocator for XMemAlloc, if its exe exports one
     if let Some(e) = exe.image.exports.iter().find(|e| e.name.as_deref() == Some("__XMemAllocationHooks__")) {
@@ -129,7 +154,7 @@ fn main() {
     let stack = (exe.image.stack_reserve as usize).max(8 << 20);
     let (tx, rx) = mpsc::channel();
     println!("entry     the exe's entry point on a {} MiB stack; waiting up to {seconds} s for the first render call", stack >> 20);
-    std::thread::Builder::new()
+    let main_thread = std::thread::Builder::new()
         .name("title-main".into())
         .stack_size(stack)
         .spawn(move || {
@@ -138,9 +163,47 @@ fn main() {
             let _ = tx.send(code);
         })
         .expect("title thread");
-    match rx.recv_timeout(Duration::from_secs(seconds)) {
-        Ok(code) => println!("EXITED    the title's entry returned {code:#x} before a render call"),
-        Err(_) => println!("TIMEOUT   no render call within {seconds} s"),
+    let images: Vec<(String, u64, u64)> = title.images.iter().map(|l| (l.name.clone(), l.base, l.image.size_of_image as u64)).collect();
+    let handle = windows::Win32::Foundation::HANDLE(main_thread.as_raw_handle());
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let mut last: Vec<u64> = Vec::new();
+    let outcome = loop {
+        let wait = Duration::from_secs(every).min(deadline.saturating_duration_since(Instant::now()));
+        match rx.recv_timeout(wait) {
+            Ok(code) => break Some(code),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break None,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if Instant::now() >= deadline {
+            break None;
+        }
+        if let Some(s) = sampler::sample(handle) {
+            let frames = s.frames[..s.len].to_vec();
+            let t = unsafe { STARTED }.unwrap().elapsed().as_secs_f64();
+            if frames == last {
+                println!("sample    {t:>5.1} s  title-main: same stack");
+            } else {
+                println!("sample    {t:>5.1} s  title-main:");
+                for a in &frames {
+                    println!("            {}", sampler::name(*a, &images));
+                }
+                last = frames;
+            }
+        }
+    };
+    match outcome {
+        Some(code) => println!("EXITED    the title's entry returned {code:#x} before a render call"),
+        None => println!("TIMEOUT   no render call within {seconds} s"),
+    }
+    println!("threads   every thread of the process, innermost frames first:");
+    for (id, h) in sampler::threads() {
+        if let Some(s) = sampler::sample(h) {
+            let top: Vec<String> = s.frames[..s.len.min(8)].iter().map(|a| sampler::name(*a, &images)).collect();
+            println!("  {id:>6}  {}", top.join("  <  "));
+        }
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(h);
+        }
     }
     report(unsafe { STARTED }.unwrap());
     std::process::exit(0);

@@ -14,12 +14,16 @@
 //! ```
 
 #[cfg(windows)]
+pub mod drives;
+#[cfg(windows)]
 pub mod exports;
 #[cfg(windows)]
 pub mod modules;
 pub mod physical;
 #[cfg(windows)]
 pub mod title;
+#[cfg(windows)]
+pub mod xg;
 pub mod xmem;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -72,6 +76,12 @@ pub const OVERRIDES: &[(&str, &str)] = &[
     ("GetDiskFreeSpaceExW", "files"),
     ("GetCurrentDirectoryW", "files"),
     ("SetCurrentDirectoryW", "files"),
+    // search handles are ours (directories span overlay, mods and base); the host's would get console paths
+    ("FindNextFileW", "files"),
+    ("FindNextFileA", "files"),
+    ("FindClose", "files"),
+    ("SetFileAttributesW", "files"),
+    ("GetTempPathW", "files"),
     // modules: the title's own DLLs, and every miss is a discovery entry
     ("GetProcAddress", "modules"),
     ("LoadLibraryExW", "modules"),

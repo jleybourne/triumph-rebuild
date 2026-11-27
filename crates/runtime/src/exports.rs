@@ -106,6 +106,11 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     f(s)
 }
 
+/// A live physical frame's 64 KiB, by frame number (DirectStorage page destinations write here).
+pub fn frame_ptr(frame: usize) -> Option<*mut u8> {
+    with(|s| s.physical.frame_ptr(frame))
+}
+
 /// Graphics regions committed so far (for the tiles and the upload ring to register).
 pub fn graphics_regions() -> Vec<Region> {
     with(|s| s.xmem.graphics().copied().collect())
@@ -322,7 +327,8 @@ pub fn override_export(name: &str) -> Option<u64> {
         "VirtualFree" => VirtualFree as *const (),
         "GetCommandLineA" => GetCommandLineA as *const (),
         "GetCommandLineW" => GetCommandLineW as *const (),
-        _ => return None,
+        // files: console drives through the overlay file system (lane `files`, PR #12)
+        other => return rebuild_winfiles::override_export(other),
     };
     Some(f as usize as u64)
 }
@@ -371,8 +377,15 @@ pub fn console_export(dll: &str, name: &str) -> Option<u64> {
             _ => None,
         };
     }
-    if !dll.eq_ignore_ascii_case("xmem.dll") {
-        return None;
+    let lower = dll.to_ascii_lowercase();
+    match lower.as_str() {
+        "xmem.dll" => {}
+        "acphal.dll" | "xapu.dll" | "chad.dll" => return audio_export(&lower, name),
+        "xcrdapi.dll" => {
+            return (name == "DStorageGetFactory").then(|| rebuild_dstorage::DStorageGetFactory as *const () as usize as u64)
+        }
+        "xg_xs.dll" => return crate::xg::export(name),
+        _ => return None,
     }
     let f: usize = match name {
         "XMemVirtualAlloc" => XMemVirtualAlloc as *const () as usize,
@@ -393,9 +406,61 @@ pub fn console_export(dll: &str, name: &str) -> Option<u64> {
     Some(f as u64)
 }
 
+/// The 19 audio functions (lane `audio`, PR #11), by the DLL the title imports them from.
+fn audio_export(dll: &str, name: &str) -> Option<u64> {
+    use rebuild_audio::{acp, heap, xapu, xdsp};
+    let f: *const () = match (dll, name) {
+        ("acphal.dll", "AcpHalCreate") => acp::AcpHalCreate as *const (),
+        ("acphal.dll", "AcpHalAllocateShapeContexts") => acp::AcpHalAllocateShapeContexts as *const (),
+        ("acphal.dll", "AcpHalReleaseShapeContexts") => acp::AcpHalReleaseShapeContexts as *const (),
+        ("acphal.dll", "ApuAlloc") => heap::ApuAlloc as *const (),
+        ("acphal.dll", "ApuFree") => heap::ApuFree as *const (),
+        ("acphal.dll", "ApuCreateHeap") => heap::ApuCreateHeap as *const (),
+        ("acphal.dll", "ApuIsVirtualAddressValid") => heap::ApuIsVirtualAddressValid as *const (),
+        ("acphal.dll", "ApuMapApuAddress") => heap::ApuMapApuAddress as *const (),
+        ("acphal.dll", "ApuMapVirtualAddress") => heap::ApuMapVirtualAddress as *const (),
+        ("xapu.dll", "XApuConnect") => xapu::XApuConnect as *const (),
+        ("xapu.dll", "XApuDisconnect") => xapu::XApuDisconnect as *const (),
+        ("xapu.dll", "XApuEnqueueCommand") => xapu::XApuEnqueueCommand as *const (),
+        ("xapu.dll", "XApuDequeueResult") => xapu::XApuDequeueResult as *const (),
+        ("xapu.dll", "XApuGetResultCount") => xapu::XApuGetResultCount as *const (),
+        ("chad.dll", "XDspActivate") => xdsp::XDspActivate as *const (),
+        ("chad.dll", "XDspDeactivate") => xdsp::XDspDeactivate as *const (),
+        ("chad.dll", "XDspConnectWithMaximumStreamLimit") => xdsp::XDspConnectWithMaximumStreamLimit as *const (),
+        ("chad.dll", "XDspDisconnect") => xdsp::XDspDisconnect as *const (),
+        ("chad.dll", "XDspSubmitCommand") => xdsp::XDspSubmitCommand as *const (),
+        _ => return None,
+    };
+    Some(f as usize as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_merged_lanes_bind_audio_19_dstorage_1_xg_2_files_27() {
+        let audio = [
+            ("acphal.dll", "AcpHalCreate"), ("acphal.dll", "AcpHalAllocateShapeContexts"), ("acphal.dll", "AcpHalReleaseShapeContexts"),
+            ("acphal.dll", "ApuAlloc"), ("acphal.dll", "ApuFree"), ("acphal.dll", "ApuCreateHeap"), ("acphal.dll", "ApuIsVirtualAddressValid"),
+            ("acphal.dll", "ApuMapApuAddress"), ("acphal.dll", "ApuMapVirtualAddress"), ("xapu.dll", "XApuConnect"), ("xapu.dll", "XApuDisconnect"),
+            ("xapu.dll", "XApuEnqueueCommand"), ("xapu.dll", "XApuDequeueResult"), ("xapu.dll", "XApuGetResultCount"), ("chad.dll", "XDspActivate"),
+            ("chad.dll", "XDspDeactivate"), ("chad.dll", "XDspConnectWithMaximumStreamLimit"), ("chad.dll", "XDspDisconnect"), ("chad.dll", "XDspSubmitCommand"),
+        ];
+        for (d, n) in audio {
+            assert!(console_export(d, n).is_some(), "{d}!{n}");
+        }
+        assert!(console_export("XCRDAPI.dll", "DStorageGetFactory").is_some());
+        assert!(console_export("xg_xs.dll", "XGCreateTextureComputer").is_some());
+        assert!(console_export("xg_xs.dll", "XGSuggestSwizzleMode").is_some());
+        assert!(console_export("chad.dll", "XApuConnect").is_none(), "by the DLL it lives in");
+        // every files override is in the runtime's list, and binds to ours
+        let files: Vec<&str> = crate::OVERRIDES.iter().filter(|(_, w)| *w == "files").map(|(f, _)| *f).collect();
+        assert_eq!(files, rebuild_winfiles::FUNCTIONS, "the runtime's files list is the files crate's, in order");
+        for f in files {
+            assert_eq!(crate::modules::override_export(f), rebuild_winfiles::override_export(f), "{f}");
+        }
+    }
 
     #[test]
     fn all_13_xmem_imports_bind() {

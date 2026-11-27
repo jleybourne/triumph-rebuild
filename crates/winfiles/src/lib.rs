@@ -95,14 +95,15 @@ pub const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x4;
 
 /// The file system the overrides use: the drives, and the title's current directory (a console path).
 pub struct Files {
-    vfs: Vfs,
+    vfs: Arc<Vfs>,
     cwd: Mutex<String>,
 }
 
 impl Files {
     /// `cwd` is the title's starting directory, a console path such as `G:\`.
-    pub fn new(vfs: Vfs, cwd: &str) -> Files {
-        Files { vfs, cwd: Mutex::new(cwd.to_owned()) }
+    /// `vfs` may be shared (an `Arc`) with DirectStorage, so both see one overlay.
+    pub fn new(vfs: impl Into<Arc<Vfs>>, cwd: &str) -> Files {
+        Files { vfs: vfs.into(), cwd: Mutex::new(cwd.to_owned()) }
     }
 
     pub fn vfs(&self) -> &Vfs {
@@ -755,8 +756,8 @@ pub unsafe extern "system" fn GetTempPathW(len: u32, buf: *mut u16) -> u32 {
 
 // ---- binding --------------------------------------------------------------------------------------------
 
-/// Every function this crate implements, by the name the title imports. The first 22 are the
-/// `files` entries of `crates/runtime` `OVERRIDES`; the last five are proposed additions.
+/// Every function this crate implements, by the name the title imports: the `files` entries of
+/// `crates/runtime` `OVERRIDES`, in order (checked there).
 pub const FUNCTIONS: &[&str] = &[
     "CreateFileW",
     "CreateFile2",

@@ -4,22 +4,25 @@ Written and kept current by the session that started the helper agents, for the 
 Not committed by the helpers: this file sits only in the lead's tree, so commit or delete it as you like.
 Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives with its pull request.
 
-**Last updated:** 2026-11-27 12:55 (Adelaide; earlier log times were estimates, corrected below)
+**Last updated:** 2026-11-27 14:20 (Adelaide)
 
 ## Lanes
 
-| lane | build | branch | worktree | state | last reported |
+### Round 2 (from 2026-11-27 14:15)
+
+| lane | job | branch | worktree | state | last reported |
 |:--|:--|:--|:--|:--|:--|
-| **loader** | Build 3a (L1–L4), then L5 | `agent/loader` | `D:\Developer\triumph-rebuild-loader` | ✅ L1–L4 **merged** (#1); ✅ L5 **PR open** | [#7](https://github.com/jleybourne/triumph-rebuild/pull/7) |
-| **shader** | Build 4 front end (S1–S5) | `agent/shader`, `agent/shader-s5` | `D:\Developer\triumph-rebuild-shader` | ✅ **S1–S5 closed**: PR [#5](https://github.com/jleybourne/triumph-rebuild/pull/5) (S1–S4), PR [#10](https://github.com/jleybourne/triumph-rebuild/pull/10) (S5, stacked on #5: **merge #5 first**) | lane finished |
-| **launcher** | Triumph Launcher (U1–U5, library, per-game settings) | `agent/launcher` | `D:\Developer\triumph-rebuild-launcher` | ✅ **PR open** after 4 design passes (pass-4 screenshots in `D:\victory-data\launcher-shots\pass-4\`); 156 workspace tests | [#13](https://github.com/jleybourne/triumph-rebuild/pull/13) |
-| **vfs** | overlay file system (V1–V4) | `agent/vfs` | `D:\Developer\triumph-rebuild-vfs` | ✅ **merged** by the lead | [#3](https://github.com/jleybourne/triumph-rebuild/pull/3) (2 commits) |
-| **upscale** | DLSS and FSR backends, standalone (P1–P5) | `agent/upscale` → `agent/upscale-fsr` | `D:\Developer\triumph-rebuild-upscale` | ✅ P1, P2, P4, P5 **merged** (#4); ✅ **P3 FSR 3.1.6 done, PR open** | [#8](https://github.com/jleybourne/triumph-rebuild/pull/8) |
-| **input** | controller and keyboard (I1–I3) | `agent/input` | `D:\Developer\triumph-rebuild-input` | ✅ **merged** by the lead | [#2](https://github.com/jleybourne/triumph-rebuild/pull/2) (2 commits) |
-| **audio** | console audio hardware (A1–A4) | `agent/audio` | `D:\Developer\triumph-rebuild-audio` | ✅ **A1, A2, A4 closed; A3 closed apart from the XMA frame decoder** (owner/lead decision) | [#11](https://github.com/jleybourne/triumph-rebuild/pull/11) |
-| **dstorage** | DirectStorage (D1–D4) | `agent/dstorage` | `D:\Developer\triumph-rebuild-dstorage` | ✅ **D1–D3 closed; D4 answered (no decoder: owner decision)**, PR open | [#6](https://github.com/jleybourne/triumph-rebuild/pull/6) |
-| **files** | the file overrides (F1–F3) | `agent/files` | `D:\Developer\triumph-rebuild-files` | ✅ **F1–F3 closed, PR open** | [#12](https://github.com/jleybourne/triumph-rebuild/pull/12) |
-| **xg** | console texture layout (X1–X4) | `agent/xg` | `D:\Developer\triumph-rebuild-xg` | ✅ **X1–X4 closed, PR open** | [#9](https://github.com/jleybourne/triumph-rebuild/pull/9) (2 commits) |
+| **gdk** | GDK runtime behind `xgameruntime.dll` (G1–G4) | `agent/gdk` | `D:\Developer\triumph-rebuild-gdk` | 🔄 started 14:15 | — |
+| **audio** | A5, our own XMA2 decoder | `agent/audio-xma` | `D:\Developer\triumph-rebuild-audio` | 🔄 started 14:15 | — |
+| **files** | F4 CRT file functions, F5 links, WER and vfs gaps | `agent/files-2` | `D:\Developer\triumph-rebuild-files` | 🔄 started 14:15 | — |
+| **shader** | S6, `oraclediff` | `agent/shader-s6` | `D:\Developer\triumph-rebuild-shader` | 🔄 started 14:15 | — |
+| **launcher** | U6, Add tile fit; plus the idle fix the owner asked for | `agent/launcher-idle` | `D:\Developer\triumph-rebuild-launcher` | ✅ **done by the coordinator, PR open** | [#14](https://github.com/jleybourne/triumph-rebuild/pull/14) |
+
+Stopped, per round 2: loader, vfs, input, upscale, xg (no new work). **dstorage D5 (BCPack decoder and cache) is run by the lead's own helper agent, not the coordinator**, so it is not tracked here.
+
+### Round 1 (all merged by the lead: PRs #1–#13)
+
+loader #1 + L5 #7 · input #2 · vfs #3 · upscale DLSS #4 + FSR #8 · shader S1–S4 #5 + S5 #10 · dstorage #6 · xg #9 · audio #11 · files #12 · launcher #13.
 
 No lane merges; each opens a PR to `master` titled `agent/<lane>: <what closed>`.
 
@@ -134,6 +137,9 @@ From **launcher** (details in the PR #13 body and `agents/launcher.md`):
 61. Proposed registry entries: `title.settings_source` (the title's `settings.xml` lives in its storage folder, not the game folder), `diagnostics.frame_log_path` (today `REBUILD_FRAME_LOG`), a per-setting `settings.xml` element name, and help text for `display.height` and `display.window`; plus supported titles listed in config rather than code.
 62. Smaller: `rebuild.exe` ignores `--config` until C2; the VRAM check uses a provisional 8 GiB until the owner sets the minimum spec; `crates/config/src/lib.rs:349` checks the same thing twice. System check on this PC: 8/8 pass (RTX 4070 Ti, driver 610.88, 11.7 GiB, tiled tier 4, SM 6.8, GPU upload heaps, DXC 10.0.26100).
 
+From the **coordinator** (launcher follow-up, PR #14):
+63. **The launcher was not idle**: it requested a frame every 16 ms, so it drew at 60 fps even in the background beside a running game. It's fixed in PR #14: a scene clock that only runs when the window is focused and visible with no game running, `repaint_after()` (idle waits for input; motion at 30 fps; a running game's log read 4x a second, 1x minimised), and minimise on launch with restore on exit (`REBUILD_LAUNCHER_STAY_OPEN=1` keeps it open). **Measured: 4.5 % of one core in the foreground while drifting, 0.0 % minimised, 86–87 MB.** U6 (Add tile fit) is in the same PR.
+
 From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f):
 6. Lane `launcher` U5 says "launch the proofs (`gputest --bare`)", but section 2 says helpers never run `gputest`. The launcher lane was told to build U5's launch path against a fake child process in tests, and to run no `gputest` itself. Please say which you meant.
 7. Lane `upscale` P3 needs AMD's FidelityFX SDK. If it isn't already on disk, getting it is a download. The lane was told not to download without your say, and to do P1, P2, P4 and P5 first. For DLSS it was pointed at the Streamline SDK zip already in `D:\tools\dlss\download` (production `bin/x64`, extracted outside git) and the user-supplied `nvngx_dlss.dll` in `D:\tools\dlss`.
@@ -152,6 +158,8 @@ From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f)
 
 | time | event |
 |:--|:--|
+| 14:22 | Master 927942b: BCPack decided (our own decoder, tables outside git, decode cache) as dstorage D5, **run by the lead's own helper**; the coordinator does not start it. No other new work. |
+| 14:20 | All 13 round-1 PRs merged. Round 2 started: **gdk** (new), **audio** A5, **files** F4–F5, **shader** S6. Launcher U6 and the idle fix done by the coordinator: PR #14. |
 | 14:10 | **launcher** done: PR #13 open. **All 12 helper jobs have handed back**: 4 merged, PRs #5–#13 open for the lead. |
 | 14:15 | **files** done: PR #12 open (145/145 match the host). |
 | 14:12 | **audio** done: PR #11 open; XMA decoder choice flagged. |

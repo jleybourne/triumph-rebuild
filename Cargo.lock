@@ -2087,6 +2087,7 @@ dependencies = [
  "rebuild-sir",
  "rebuild-uma",
  "rebuild-upscale",
+ "rebuild-winfiles",
  "rebuild-xlist",
  "windows",
 ]
@@ -2148,7 +2149,12 @@ dependencies = [
 name = "rebuild-runtime"
 version = "0.1.0"
 dependencies = [
+ "rebuild-audio",
+ "rebuild-dstorage",
  "rebuild-loader",
+ "rebuild-vfs",
+ "rebuild-winfiles",
+ "rebuild-xg",
  "windows",
 ]
 
@@ -2187,7 +2193,6 @@ version = "0.1.0"
 name = "rebuild-winfiles"
 version = "0.1.0"
 dependencies = [
- "rebuild-runtime",
  "rebuild-vfs",
 ]
 

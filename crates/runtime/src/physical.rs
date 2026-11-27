@@ -20,6 +20,9 @@ pub const FRAME: usize = 64 << 10;
 struct Section {
     handle: HANDLE,
     frames: usize,
+    /// The whole section mapped once, on first need, for writes that name frames rather than
+    /// addresses (DirectStorage page destinations); 0 until then. Same bytes as every placed view.
+    view: usize,
 }
 
 /// Frames and where they are mapped.
@@ -42,6 +45,9 @@ impl Drop for Physical {
         }
         for s in &self.sections {
             unsafe {
+                if s.view != 0 {
+                    let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: s.view as *mut c_void });
+                }
                 let _ = CloseHandle(s.handle);
             }
         }
@@ -65,7 +71,7 @@ impl Physical {
         }
         .ok()?;
         let si = self.sections.len();
-        self.sections.push(Section { handle, frames: n });
+        self.sections.push(Section { handle, frames: n, view: 0 });
         let first = self.frames.len();
         self.frames.extend((0..n).map(|k| Some((si, k))));
         Some((first..first + n).collect())
@@ -127,6 +133,21 @@ impl Physical {
         }
     }
 
+    /// The 64 KiB of a live frame, wherever (or whether) it is mapped. The pointer stays valid while
+    /// this `Physical` lives: sections are only closed when it drops.
+    pub fn frame_ptr(&mut self, frame: usize) -> Option<*mut u8> {
+        let (si, k) = (*self.frames.get(frame)?)?;
+        let s = &mut self.sections[si];
+        if s.view == 0 {
+            let v = unsafe { MapViewOfFile(s.handle, FILE_MAP_ALL_ACCESS, 0, 0, s.frames * FRAME) };
+            if v.Value.is_null() {
+                return None;
+            }
+            s.view = v.Value as usize;
+        }
+        Some((s.view + k * FRAME) as *mut u8)
+    }
+
     pub fn frame_at(&self, addr: u64) -> Option<usize> {
         self.mapped.get(&(addr & !(FRAME as u64 - 1))).copied()
     }
@@ -173,6 +194,14 @@ mod tests {
         assert!(p.map(at(12), frames[3]));
         unsafe { assert_eq!(get(at(12) + 4096), 0xBEEF) };
         assert_eq!(p.frame_at(at(12) + 77), Some(frames[3]));
+        // writes by frame number (DirectStorage page destinations) land in the placed views, and back
+        let w = p.frame_ptr(frames[3]).unwrap();
+        unsafe {
+            assert_eq!((w.add(4096) as *const u32).read_volatile(), 0xBEEF);
+            (w.add(100) as *mut u32).write_volatile(0x1234_5678);
+            assert_eq!(get(at(12) + 100), 0x1234_5678);
+        }
+        assert!(p.frame_ptr(999).is_none(), "an unknown frame has no view");
         // a mapped frame cannot be freed; unmapped, it can
         assert!(!p.free(&frames[..1]));
         for i in [0, 1, 2, 8, 12] {
