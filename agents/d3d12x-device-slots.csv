@@ -1,0 +1,74 @@
+offset,slot,name,pc_equivalent,args_after_this,returns,title_calls,first_set,fork_source
+0x000,0,QueryInterface,IUnknown::QueryInterface,"iid, *out",HRESULT,"yes: device levels and the DXGI device (display mode path, timing-run L58)",yes,device.rs:174 query_interface
+0x008,1,AddRef,IUnknown::AddRef,-,u32,yes,yes,object.rs add_ref
+0x010,2,Release,IUnknown::Release,-,u32,yes,yes,object.rs release
+0x018,3,GetPrivateData,ID3D12Object::GetPrivateData,"guid, *size, *data",HRESULT,fork wired (object methods),yes,object.rs d3d12_object
+0x020,4,SetPrivateData,ID3D12Object::SetPrivateData,"guid, size, *data",HRESULT,fork wired,yes,object.rs d3d12_object
+0x028,5,SetPrivateDataInterface,ID3D12Object::SetPrivateDataInterface,"guid, *IUnknown",HRESULT,not seen (logs: no 'method not implemented'),trap,object.rs d3d12_object (left unwritten)
+0x030,6,SetName,ID3D12Object::SetName,*wchar,HRESULT,fork wired; names only logged,yes,object.rs set_name
+0x038,7,GetNodeCount,ID3D12Device::GetNodeCount,-,u32 (1),fork wired,yes,device.rs node_count
+0x040,8,CreateCommandQueue,ID3D12Device::CreateCommandQueue,"*D3D12_COMMAND_QUEUE_DESC{type,priority,flags,nodemask}, iid, *out",HRESULT,fork wired,yes,queue.rs:956 create
+0x048,9,CreateCommandAllocator,ID3D12Device::CreateCommandAllocator,"type, iid, *out",HRESULT,yes (lists need one),yes,list.rs create_allocator
+0x050,10,CreateGraphicsPipelineState,ID3D12Device::CreateGraphicsPipelineState,"*desc (PC layout: root sig then 5 stages), iid, *out",HRESULT,fork wired,later,pipeline.rs:618 create_graphics
+0x058,11,CreateComputePipelineState,ID3D12Device::CreateComputePipelineState,"*desc, iid, *out",HRESULT,fork wired,later,pipeline.rs:640 create_compute
+0x060,12,CreateCommandList,ID3D12Device::CreateCommandList,"nodemask, type, allocator, pipeline, iid, *out",HRESULT,fork wired,yes,list.rs create_list
+0x068,13,CheckFeatureSupport,ID3D12Device::CheckFeatureSupport,"feature, *data, size",HRESULT,"features 0 (16 words: console adds index 11), 1, 2, 3, 4 seen; others not logged",yes,device.rs:246 OPTIONS / check_feature_support
+0x070,14,CreateDescriptorHeap,ID3D12Device::CreateDescriptorHeap,"*desc{type,count,flags,nodemask} [+ console placement {address u64, size u64} right after], iid, *out",HRESULT,yes (placed shader-visible heaps),yes,descriptor.rs:1083 create_heap
+0x078,15,GetDescriptorHandleIncrementSize,ID3D12Device::GetDescriptorHandleIncrementSize,type,u32 (fork: 32/16/128/128),yes,yes,descriptor.rs:333 increment
+0x080,16,CreateRootSignature,ID3D12Device::CreateRootSignature,"nodemask, *blob, size, iid, *out",HRESULT,yes,yes,root.rs create
+0x088,17,CreateConstantBufferView,ID3D12Device::CreateConstantBufferView,"*desc{gpu va u64, size u32}, handle",void,"yes: ~14,000 a frame in play (descriptor.rs Views doc, run 65)",yes,descriptor.rs:930
+0x090,18,CreateShaderResourceView,ID3D12Device::CreateShaderResourceView,"resource, *desc (PC words), handle",void,yes,yes,descriptor.rs:938
+0x098,19,CreateUnorderedAccessView,ID3D12Device::CreateUnorderedAccessView,"resource, counter, *desc, handle",void,yes,yes,descriptor.rs:948
+0x0a0,20,CreateRenderTargetView,ID3D12Device::CreateRenderTargetView,"resource, *desc, handle",void,yes (back buffers),yes,descriptor.rs:400
+0x0a8,21,CreateDepthStencilView,ID3D12Device::CreateDepthStencilView,"resource, *desc, handle",void,yes,yes,descriptor.rs:422
+0x0b0,22,CreateSampler,ID3D12Device::CreateSampler,"*desc (13 words), handle",void,fork wired,yes,descriptor.rs:985
+0x0b8,23,CopyDescriptors,ID3D12Device::CopyDescriptors,"ndst, *dst starts, *dst sizes, nsrc, *src starts, *src sizes, type",void,fork wired,yes,descriptor.rs:1015
+0x0c0,24,CopyDescriptorsSimple,ID3D12Device::CopyDescriptorsSimple,"count, dst, src, type",void,fork wired,yes,descriptor.rs:999
+0x0c8,25,GetResourceAllocationInfo,ID3D12Device::GetResourceAllocationInfo,"(hidden *out first) visible mask, count, *descs",*D3D12_RESOURCE_ALLOCATION_INFO,yes,yes,resource.rs allocation_info
+0x0d0,26,GetCustomHeapProperties,ID3D12Device::GetCustomHeapProperties,"(hidden *out first) nodemask, heap type",*D3D12_HEAP_PROPERTIES,fork wired,yes,resource.rs custom_heap_properties
+0x0d8,27,CreateCommittedResource,ID3D12Device::CreateCommittedResource,"*heap props, heap flags, *desc, state, *clear, iid, *out",HRESULT,yes,yes,resource.rs create_committed
+0x0e0,28,CreateHeap,ID3D12Device::CreateHeap,"*desc{size,props,alignment,flags}, iid, *out",HRESULT,yes,yes,resource.rs:1033 create_heap
+0x0e8,29,CreatePlacedResource,ID3D12Device::CreatePlacedResource,"heap, offset, *desc, state, *clear, iid, *out",HRESULT,yes,yes,resource.rs create_placed
+0x0f0,30,CreateReservedResource,ID3D12Device::CreateReservedResource,-,-,not seen,trap,device.rs test: 0xf0 is a missing slot
+0x0f8-0x118,31-35,"CreateSharedHandle, OpenSharedHandle, OpenSharedHandleByName, MakeResident, Evict",same,-,-,not seen,trap,device.rs FUNCTIONS (unwritten)
+0x120,36,CreateFence,ID3D12Device::CreateFence,"initial u64, flags, iid, *out",HRESULT,yes (first Signal sets value 1: timing-run L220),yes,fence.rs:43 create
+0x128,37,GetDeviceRemovedReason,ID3D12Device::GetDeviceRemovedReason,-,HRESULT,not seen,trap,unwritten
+0x130,38,GetCopyableFootprints,ID3D12Device::GetCopyableFootprints,"*desc, first, count, base, *layouts, *rows, *rowsizes, *total",void,yes,yes,resource.rs copyable_footprints
+0x138,39,CreateQueryHeap,ID3D12Device::CreateQueryHeap,"*desc, iid, *out",HRESULT,fork wired,yes,query.rs create
+0x140,40,SetStablePowerState,ID3D12Device::SetStablePowerState,-,-,not seen,trap,unwritten
+0x148,41,CreateCommandSignature,ID3D12Device::CreateCommandSignature,"*desc, root sig, iid, *out",HRESULT,yes (ExecuteIndirect is most draws: passthrough.md fact 4),yes,signature.rs create
+0x150-0x158,42-43,"GetResourceTiling, GetAdapterLuid",same,-,-,not seen,trap,unwritten
+0x160-0x178,44-47,console additions (unknown),none,-,-,not seen,trap,device.rs FUNCTIONS comment: device methods 76 (0x18-0x290)
+0x180,48,CreateCommandQueueX (fork's name),console,"*desc{type u32, flags u32, engine_or_pipe u32, queue u32}, iid, *out",HRESULT,yes,yes,queue.rs:985 QueueDescX / create_x
+0x188-0x1c0,49-56,console additions (unknown),none,-,-,not seen,trap,unwritten
+0x1c8,57,pipeline creation from console code (precompiled; fork: unknown),console,"*desc (pairs of {cpu ptr, size} and {gpu va, size}: shader blobs ~0x184 bytes and GPU code 0x140-0x400 bytes), iid=ID3D12PipelineState, *out",HRESULT,">=16,384 calls by 2.2 s after the image was mapped; the first 8,192 before the first Present (timing-run L184-L582); title goes without the pipeline on failure",trap: E_NOTIMPL with *out=null,device.rs:359 unknown_pipeline; logs timing-run-2026-11-25.txt
+0x1d0-0x1e0,58-60,console additions (unknown),none,-,-,not seen,trap,unwritten
+0x1e8,61,CreateSamplerX (fork's name),console,"*desc (27 words), handle",void,fork wired,yes,descriptor.rs:992
+0x1f0,62,CreateComputePipelineStateX (fork's name),console,"*desc, extension count, *extensions, iid, *out",HRESULT,yes,yes,pipeline.rs:663 create_compute_x
+0x1f8-0x210,63-66,console additions (unknown),none,-,-,not seen,trap,unwritten
+0x218,67,pipeline creation from console code (the FSR passes: ACCC/FSPX containers per fork docs/design/dlss.md),console,"*desc, iid=ID3D12PipelineState, *out",HRESULT,">=2,048 calls in startup (timing-run L173-L582); fork's precompiled path (branch fsr) cost 4x per draw and asserted in D3D12Core at start",trap: E_NOTIMPL with *out=null,device.rs:359; ROADBLOCK.md 5; CLAUDE.md blocker 0 and 2
+0x220,68,console addition (unknown),none,-,-,not seen,trap,unwritten
+0x228,69,debug error filter (fork),console,?,HRESULT,yes; S_OK ignored,yes,device.rs FUNCTIONS f[69] object::ignore
+0x230,70,CreatePlacedShaderResourceView (fork's name),console,"*resource desc (14 words), *view desc (16 words; words 10-11 the address), handle",void,"yes: 26,393 placed views (CLAUDE.md blocker 3)",yes,descriptor.rs:962
+0x238,71,CreatePlacedUnorderedAccessView (fork's name),console,"*resource desc, *view desc, handle",void,yes,yes,descriptor.rs create_placed_uav
+0x240,72,console addition (unknown),none,-,-,not seen,trap,unwritten
+0x248,73,CreateCommandListX (fork's name),console,"*desc{type, flags, nodemask, barrier batch}, allocator, pipeline, iid, *out",HRESULT,yes,yes,list.rs:531 ListDesc / create_list_x
+0x250,74,RegisterPagePool (fork's name),console,"address (64 KiB aligned), page count, *handle out",HRESULT,yes,yes,resource.rs:2453
+0x258,75,UnregisterPagePool (fork's name),console,handle,HRESULT,yes,later,resource.rs unregister_page_pool
+0x260,76,CreateCommittedResourceX (fork's name),console,PC CreateCommittedResource + DCC options,HRESULT,the AMD upscaler's (Series S),later,device.rs FUNCTIONS f[76]
+0x268,77,console addition (unknown),none,-,-,not seen,trap,unwritten
+0x270,78,SetFrameIntervalX (fork's name),console,"output, interval us (0 = 1/60 s), period, flags",HRESULT,"yes: 33.333 ms, before pipelines and again right before the first Present (timing-run L59, L222)",yes,frame.rs:45 set_interval
+0x278,79,ScheduleFrameEventX (fork's name),console,"kind, offset, *list, flags",HRESULT,yes,yes,frame.rs:72 schedule
+0x280,80,WaitFrameEventX (fork's name),console,"kind (0 origin, 1 vblank, 2 flip), timeout ms, *list, flags (2 = token on timeout), *token u64",HRESULT (S_FALSE on timeout),yes: every frame (origin poll + flip wait),yes,frame.rs:120 wait
+0x288,81,GetFrameStatisticsX (fork's name),console,"token, kinds, *count, *out",HRESULT,yes,yes,frame.rs:189 statistics
+0x290,82,console addition (unknown),none,-,-,not seen,trap,unwritten
+0x298-0x2a8,83-85,ID3D12Device1 (3),"CreatePipelineLibrary, SetEventOnMultipleFenceCompletion, SetResidencyPriority",-,-,not seen,trap,device.rs FUNCTIONS comment
+0x2b0,86,CreatePipelineState (stream),ID3D12Device2::CreatePipelineState,"*{size, *stream}, iid, *out; console numbers AS/MS subobjects 23/24 (PC 24/25), its own types from 25",HRESULT,"yes: the bulk of ~60,000 pipelines in the first 20 s (pipeline.rs:7)",yes,pipeline.rs:712 create_stream
+0x2b8-0x358,87-107,"ID3D12Device3-7 (3+6+9+1+2, one console slot inside Device5)",PC names by count; console slot position unknown,-,-,not seen,trap,device.rs FUNCTIONS comment
+0x360,108,GetResourceAllocationInfo2,ID3D12Device8::GetResourceAllocationInfo2,"(hidden *out) visible mask, count, *desc1s, *infos1",*info,yes,yes,resource.rs allocation_info2
+0x368-0x3a0,109-116,ID3D12Device8 rest (9 slots with 4 console),unverified,-,-,not seen,trap,device.rs FUNCTIONS comment
+0x3a8-0x3f0,117-126,ID3D12Device9-11 (console layout unknown),unverified,-,-,not seen,trap,device.rs FUNCTIONS comment
+0x3f8,127,CreateCommittedResource3 (inferred),ID3D12Device10::CreateCommittedResource3,"*heap props, heap flags, *desc1, initial layout, *clear, protected session, castable count, *castable formats, iid, *out",HRESULT,"yes: the back buffers (title+0x193e1b4, heap flag 'allow display')",yes,resource.rs:2426
+0x400-0x420,128-132,unknown,-,-,-,not seen,trap,unwritten
+0x428,133,create resource at a title-mapped address (fork's reading),console (Device9-11 range),"address, *desc1, initial layout, *clear, iid, *out",HRESULT,yes,yes,resource.rs:2488 create_at_address
+0x430-0x4f8,134-159,unknown,-,-,-,not seen,trap,"table is 160 slots so a newer method logs, never jumps past the table"

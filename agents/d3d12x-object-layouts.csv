@@ -1,0 +1,27 @@
+object,offset,size,field,value_to_hand_out,who_reads_it,fork_source
+every object,0x00,8,vtable pointer,our table,title (every call),object.rs:43 Object
+every object,0x08,4,bits: device index in bits 0-2 plus bookkeeping,0,title (inline helpers; meaning of the upper bits unknown),object.rs:43
+every object,0x0C,4,reference count,atomic u32,AddRef/Release (may be inlined),object.rs:43
+device,0x10,8,GPU address of a null constant buffer,0 in the fork (none),title inline code,device.rs:104 Device
+device,0x18,1 (of a 64-byte block to 0x58),"out-of-line flag: non-zero makes the title CALL device methods it would otherwise inline",1,"title tests byte +0x18 before inlining a device call",device.rs:110/118 and test at :479
+device,0x18-0x57,64,reserved (rest of the out-of-line block),0,unknown,device.rs:110
+device,size,0x58,total,static; one device per process,-,device.rs:112 assert
+queue,0x10,4,list type (0 direct / 2 compute / 3 copy),the creation type,"title reads it right after the header",queue.rs:31-42 (assert offset 0x10)
+allocator,0x10,4,list type,the creation type,assumed by the fork (same pattern),list.rs Allocator
+list,0x10,4,list type,the creation type,title,list.rs:98 List
+list,0x18,8,put pointer (next packet write),0,"title inline: writes packets while put < limit, else calls the method",list.rs:103 put[0]
+list,0x20,8,limit: plain packets,0,same check,list.rs:103 put[1]
+list,0x28,8,limit: draw packets,0,same check,list.rs:103 put[2]
+list,0x30,8,limit: API packets,0,same check,list.rs:103 put[3]
+list,0x38,8,limit: unbiased API packets,0,same check,list.rs:103 put[4]
+list,0x40,0x100,reserved,0,unknown,list.rs reserved [u32; 64]
+list,0x140,0x200,graphics root user-data headers (inline packet state),0,title inline packet builder (dead while limits are 0),list.rs graphics_root_headers
+list,0x340,0x200,compute root user-data headers,0,same,list.rs compute_root_headers
+list,0x540,0x20,pipeline shadow,0,"title's state flush (title+0x32786) copies a pipeline's 32 bytes to +0x544..+0x564 and tests +0x548, even with limits at 0",list.rs:110 and assert :140
+list,0x560,>=0x400,newer-title fields (size unknown),0,title writes here; keep our own fields past +0x960,list.rs newer [u32; 256]
+pipeline,0x10,0x20,32-byte hardware packet,0 (fork),"title copies it inline into list+0x544 (so the copy happens even when calls are forced)",pipeline.rs:15 and :447 assert
+fence,0x10,8,current value (fork's choice of place),u64,"title reads the value at the address GetGpuAddress (fence 0x60) returns; lists also wait on such addresses",fence.rs:25-29 and :148
+descriptor heap,(title memory),count x increment,descriptors,"placed heaps: the title passes {address, size} right after the 16-byte desc and owns the memory; the title copies descriptors in as bytes (~40 changed heap pages a frame, 20,500 new records a frame in menus: timing-run L623)",title writes and copies descriptors directly,descriptor.rs:41-47 Placement / :1104 / :63
+descriptor heap,increments,-,"views 32 (RDNA2 T#/V# size), samplers 16 (S#), RTV 128, DSV 128",fork's choice; placed-heap size check passing implies the title computes the same view size,title,descriptor.rs:333
+resource,-,-,no inline field reads recorded,GetGPUVirtualAddress = CPU address,-,resource.rs:1102 (no layout asserts)
+root signature / query heap / command signature / heap,-,-,no inline field reads recorded,-,-,root.rs / query.rs / signature.rs
