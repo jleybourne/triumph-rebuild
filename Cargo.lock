@@ -2083,6 +2083,7 @@ version = "0.1.0"
 dependencies = [
  "rebuild-d3d12x",
  "rebuild-loader",
+ "rebuild-pipelines",
  "rebuild-runtime",
  "rebuild-shader",
  "rebuild-sir",
