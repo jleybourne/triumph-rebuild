@@ -125,7 +125,8 @@ impl Parser<'_> {
             Op::Literal(v) => Ok(v),
             Op::Fixed(n) => self.bits.read(n),
             Op::Vbr(n) => self.bits.vbr(n),
-            Op::Char6 => self.bits.read(6),
+            // LLVM's 6-bit characters: a-z, A-Z, 0-9, '.', '_' (DXC writes symbol names this way)
+            Op::Char6 => self.bits.read(6).map(|c| b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._"[c as usize] as u64),
             Op::Array | Op::Blob => Err("array or blob as an element"),
         }
     }

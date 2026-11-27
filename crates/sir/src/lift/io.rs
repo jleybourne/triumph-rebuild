@@ -349,58 +349,105 @@ pub fn ps_program(l: &Lifted, ps: &PsStage, bind: Option<&super::Bindings>, isg1
     if !user_init.is_empty() {
         s.push_str("cbuffer SirUserData : register(b0, space0) { uint4 sir_ud[16]; };\n");
     }
-    // inputs: the rows read, plus position and front face if their VGPRs are used
+    // inputs: every element of the input signature, in its order, read or not, so the registers DXC assigns
+    // are the console's (the stages link by signature); position and front face also when only a VGPR uses them
     let vg = ps_vgprs(ps.input_addr);
     s.push_str("struct In {\n");
     let mut body = l.body.clone();
-    for (row, (chans, mode)) in &l.io.inputs {
-        // each element on the row, by the channels it holds
-        let on_row: Vec<&Element> = isg1.iter().filter(|e| e.register == u32::from(*row) && e.system == 0).collect();
-        if on_row.is_empty() {
-            return Err(format!("no ISG1 element for row {row}"));
-        }
-        for e in &on_row {
-            let first = e.mask.trailing_zeros() as u8;
-            let n = e.mask.count_ones() as usize;
-            let _ = writeln!(s, "    {}{} r{row}_{first} : {}{};", mode.hlsl(), hlsl_type(e.comp, n), e.name, e.index);
-            for c in 0..4u8 {
-                if e.mask >> c & 1 == 1 {
-                    let field = if n == 1 { String::new() } else { format!(".{}", ["x", "y", "z", "w"][(c - first) as usize]) };
-                    let v = format!("asuint(i.r{row}_{first}{field})");
-                    body = body.replace(&format!("@in{row}.{c}@"), &v);
-                }
+    let pos_used = vg.iter().enumerate().any(|(k, v)| matches!(v, PsVgpr::Pos(_)) && l.vgprs.contains(&(k as u16)));
+    let ff_used = vg.iter().enumerate().any(|(k, v)| matches!(v, PsVgpr::FrontFace) && l.vgprs.contains(&(k as u16)));
+    let (mut pos_done, mut ff_done) = (false, false);
+    let mut elements: Vec<&Element> = isg1.iter().collect();
+    elements.sort_by_key(|e| (e.register, e.mask.trailing_zeros()));
+    for e in elements {
+        match e.system {
+            0 => {}
+            1 => {
+                s.push_str("    float4 pos : SV_Position;\n");
+                pos_done = true;
+                continue;
+            }
+            9 => {
+                s.push_str("    bool ff : SV_IsFrontFace;\n");
+                ff_done = true;
+                continue;
+            }
+            _ => {
+                // other system values (clip and cull distances, primitive id, array indices) by their own name
+                // and type: declared so the registers match, read by no translated form yet
+                let n = e.mask.count_ones() as usize;
+                let _ = writeln!(s, "    {} sv{}_{} : {}{};", hlsl_type(e.comp, n), e.register, e.mask.trailing_zeros(), e.name, e.index);
+                continue;
             }
         }
-        // a channel the row's element does not have (the half of a packed fp16 pair that packed math reads
-        // alongside the one it uses) reads 0, as a missing component does
+        let row = e.register as u8;
+        let first = e.mask.trailing_zeros() as u8;
+        let n = e.mask.count_ones() as usize;
+        let mode = l.io.inputs.get(&row).map(|(_, m)| m.hlsl()).unwrap_or("");
+        let _ = writeln!(s, "    {}{} r{row}_{first} : {}{};", mode, hlsl_type(e.comp, n), e.name, e.index);
+        for c in 0..4u8 {
+            if e.mask >> c & 1 == 1 {
+                let field = if n == 1 { String::new() } else { format!(".{}", ["x", "y", "z", "w"][(c - first) as usize]) };
+                body = body.replace(&format!("@in{row}.{c}@"), &format!("asuint(i.r{row}_{first}{field})"));
+            }
+        }
+    }
+    for (row, (chans, _)) in &l.io.inputs {
+        // a channel no element has (the half of a packed fp16 pair that packed math reads alongside the one it
+        // uses) reads 0, as a missing component does
         for c in 0..4u8 {
             if chans >> c & 1 == 1 {
                 body = body.replace(&format!("@in{row}.{c}@"), "0u");
             }
         }
     }
-    let pos_used = vg.iter().enumerate().any(|(k, v)| matches!(v, PsVgpr::Pos(_)) && l.vgprs.contains(&(k as u16)));
-    let ff_used = vg.iter().enumerate().any(|(k, v)| matches!(v, PsVgpr::FrontFace) && l.vgprs.contains(&(k as u16)));
-    if pos_used {
+    if pos_used && !pos_done {
         s.push_str("    float4 pos : SV_Position;\n");
     }
-    if ff_used {
+    if ff_used && !ff_done {
         s.push_str("    bool ff : SV_IsFrontFace;\n");
     }
     s.push_str("};\nstruct Out {\n");
+    // outputs: every element of the output signature, in its order and with its mask (so registers and widths
+    // are the console's); a target the program exports but the signature lacks is a full float4
     let mut returns = String::new();
-    for (target, _) in &l.io.exports {
+    let chans = |mask: u8| -> String { (0..4).filter(|c| mask >> c & 1 == 1).map(|c| ["x", "y", "z", "w"][c as usize]).collect() };
+    let mut declared = std::collections::BTreeSet::new();
+    let mut outs: Vec<&Element> = osg1.iter().collect();
+    outs.sort_by_key(|e| (e.register, e.mask.trailing_zeros()));
+    for e in outs {
+        let n = e.mask.count_ones() as usize;
+        match e.system {
+            64 => {
+                let t = e.index as u8;
+                let _ = writeln!(s, "    {} t{t} : SV_Target{t};", hlsl_type(e.comp, n));
+                if l.io.exports.contains_key(&t) {
+                    let _ = writeln!(returns, "    r.t{t} = {};", as_type(e.comp, &format!("o{t}.{}", chans(e.mask))));
+                }
+                declared.insert(t);
+            }
+            65 => {
+                s.push_str("    float depth : SV_Depth;\n");
+                if l.io.exports.contains_key(&8) {
+                    returns.push_str("    r.depth = asfloat(o8.x);\n");
+                }
+                declared.insert(8);
+            }
+            _ => {
+                let _ = writeln!(s, "    {} sv{}_{} : {}{};", hlsl_type(e.comp, n), e.register, e.mask.trailing_zeros(), e.name, e.index);
+            }
+        }
+    }
+    for target in l.io.exports.keys().filter(|t| !declared.contains(t)) {
         if *target == 8 {
             s.push_str("    float depth : SV_Depth;\n");
             returns.push_str("    r.depth = asfloat(o8.x);\n");
             continue;
         }
-        let e = osg1.iter().find(|e| e.system == 64 && e.index == u32::from(*target));
-        let comp = e.map(|e| e.comp).unwrap_or(3);
-        let _ = writeln!(s, "    {} t{target} : SV_Target{target};", hlsl_type(comp, 4));
-        let _ = writeln!(returns, "    r.t{target} = {};", as_type(comp, &format!("o{target}")));
+        let _ = writeln!(s, "    float4 t{target} : SV_Target{target};");
+        let _ = writeln!(returns, "    r.t{target} = asfloat(o{target});");
     }
-    if l.io.exports.is_empty() {
+    if l.io.exports.is_empty() && osg1.is_empty() {
         s.push_str("    float4 unused : SV_Target0;\n");
     }
     s.push_str("};\nOut main(In i) {\n");
@@ -481,27 +528,45 @@ pub fn vs_program(l: &Lifted, vs: &VsStage, bind: Option<&super::Bindings>, isg1
         s.push_str("    uint iid : SV_InstanceID;\n");
     }
     s.push_str("};\nstruct Out {\n");
+    // outputs: every element of the output signature, in its order (position where the signature puts it), each
+    // written from the parameter whose row it is; one the program does not export stays 0
     let mut returns = String::new();
-    for target in l.io.exports.keys() {
-        if *target == 12 {
-            s.push_str("    float4 pos : SV_Position;\n");
-            returns.push_str("    r.pos = asfloat(o12);\n");
-            continue;
+    let mut rows_done = std::collections::BTreeSet::new();
+    let mut pos_done = false;
+    let mut outs: Vec<&Element> = osg1.iter().collect();
+    outs.sort_by_key(|e| (e.register, e.mask.trailing_zeros()));
+    for e in outs {
+        let first = e.mask.trailing_zeros() as u8;
+        let n = e.mask.count_ones() as usize;
+        match e.system {
+            1 => {
+                s.push_str("    float4 pos : SV_Position;\n");
+                if l.io.exports.contains_key(&12) {
+                    returns.push_str("    r.pos = asfloat(o12);\n");
+                }
+                pos_done = true;
+            }
+            0 => {
+                let row = e.register as u8;
+                let _ = writeln!(s, "    {} p{row}_{first} : {}{};", hlsl_type(e.comp, n), e.name, e.index);
+                let target = vs.outputs.iter().find(|o| o.row == row).map(|o| 32 + o.param);
+                if let Some(t) = target.filter(|t| l.io.exports.contains_key(t)) {
+                    let chans: String = (0..4u8).filter(|c| e.mask >> c & 1 == 1).map(|c| ["x", "y", "z", "w"][c as usize]).collect();
+                    let _ = writeln!(returns, "    r.p{row}_{first} = {};", as_type(e.comp, &format!("o{t}.{chans}")));
+                    rows_done.insert(t);
+                }
+            }
+            _ => {
+                let _ = writeln!(s, "    {} sv{}_{first} : {}{};", hlsl_type(e.comp, n), e.register, e.name, e.index);
+            }
         }
-        let param = target - 32;
-        let row = vs.outputs.iter().find(|o| o.param == param).map(|o| o.row).ok_or("a parameter no output names")?;
-        let on_row: Vec<&Element> = osg1.iter().filter(|e| e.register == u32::from(row) && e.system == 0).collect();
-        if on_row.is_empty() {
-            return Err(format!("no OSG1 element for row {row}"));
-        }
-        for e in &on_row {
-            let first = e.mask.trailing_zeros() as u8;
-            let n = e.mask.count_ones() as usize;
-            let _ = writeln!(s, "    {} p{row}_{first} : {}{};", hlsl_type(e.comp, n), e.name, e.index);
-            let chans: Vec<&str> = (0..4u8).filter(|c| e.mask >> c & 1 == 1).map(|c| ["x", "y", "z", "w"][c as usize]).collect();
-            let src = format!("o{target}.{}", chans.join(""));
-            let _ = writeln!(returns, "    r.p{row}_{first} = {};", as_type(e.comp, &src));
-        }
+    }
+    if l.io.exports.contains_key(&12) && !pos_done {
+        s.push_str("    float4 pos : SV_Position;\n");
+        returns.push_str("    r.pos = asfloat(o12);\n");
+    }
+    if let Some(t) = l.io.exports.keys().find(|t| **t >= 32 && !rows_done.contains(t)) {
+        return Err(format!("parameter {} is in no output signature element", t - 32));
     }
     s.push_str("};\nOut main(In i) {\n");
     s.push_str(&super::declarations(l));

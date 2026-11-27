@@ -275,6 +275,19 @@ pub fn compare(ours: &Summary, oracle: &Summary) -> Vec<Diff> {
     d
 }
 
+/// Reader debugging: the module's named values (id, name) and every call's callee id.
+pub fn raw_calls(container: &[u8]) -> Result<(Vec<(u32, String)>, Vec<u32>), String> {
+    let c = Container::parse(container).map_err(|e| e.to_string())?;
+    let part = c.part(FourCC::DXIL).ok_or("no DXIL part")?.data;
+    let offset = u32_at(part, 16)? as usize;
+    let size = u32_at(part, 20)? as usize;
+    let top = bitcode::parse(part.get(8 + offset..8 + offset + size).ok_or("bitcode out of bounds")?)?;
+    let mut names: Vec<(u32, String)> = bitcode::names(&top).into_iter().collect();
+    names.sort();
+    let callees = bitcode::functions(&top)?.into_iter().flatten().filter_map(|i| i.callee).collect();
+    Ok((names, callees))
+}
+
 /// For a check of the bitcode reader: every call to a `dx.op.*` function as
 /// (function name, resolved opcode or None).
 pub fn dx_op_calls(container: &[u8]) -> Result<Vec<(String, Option<u32>)>, String> {

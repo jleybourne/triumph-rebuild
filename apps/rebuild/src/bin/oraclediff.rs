@@ -39,6 +39,37 @@ struct Tally {
 }
 
 fn main() {
+    // --sig <ours.dxil> <oracle.dxil>: both sides' signatures and bindings, for reading an interface diff
+    if let Some(i) = std::env::args().position(|a| a == "--sig") {
+        let a: Vec<String> = std::env::args().collect();
+        for f in [&a[i + 1], &a[i + 2]] {
+            let s = rebuild_shader::oraclediff::summarise(&std::fs::read(f).expect("read")).expect("summarise");
+            println!("== {f}");
+            println!("  in       {:?}", s.sig_in);
+            println!("  out      {:?}", s.sig_out);
+            println!("  bindings {:?}", s.bindings);
+        }
+        return;
+    }
+    // --calls <file.dxil>: every call in the module with the dx.op opcode it resolves to (reader debugging)
+    if let Some(f) = arg("--calls") {
+        let data = std::fs::read(&f).expect("read the container");
+        match rebuild_shader::oraclediff::dx_op_calls(&data) {
+            Ok(calls) => {
+                let resolved = calls.iter().filter(|c| c.1.is_some()).count();
+                println!("{} calls, {resolved} resolved to a dx.op opcode", calls.len());
+                for (name, op) in calls.iter().take(40) {
+                    println!("  {name:<40} {op:?}");
+                }
+            }
+            Err(e) => println!("unreadable: {e}"),
+        }
+        if let Ok((names, callees)) = rebuild_shader::oraclediff::raw_calls(&data) {
+            println!("named values {}: {:?}", names.len(), names.iter().take(12).collect::<Vec<_>>());
+            println!("callee ids {}: {:?}", callees.len(), callees.iter().take(20).collect::<Vec<_>>());
+        }
+        return;
+    }
     let oracle = PathBuf::from(
         arg("--oracle").or_else(|| std::env::var("REBUILD_ORACLE_DIR").ok()).expect("--oracle or REBUILD_ORACLE_DIR"),
     );
