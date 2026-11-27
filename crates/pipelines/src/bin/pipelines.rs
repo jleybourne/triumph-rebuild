@@ -22,6 +22,12 @@
 //!                                     --no-cache): what a first run on a new driver costs
 //!                    --prewarm        queue the last session's pipelines at launch
 //!                    --title-delay MS the title's first pipeline comes this long after launch (fork: 1,786)
+//! pipelines ondemand GPU: compute programs outside the library (an empty one), as the BVH builder's are: the
+//!                    first N compute containers of the corpus (REBUILD_SHADERS) offered and requested through
+//!                    the pool, translated on its workers (lift, HLSL, DXC), pipelines created; then a second
+//!                    session over the same disk cache (REBUILD_PSO_CACHE_DIR\ondemand-bench, deleted first).
+//!                    --count N (default 95) · --threads N. Runs only with agents\MEASURING absent, holding
+//!                    agents\CARD; at most 4 DXC processes at once.
 //! ```
 //! The sampler words come from the translator's `<hash>.<stage>.samplers` sidecars when present; only
 //! programs without one are lifted again from the corpus (`build --lift-all` lifts every program and compares).
@@ -60,8 +66,9 @@ fn main() {
         Some("load") => load(),
         Some("check") => check(args.iter().any(|a| a == "--debug")),
         Some("async") => run_async(&args[1..]),
+        Some("ondemand") => run_ondemand(&args[1..]),
         _ => {
-            eprintln!("pipelines build [--lift-all] | load | check [--debug] | async [--threads N] [--fresh] [--no-cache] [--cold] [--prewarm] [--title-delay MS]");
+            eprintln!("pipelines build [--lift-all] | load | check [--debug] | async [--threads N] [--fresh] [--no-cache] [--cold] [--prewarm] [--title-delay MS] | ondemand [--count N] [--threads N]");
             std::process::exit(2);
         }
     }
@@ -629,4 +636,90 @@ fn run_async(args: &[String]) {
 #[cfg(not(windows))]
 fn run_async(_: &[String]) {
     eprintln!("pipelines async needs Windows");
+}
+
+#[cfg(not(windows))]
+fn run_ondemand(_: &[String]) {
+    eprintln!("pipelines ondemand needs Windows");
+}
+
+/// Programs outside the library, translated on demand: a cold session (every program through DXC) and a warm
+/// one (from the disk cache), each as the title would ask: all requested at load, then waited for in order.
+#[cfg(windows)]
+fn run_ondemand(args: &[String]) {
+    use rebuild_pipelines::d3d::Gpu;
+    use rebuild_pipelines::ondemand::OnDemand;
+    use rebuild_pipelines::pool::{cpu_core_limit, default_threads, Pool};
+    use rebuild_pipelines::pso::{Programs, PsoCreator};
+    use rebuild_pipelines::state::{Desc, Key};
+    use rebuild_pipelines::translate;
+    // the card only with MEASURING absent and the exclusive agents\CARD lock, released however this ends
+    let _card = rebuild_pipelines::d3d::CardLock::take().unwrap_or_else(|e| {
+        eprintln!("pipelines ondemand: {e}; not touching the card");
+        std::process::exit(3);
+    });
+    let val = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).and_then(|v| v.parse::<usize>().ok());
+    let count = val("--count").unwrap_or(95);
+    let threads = val("--threads").unwrap_or_else(|| default_threads(cpu_core_limit()));
+    let rpf = std::env::var("REBUILD_SHADERS").unwrap_or_else(|_| {
+        eprintln!("pipelines: set REBUILD_SHADERS to a copy of shaders.rpf (never the game folder)");
+        std::process::exit(2);
+    });
+    let t = Instant::now();
+    let data = std::fs::read(&rpf).expect("read the shaders.rpf copy");
+    let progs = translate::compute_containers(&data, count, |_| true);
+    drop(data);
+    println!("pipelines ondemand — {} compute containers (the first in the corpus) found in {:.0} ms · {threads} workers", progs.len(), ms(t.elapsed()));
+
+    let dir = std::env::var_os("REBUILD_PSO_CACHE_DIR").map(PathBuf::from).unwrap_or_else(rebuild_pipelines::session::default_dir).join("ondemand-bench");
+    let _ = std::fs::remove_dir_all(&dir);
+    let empty = dir.join("empty.lib");
+    library::build(&empty, USER_DATA_DWORDS, Vec::new(), 1, rebuild_pipelines::d3d::serialize).expect("an empty library");
+    let gpu = Gpu::new(false).unwrap_or_else(|e| panic!("{e}"));
+    for session in ["cold", "warm"] {
+        let lib = Library::load(&empty, 1, true).expect("load the empty library").0;
+        let programs = Programs::new(&gpu.device, lib, None).with_ondemand(OnDemand::new(Some(dir.join("programs"))));
+        let pool = Pool::new(PsoCreator::new(&gpu.device, programs, None), threads);
+        let t = Instant::now();
+        let handles: Vec<_> = progs
+            .iter()
+            .map(|(h, bytes)| {
+                pool.creator().programs().offer_compute(*h, bytes);
+                let d = Desc::Compute { cs: *h };
+                pool.request(Key::of(&d), d)
+            })
+            .collect();
+        let requested = t.elapsed();
+        let mut failed = BTreeMap::<String, usize>::new();
+        for h in &handles {
+            if let Err(e) = pool.wait(*h) {
+                let e = e.split(" (").next().unwrap_or(e);
+                *failed.entry(e.chars().take(100).collect()).or_default() += 1;
+            }
+        }
+        let wall = t.elapsed();
+        let s = pool.creator().programs().ondemand().unwrap().stats();
+        let c = pool.creator().stats().compute;
+        let per = |d: Duration, n: u64| if n == 0 { 0.0 } else { ms(d) / n as f64 };
+        let looked = s.translated + s.from_disk + s.failed;
+        println!("{session}");
+        println!("  title's create calls   {} in {:.3} ms ({:.2} us each: hash, offer, request)", progs.len(), ms(requested), ms(requested) * 1e3 / progs.len().max(1) as f64);
+        println!(
+            "  programs               {} translated (dxc) · {} from disk · {} stale · {} failed",
+            s.translated, s.from_disk, s.stale, s.failed
+        );
+        println!(
+            "  per program            parse {:.3} ms · lift + HLSL {:.3} ms · dxc {:.1} ms · disk {:.3} ms · PSO {:.2} ms (per worker, {threads} at once)",
+            per(s.parse, looked),
+            per(s.lift, looked),
+            per(s.dxc, s.translated),
+            per(s.disk, looked),
+            c.create_ms()
+        );
+        println!("  all ready              {:.1} ms after the first request ({} pipelines)", ms(wall), c.created);
+        for (e, n) in &failed {
+            println!("  failed {n:>4}            {e}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

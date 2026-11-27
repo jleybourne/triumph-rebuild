@@ -46,7 +46,7 @@ and becomes the number that counts.
 |---|---|---|
 | device, queues, fences, allocators, lists, resources, DXGI | `████████████████████` | done |
 | root signatures, query heaps, command signatures | `████████████████████` | done |
-| compute pipelines (library + pool) | `████████████████░░░░` | done; 80 BVH-builder programs need on-demand translation |
+| compute pipelines (library + pool) | `████████████████████` | done; programs outside the library translated on demand and cached (PR #31) |
 | graphics and stream pipelines (0x50, 0x2b0) | `████████████████████` | done (PR #30): 14 created, 0 refused |
 | title start-up to its first submission | `████████████████████` | done: ExecuteCommandListsX and PresentX called at 1.44 s |
 | ExecuteCommandLists + PresentX | `██████░░░░░░░░░░░░░░` | lane `present` building them; then a null program binding at `exe+0xb5a5f8` |
@@ -59,7 +59,6 @@ and becomes the number that counts.
 | lane | build | working on |
 |---|---|---|
 | `present` | 5 | ExecuteCommandLists, PresentX, frame capture, frame line |
-| `ondemand` | 5 | translating programs missing from the library when the title creates them |
 | `shaderexec` | 4 | our shaders against the oracle's, on the GPU: the "shaders counted" bar |
 | `shadercov` | 4 | the last 1,726 agnostic programs (7,402 → 9,128) |
 | `wave64` | 4 | wave-wide programs, the other ~16,500 |

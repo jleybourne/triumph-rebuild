@@ -6,11 +6,12 @@
 //! A console compute program is known by its hash (the first 8 bytes of the BLAKE3 of its DXBC container, as
 //! the census and the program library name it). Creation returns at once with a console object: the pool in
 //! `crates/pipelines` builds the host pipeline on a worker (`agents/pipelines.md`, "For the lead"). A program
-//! the library does not hold (the BVH builder's own, until translation runs on demand) still gets a valid
-//! object with no host pipeline, so the title's creation path completes; the lists drop its dispatches
-//! (`ListStats::skipped`) and the run's report names the missing programs. The same holds for a description
-//! the stream reader refuses (mesh shaders, a console subobject of unknown size, ...): a valid object, counted
-//! by reason in the report.
+//! the library does not hold (the BVH builder's own, embedded in `xboxbvhbuilder.dll`) is offered to
+//! `rebuild_pipelines::ondemand`: the worker that creates its pipeline translates it (lift, HLSL, DXC) and
+//! caches the DXIL on disk for the next session. A program that cannot be translated still gives the title a
+//! valid object; the lists drop its dispatches (`ListStats::skipped`) and the run's report names it. The same
+//! holds for a description the stream reader refuses (mesh shaders, a console subobject of unknown size, ...):
+//! a valid object, counted by reason in the report.
 #![allow(non_snake_case)]
 
 use std::collections::BTreeMap;
@@ -21,6 +22,7 @@ use std::sync::{Mutex, OnceLock};
 
 use rebuild_pipelines::library::Library;
 use rebuild_pipelines::pool::{cpu_core_limit, default_threads, Handle, Pool};
+use rebuild_pipelines::ondemand::{self, OnDemand};
 use rebuild_pipelines::pso::{PsoCache, PsoCreator, Programs};
 use rebuild_pipelines::state::{Desc, Key};
 use rebuild_pipelines::stream::{self, Numbering, Parsed, Process, Refusal};
@@ -37,7 +39,7 @@ const DXGI_ERROR_NOT_FOUND: i32 = 0x887A_0002u32 as i32;
 
 static POOL: OnceLock<Option<Pool<PsoCreator>>> = OnceLock::new();
 static CREATED: AtomicU64 = AtomicU64::new(0);
-/// programs the library does not hold: hash -> creations
+/// programs with no pipeline at all (no library, so nothing on demand either): hash -> creations
 static MISSING: Mutex<BTreeMap<u64, u32>> = Mutex::new(BTreeMap::new());
 /// graphics pipelines created (0x50 and 0x2b0), and mesh-shader ones (no host pipeline yet)
 static GRAPHICS: AtomicU64 = AtomicU64::new(0);
@@ -75,7 +77,9 @@ pub fn start(device: &windows::Win32::Graphics::Direct3D12::ID3D12Device) {
             }
         };
         let threads = default_threads(cpu_core_limit());
-        Some(Pool::new(PsoCreator::new(device, Programs::new(device, lib, None), cache), threads))
+        // programs outside the library: translated on the workers, cached in `<pipelines dir>\ondemand`
+        let programs = Programs::new(device, lib, None).with_ondemand(OnDemand::new(Some(ondemand::default_dir())));
+        Some(Pool::new(PsoCreator::new(device, programs, cache), threads))
     });
 }
 
@@ -199,11 +203,13 @@ unsafe fn create_compute(desc: *const ComputeDesc, iid: *const GUID, out: *mut R
         return E_INVALIDARG;
     }
     // SAFETY: the title passes `cs_bytes` of bytecode
-    let Some(cs) = program_hash(unsafe { std::slice::from_raw_parts(d.cs, d.cs_bytes) }) else { return E_INVALIDARG };
+    let bytes = unsafe { std::slice::from_raw_parts(d.cs, d.cs_bytes) };
+    let Some(cs) = program_hash(bytes) else { return E_INVALIDARG };
     let desc = Desc::Compute { cs };
     let key = Key::of(&desc);
+    // in the library, or offered for translation on a worker: either way the pool makes it, never this thread
     let handle = match pool() {
-        Some(p) if p.creator().programs().library().get(cs, rebuild_pipelines::Stage::Cs).is_some() => Some(p.request(key, desc)),
+        Some(p) if p.creator().programs().offer_compute(cs, bytes).is_some() => Some(p.request(key, desc)),
         _ => {
             *MISSING.lock().unwrap_or_else(|e| e.into_inner()).entry(cs).or_insert(0) += 1;
             None
@@ -353,15 +359,15 @@ pub fn host(console: Raw) -> Option<HostPipeline> {
     Some(HostPipeline { pso: pso.as_raw(), root_signature: root as Raw, compute: p.key.compute })
 }
 
-/// One line for the run report.
+/// One line for the run report (a second with the on-demand failures, when there are any).
 pub fn report() -> String {
     let missing = MISSING.lock().unwrap_or_else(|e| e.into_inner());
     let first: Vec<String> = missing.keys().take(6).map(|h| format!("{h:016x}")).collect();
     let list = |v: Vec<String>| if v.is_empty() { "none".to_string() } else { v.join(", ") };
     let refused = list(REFUSED.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(r, n)| format!("{r} {n}")).collect());
     let skipped = list(SKIPPED.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(t, n)| format!("type {t} x{n}")).collect());
-    format!(
-        "pipelines {} created, {} graphics, {} mesh ({} programs not in the library: {}{}); no host pipeline: {refused}; console subobjects skipped: {skipped}; library {}",
+    let mut line = format!(
+        "pipelines {} created, {} graphics, {} mesh ({} programs with no pipeline: {}{}); no host pipeline: {refused}; console subobjects skipped: {skipped}; library {}",
         CREATED.load(Ordering::Relaxed),
         GRAPHICS.load(Ordering::Relaxed),
         MESH.load(Ordering::Relaxed),
@@ -369,7 +375,26 @@ pub fn report() -> String {
         first.join(" "),
         if missing.len() > first.len() { " ..." } else { "" },
         if pool().is_some() { "loaded" } else { "absent" }
-    )
+    );
+    if let Some(od) = pool().and_then(|p| p.creator().programs().ondemand()) {
+        let s = od.stats();
+        let ms = |d: std::time::Duration, n: u64| if n == 0 { 0.0 } else { d.as_secs_f64() * 1e3 / n as f64 };
+        let done = s.translated + s.from_disk;
+        line += &format!(
+            "; outside the library {} · translated {} (dxc {:.1} ms each) · from disk {} · stale {} · failed {} · lift {:.2} ms each",
+            s.offered,
+            s.translated,
+            ms(s.dxc, s.translated),
+            s.from_disk,
+            s.stale,
+            s.failed,
+            ms(s.lift, done),
+        );
+        for (h, e) in od.failures().iter().take(8) {
+            line += &format!("\n  on demand {h:016x}: {e}");
+        }
+    }
+    line
 }
 
 #[cfg(test)]
