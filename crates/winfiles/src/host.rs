@@ -192,6 +192,7 @@ extern "system" {
     pub fn CreateHardLinkW(new: *const u16, existing: *const u16, sa: *const c_void) -> BOOL;
     pub fn CreateSymbolicLinkW(link: *const u16, target: *const u16, flags: u32) -> u8;
     pub fn SetFilePointerEx(h: HANDLE, distance: i64, new: *mut i64, method: u32) -> BOOL;
+    pub fn GetCurrentThreadId() -> u32;
     pub fn SetEndOfFile(h: HANDLE) -> BOOL;
     pub fn MultiByteToWideChar(cp: u32, flags: u32, s: *const u8, n: i32, w: *mut u16, wn: i32) -> i32;
     pub fn WideCharToMultiByte(
