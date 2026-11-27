@@ -1053,6 +1053,11 @@ impl App {
         let bar = Rect::from_min_max(Pos2::new(left, screen.top()), Pos2::new(screen.right(), screen.top() + 40.0));
         egui::Area::new(Id::new("titlebar-area")).order(egui::Order::Foreground).fixed_pos(bar.min).show(ctx, |ui| {
             ui.allocate_exact_size(bar.size(), Sense::hover());
+            if self.tab == Tab::Play {
+                // a soft top scrim so the window controls read over key art
+                let s = Rect::from_min_size(bar.min, Vec2::new(bar.width(), 64.0));
+                background::vertical_fade(ui.painter(), s, alpha(th::BG_BASE, 0.75), Color32::TRANSPARENT);
+            }
             let bw = 46.0;
             let drag_r = Rect::from_min_max(bar.min, Pos2::new(bar.right() - 3.0 * bw, bar.bottom()));
             let drag = ui.interact(drag_r, Id::new("titlebar"), Sense::click_and_drag());
@@ -1504,10 +1509,10 @@ impl App {
                         }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if w::button(ui, icon::CARET_DOUBLE_RIGHT, "", i + 1 < n).on_hover_text("Later (wins more)").clicked() {
+                        if w::button(ui, icon::CARET_DOWN, "", i + 1 < n).on_hover_text("Later (wins more)").clicked() {
                             moved = Some((i, i + 1));
                         }
-                        if w::button(ui, icon::CARET_DOUBLE_LEFT, "", i > 0).on_hover_text("Earlier").clicked() {
+                        if w::button(ui, icon::CARET_UP, "", i > 0).on_hover_text("Earlier").clicked() {
                             moved = Some((i, i - 1));
                         }
                     });

@@ -8,6 +8,8 @@ use egui_phosphor::regular as p;
 pub const ARROWS_CLOCKWISE: &str = p::ARROWS_CLOCKWISE;
 pub const ARROW_COUNTER_CLOCKWISE: &str = p::ARROW_COUNTER_CLOCKWISE;
 pub const CARET_DOUBLE_LEFT: &str = p::CARET_DOUBLE_LEFT;
+pub const CARET_UP: &str = p::CARET_UP;
+pub const CARET_DOWN: &str = p::CARET_DOWN;
 pub const CARET_DOUBLE_RIGHT: &str = p::CARET_DOUBLE_RIGHT;
 pub const CARET_UP_DOWN: &str = p::CARET_UP_DOWN;
 pub const CHECK: &str = p::CHECK;
@@ -60,6 +62,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("ARROWS_CLOCKWISE", ARROWS_CLOCKWISE),
     ("ARROW_COUNTER_CLOCKWISE", ARROW_COUNTER_CLOCKWISE),
     ("CARET_DOUBLE_LEFT", CARET_DOUBLE_LEFT),
+    ("CARET_UP", CARET_UP),
+    ("CARET_DOWN", CARET_DOWN),
     ("CARET_DOUBLE_RIGHT", CARET_DOUBLE_RIGHT),
     ("CARET_UP_DOWN", CARET_UP_DOWN),
     ("CHECK", CHECK),

@@ -282,7 +282,8 @@ fn card_ex<R>(ui: &mut Ui, index: usize, title: Option<(&str, &str)>, hover: Opt
     }
     let hovered_before = hover.map(|id| ui.ctx().data(|d| d.get_temp::<bool>(id.with("hov")).unwrap_or(false))).unwrap_or(false);
     let h = hover.map(|id| ui.ctx().animate_bool_with_time(id.with("lift"), hovered_before, th::T_HOVER)).unwrap_or(0.0);
-    ui.add_space((1.0 - a) * 12.0 + 2.0 * (1.0 - h));
+    // hover changes the rim and the shadow only, so every card keeps the same top and baselines
+    ui.add_space((1.0 - a) * 12.0);
     let (out, rect) = ui
         .scope(|ui| {
             ui.multiply_opacity(a);
@@ -304,19 +305,13 @@ fn card_ex<R>(ui: &mut Ui, index: usize, title: Option<(&str, &str)>, hover: Opt
                 }
                 add(ui)
             });
-            let rect = inner.response.rect;
-            // the glass's top highlight
-            ui.painter().line_segment(
-                [Pos2::new(rect.left() + th::R_LG as f32, rect.top() + 0.5), Pos2::new(rect.right() - th::R_LG as f32, rect.top() + 0.5)],
-                th::stroke(1.0, alpha(Color32::WHITE, (0.09 + 0.05 * h) * a)),
-            );
-            (inner.inner, rect)
+            (inner.inner, inner.response.rect)
         })
         .inner;
     if let Some(id) = hover {
         let over = ui.rect_contains_pointer(rect);
         ui.ctx().data_mut(|d| d.insert_temp(id.with("hov"), over));
     }
-    ui.add_space(th::S2 + 2.0 * h);
+    ui.add_space(th::S2);
     (out, rect)
 }
