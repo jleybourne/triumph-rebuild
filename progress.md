@@ -14,7 +14,7 @@ and becomes the number that counts.
 | track | progress | | note |
 |---|---|--:|---|
 | **Build 5 · first frame** | `██████████░░░░░░░░░░` | 50 % | frame 1 presented and captured; frame 2 blocked by a null program binding |
-| shaders compiled (v0 set) | `████████████████████` | 2,834 / 2,881 | pixel 1,791 · vertex 926 · compute 117 |
+| shaders compiled (agnostic) | `███████████████████░` | 8,799 / 9,128 | PS 6,733 · VS 1,448 · CS 618 |
 | shaders counted | `░░░░░░░░░░░░░░░░░░░░` | 0 / 25,694 | counted once execution matches the oracle |
 | runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
 | launcher | `██████████████░░░░░░` | 5 / 7 | C2 and L5 left · not part of the 59 % |
