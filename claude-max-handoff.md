@@ -21,7 +21,7 @@ title       loads and runs its entry; the startup "wait" was likely our graphics
 runtime     GDK runtime (xgameruntime.dll) ours via LoadLibraryExA override; files 32 + CRT 13 bound
 lanes       round 1 and round 2 all merged (#1-#18); no lane running
 tests       311 green (one files F5 host-comparison test 46 vs 45 since the reboot: for the files lane)
-translate   `translate ps` over D:\victory-data\shaders.rpf: 1,790 / 1,798 v0 pixel and 911 / 951 v0 vertex shaders compile;
+translate   `translate ps` over D:\victory-data\shaders.rpf: 1,790 / 1,798 v0 pixel and 923 / 951 v0 vertex shaders compile;
             immediate samplers decode to static samplers (sir::sampler, space100: Build 5 must add them to
             the root signature); next: ten single forms, then vertex shaders (s_swappc fetch, exp pos/param)
 ```
@@ -136,7 +136,7 @@ The owner's rules, in their own words:
 
 ## In flight (2026-11-27, usage limit)
 
-- Vertex shaders: `translate vs` wired; 911 / 951 compile (runs/build4-vs.md). Descriptor shadow table (plan
+- Vertex shaders: `translate vs` wired; 923 / 951 compile (runs/build4-vs.md). Descriptor shadow table (plan
   decision 9) must be written by Build 5's descriptor code.
 - Owner request, hardware limits: built (limits.rs, config limits.*, launcher env); left: VRAM in Build 5 heaps,
   worker pools sized to the core limit, a capped proof run (owner OK).

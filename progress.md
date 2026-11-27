@@ -2,7 +2,7 @@
 
 ```
 work toward 30 fps   [██████████░░░░░░░░░░]  49 %
-shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694 counted (oracle match needed) · 1,790 / 1,798 v0 pixel shaders and 911 / 951 v0 vertex shaders translate and compile · all decode byte-exact
+shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694 counted (oracle match needed) · 1,790 / 1,798 v0 pixel shaders and 923 / 951 v0 vertex shaders translate and compile · all decode byte-exact
 runtime functions    [███████████████████░]  69 / 73 ours bound (xmem, modules, memory, process, files, audio, DirectStorage, xg); 624 more bind to the host directly
 launcher track       [██████████████░░░░░░]  5 / 7 steps (C1 registry, L1-L4 launcher merged; C2 and L5 left); does not count toward the fps %
 measured fps         none yet — the title has not rendered a frame on this code

@@ -22,9 +22,10 @@
 | first run (fetch, exports) | 595 (62.6 %) |
 | buffer loads, offset form | 613 (64.5 %) |
 | indexed buffer loads (shadow table) | 860 (90.4 %) |
-| depth-only parameter exports | **911 (95.8 %)** |
+| depth-only parameter exports | 911 (95.8 %) |
+| 16-bit integer image addresses | **923 (97.1 %)** |
 
-Left (40): 16-bit image addresses on loads (12), `v_add_nc_u32` / `v_lshlrev_b32` forms (8), typed buffer loads
+Left (28): `v_add_nc_u32` / `v_lshlrev_b32` forms (8), typed buffer loads
 (4), `exp pos1` (3), `s_buffer_load` forms (6), single programs.
 
 **Not yet proven correct:** a program counts toward the 25,694 only when the execution check matches the oracle.

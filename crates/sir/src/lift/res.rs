@@ -253,7 +253,7 @@ impl Lifter<'_> {
         let sampled = name.starts_with("image_sample") || name.starts_with("image_gather");
         // a16: float addresses packed two fp16 per register (sampling with no bias only, so far)
         let a16 = d.get("a16")? == 1;
-        let a16_ok = matches!(name, "image_sample" | "image_sample_lz" | "image_sample_l");
+        let a16_ok = matches!(name, "image_sample" | "image_sample_lz" | "image_sample_l" | "image_load");
         for (flag, why) in [("a16", "16-bit address"), ("d16", "16-bit data"), ("tfe", "tfe"), ("lwe", "lwe"), ("unorm", "unnormalised")] {
             if d.get(flag)? == 1 && (flag != "unorm" || sampled) && (flag != "a16" || !a16_ok) {
                 self.why = Some(why.into());
@@ -310,7 +310,10 @@ impl Lifter<'_> {
             format!("float{}({})", ncoord, parts.join(", ")).replace("float1(", "(")
         };
         let icoord = |l: &mut Self, extra_mip: bool| -> String {
-            let mut parts: Vec<String> = (0..ncoord as u16).map(|k| format!("(int){}", addr(l, k))).collect();
+            // with a16, integer coordinates are 16 bits each, two per register
+            let mut parts: Vec<String> = (0..ncoord as u16)
+                .map(|k| if a16 { format!("(int)(({} >> {}u) & 0xffffu)", addr(l, k / 2), 16 * (k % 2)) } else { format!("(int){}", addr(l, k)) })
+                .collect();
             if extra_mip {
                 parts.push("0".into());
             }
