@@ -1,0 +1,29 @@
+runtitle — Build 3: the title loaded by the Windows loader (prepared images), imports bound
+loaded    17 images; 1924 imports bound (467 from the title's own DLLs); 0 bound to trap thunks (unbuilt)
+tls       the title's block moved from slot 6 to slot 0 on every thread; ours to 6
+guard     job (killed on exit, own memory <= 16.0 GiB), title budget 12.0 GiB, watchdog at 35 s
+drives    G: the title's folder (read-only), T: emptied, S: storage; files and DirectStorage on them
+hooks     the exe's __XMemAllocationHooks__ installed
+dllmain   vcruntime140.dll                         ok
+dllmain   bink2scarlett.dll                        ok
+dllmain   xcurl.dll                                ok
+dllmain   vcruntime140_1.dll                       ok
+dllmain   msvcp140.dll                             ok
+dllmain   xboxbvhbuilder.dll                       ok
+dllmain   amd_fidelityfx_loader_xbox.dll           ok
+dllmain   amd_fidelityfx_upscaler_xbox.dll         ok
+dllmain   concrt140.dll                            ok
+dllmain   libhttpclient.gdk.dll                    ok
+dllmain   msvcp140_1.dll                           ok
+dllmain   msvcp140_2.dll                           ok
+dllmain   msvcp140_atomic_wait.dll                 ok
+dllmain   msvcp140_codecvt_ids.dll                 ok
+dllmain   vccorlib140.dll                          ok
+dllmain   vcomp140.dll                             ok
+tls       2 callbacks of the exe run
+entry     the exe's entry point on a 8 MiB stack; waiting up to 20 s for the first render call
+REACHED   the first render call: D3D12XboxCreateDevice[0, cf04aff8e0, 7ffa47660638, 7ffa48a5f048]
+discovery (1.4 s in): unbuilt imports the title called, first-call order
+gdk runtime discovery: 2
+          interface not implemented: provider f4faf4d4-2d04-4fce-b3e0-474a713a3e84 iid 41a4e10c-5a7e-41d9-8c37-37bde62a07d6
+          interface not implemented: provider 03f0fe74-fdd9-4e5c-b630-f9339c47acc5 iid 35f07670-706e-4bfb-9476-090798c5ebf3

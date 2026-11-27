@@ -4,8 +4,8 @@
 built around the right memory model from the first line, aiming at 30 frames a second.</b></p>
 
 <p align="center">
-  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-49%25-yellow?style=for-the-badge"></a>
-  <a href="progress.md"><img alt="frame" src="https://img.shields.io/badge/title%20frame-not%20yet-lightgrey?style=for-the-badge"></a>
+  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-51%25-yellow?style=for-the-badge"></a>
+  <a href="progress.md"><img alt="frame" src="https://img.shields.io/badge/title-reaches%20D3D12XboxCreateDevice-blue?style=for-the-badge"></a>
   <a href="tasks.md"><img alt="shaders" src="https://img.shields.io/badge/shaders-0%20%2F%2025%2C694-lightgrey?style=for-the-badge"></a>
   <a href="plan.md"><img alt="target" src="https://img.shields.io/badge/target-30%20fps-blue?style=for-the-badge"></a>
 </p>
@@ -18,7 +18,7 @@ built around the right memory model from the first line, aiming at 30 frames a s
   <a href="LICENSE"><img alt="licence" src="https://img.shields.io/badge/licence-GPL--3.0--only-blue"></a>
 </p>
 
-<p align="center"><a href="progress.md"><b>Progress <code>[██████████░░░░░░░░░░]</code> 49 %</b></a><br>
+<p align="center"><a href="progress.md"><b>Progress <code>[██████████░░░░░░░░░░]</code> 51 %</b></a><br>
 <sub>work toward 30 fps, weighted by build step · no title frame measured yet</sub></p>
 
 <table align="center">

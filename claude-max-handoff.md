@@ -14,10 +14,10 @@ explicit OK for that run.** Test memory patterns with `exitprobe` (no title, cap
 ## Where things stand (one screen)
 
 ```
-progress    49 % toward 30 fps (progress.md)       measured fps: none yet (no title frame)
+progress    51 % toward 30 fps (progress.md)       measured fps: none yet (no title frame)
 built       Builds 0 (a, b), 1, 2 closed; Build 3 ~88 %; Build 4 core proven; Build 7 DLSS + FSR standalone
-title       loads and runs its entry; the startup "wait" was likely our graphics placement spinning in the
-            kernel (fixed in 2a2af01); not re-run yet (needs the owner's OK)
+title       REACHES D3D12XboxCreateDevice in 1.4 s (runs/build3-reached.md): Build 3 closed. Title runs are OK
+            with the owner (guarded: job, 12 GiB budget, watchdog); TLS slot 0 is the title's (runtime/src/tls.rs)
 runtime     GDK runtime (xgameruntime.dll) ours via LoadLibraryExA override; files 32 + CRT 13 bound
 lanes       round 1 and round 2 all merged (#1-#18); no lane running
 tests       311 green (one files F5 host-comparison test 46 vs 45 since the reboot: for the files lane)

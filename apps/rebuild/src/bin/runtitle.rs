@@ -15,6 +15,8 @@
 
 #[path = "../sampler.rs"]
 mod sampler;
+#[path = "../crash.rs"]
+mod crash;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -199,6 +201,20 @@ fn main() {
     );
     if !run {
         return;
+    }
+    crash::install(title.images.iter().map(|l| (l.name.clone(), l.base, l.image.size_of_image as u64)).collect());
+    // the title's code assumes its TLS block is slot 0 (an exe's): give it slot 0 before any thread runs
+    if let Some(tls) = &exe.image.tls {
+        let index = (exe.base + (tls.index_va - exe.image.image_base)) as *mut u32;
+        let callbacks: Vec<usize> = tls.callbacks.iter().map(|r| (exe.base + *r as u64) as usize).collect();
+        match unsafe { rebuild_runtime::tls::give_slot0(index, exe.base as usize, &callbacks) } {
+            Ok(0) => println!("tls       the title already has slot 0"),
+            Ok(k) => println!("tls       the title's block moved from slot {k} to slot 0 on every thread; ours to {k}"),
+            Err(e) => {
+                println!("FAILED    tls: {e}");
+                std::process::exit(1);
+            }
+        }
     }
     if let Err(e) = guard(seconds) {
         println!("REFUSED   {e}");

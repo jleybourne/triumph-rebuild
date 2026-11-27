@@ -24,6 +24,7 @@ pub mod modules;
 pub mod physical;
 #[cfg(windows)]
 pub mod title;
+pub mod tls;
 #[cfg(windows)]
 pub mod xg;
 pub mod xmem;
