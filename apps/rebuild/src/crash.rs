@@ -36,13 +36,34 @@ impl std::fmt::Write for Buf {
     }
 }
 
+/// `<REBUILD_SESSION_DIR>\crash-<pid>.txt` as a wide string, made at install (no allocation in the handler).
+static CRASH_FILE: OnceLock<Vec<u16>> = OnceLock::new();
+
 fn write_err(b: &[u8]) {
-    use windows::Win32::Storage::FileSystem::WriteFile;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, WriteFile, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, OPEN_ALWAYS,
+    };
     use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
     unsafe {
         for h in [STD_ERROR_HANDLE, STD_OUTPUT_HANDLE] {
             if let Ok(h) = GetStdHandle(h) {
                 let _ = WriteFile(h, Some(b), None, None);
+            }
+        }
+        // the session folder's crash report: opened per write, appended (kernel calls only)
+        if let Some(path) = CRASH_FILE.get() {
+            if let Ok(f) = CreateFileW(
+                windows::core::PCWSTR(path.as_ptr()),
+                FILE_APPEND_DATA.0,
+                FILE_SHARE_READ,
+                None,
+                OPEN_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            ) {
+                let _ = WriteFile(f, Some(b), None, None);
+                let _ = CloseHandle(f);
             }
         }
     }
@@ -157,6 +178,11 @@ unsafe extern "system" fn unhandled(p: *const EXCEPTION_POINTERS) -> i32 {
 /// Install both handlers; `images` names addresses in the reports.
 pub fn install(images: Vec<(String, u64, u64)>) {
     let _ = IMAGES.set(images);
+    if let Some(dir) = std::env::var_os("REBUILD_SESSION_DIR") {
+        let path = std::path::PathBuf::from(dir).join(format!("crash-{}.txt", std::process::id()));
+        use std::os::windows::ffi::OsStrExt;
+        let _ = CRASH_FILE.set(path.as_os_str().encode_wide().chain(std::iter::once(0)).collect());
+    }
     unsafe {
         AddVectoredExceptionHandler(1, Some(first_chance));
         SetUnhandledExceptionFilter(Some(unhandled));

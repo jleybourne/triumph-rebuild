@@ -59,9 +59,29 @@ fn report(started: Instant) {
 
 static mut STARTED: Option<Instant> = None;
 
+/// `<REBUILD_SESSION_DIR>\summary.toml`: how the run ended, for the launcher's session list.
+fn write_summary(outcome: &str, detail: &str) {
+    let Some(dir) = std::env::var_os("REBUILD_SESSION_DIR") else { return };
+    let elapsed = unsafe { STARTED }.map(|s| s.elapsed().as_secs_f64()).unwrap_or(0.0);
+    let limits = rebuild_runtime::limits::get();
+    let text = format!(
+        "outcome = \"{outcome}\"\ndetail = \"{}\"\nseconds = {elapsed:.3}\ntitle_budget_mib = {}\ntitle_budget_used_mib = {}\n\
+         [limits]\nram_mb = {}\nvram_mb = {}\ncpu_cores = {}\ncpu_rate = {}\n",
+        detail.replace('\\', "\\\\").replace('"', "\\\""),
+        rebuild_runtime::budget::limit() >> 20,
+        rebuild_runtime::budget::used() >> 20,
+        limits.ram_mb,
+        limits.vram_mb,
+        limits.cpu_cores,
+        limits.cpu_rate
+    );
+    let _ = std::fs::write(std::path::PathBuf::from(dir).join("summary.toml"), text);
+}
+
 fn reached_device(args: &[u64; 4]) {
     let started = unsafe { STARTED }.unwrap_or_else(Instant::now);
     println!("REACHED   the first render call: D3D12XboxCreateDevice{args:x?}");
+    write_summary("reached", "the first render call: D3D12XboxCreateDevice");
     report(started);
     std::process::exit(0);
 }
@@ -310,8 +330,14 @@ fn main() {
         }
     };
     match outcome {
-        Some(code) => println!("EXITED    the title's entry returned {code:#x} before a render call"),
-        None => println!("TIMEOUT   no render call within {seconds} s"),
+        Some(code) => {
+            println!("EXITED    the title's entry returned {code:#x} before a render call");
+            write_summary("exited", &format!("entry returned {code:#x} before a render call"));
+        }
+        None => {
+            println!("TIMEOUT   no render call within {seconds} s");
+            write_summary("timeout", &format!("no render call within {seconds} s"));
+        }
     }
     if sample.is_some() {
         println!("threads   every thread of the process, innermost frames first:");
