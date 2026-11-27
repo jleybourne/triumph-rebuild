@@ -191,81 +191,15 @@ pub fn doubled(p: &Program, exec: u64, sin: &[u32], vin: &[Wave64]) -> Vec<Wave6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::V;
-
-    struct Rng(u64);
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            self.0
-        }
-        fn below(&mut self, n: u64) -> u64 {
-            self.next() % n
-        }
-    }
-
-    fn random_program(rng: &mut Rng, len: usize) -> Program {
-        let mut p = Program::default();
-        p.push(Op::VInput(0));
-        p.push(Op::VInput(1));
-        p.push(Op::SInput(0));
-        p.push(Op::LaneId);
-        for _ in 0..len {
-            let n = p.insts.len() as u64;
-            let a = V(rng.below(n) as u32);
-            let b = V(rng.below(n) as u32);
-            let c = V(rng.below(n) as u32);
-            let op = match rng.below(16) {
-                0 => Op::Const(rng.next() as u32 & 0xFF),
-                1 => Op::Add(a, b),
-                2 => Op::Mul(a, b),
-                3 => Op::And(a, b),
-                4 => Op::Xor(a, b),
-                5 => Op::Shr(a, b),
-                6 => Op::Lt(a, b),
-                7 => Op::Select(c, a, b),
-                8 => Op::WaveSum(a),
-                9 => Op::WaveMin(a),
-                10 => Op::BallotLo(a),
-                11 => Op::BallotHi(a),
-                12 => Op::ReadLane(a, rng.below(64) as u8),
-                13 => Op::ReadFirstLane(a),
-                14 => Op::Swizzle(a, rng.below(64) as u8),
-                _ => Op::Or(a, b),
-            };
-            p.push(op);
-        }
-        let n = p.insts.len() as u32;
-        p.outputs = (n.saturating_sub(4)..n).map(V).collect();
-        p
-    }
-
-    fn random_exec(rng: &mut Rng) -> u64 {
-        match rng.below(5) {
-            0 => u64::MAX,
-            1 => rng.next() & 0xFFFF_FFFF,          // only the lo half
-            2 => rng.next() & 0xFFFF_FFFF_0000_0000, // only the hi half
-            3 => 1 << rng.below(64),                  // one lane
-            _ => rng.next(),
-        }
-        .max(1)
-    }
+    use crate::gen::{self, Rng};
 
     #[test]
     fn doubling_matches_the_console_bit_for_bit_on_100k_random_programs() {
         let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
         for case in 0..100_000 {
-            let p = random_program(&mut rng, 12);
-            let exec = random_exec(&mut rng);
-            let sin = [rng.next() as u32];
-            let mut vin = [[0u32; 64]; 2];
-            for w in vin.iter_mut() {
-                for l in w.iter_mut() {
-                    *l = rng.next() as u32 & if rng.below(3) == 0 { 0xF } else { u32::MAX };
-                }
-            }
+            let p = gen::program(&mut rng, 12, true);
+            let exec = gen::exec(&mut rng);
+            let (sin, vin) = gen::inputs(&mut rng);
             let want = console(&p, exec, &sin, &vin);
             let got = doubled(&p, exec, &sin, &vin);
             for (k, (w, g)) in want.iter().zip(&got).enumerate() {

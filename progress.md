@@ -1,7 +1,7 @@
 # Progress
 
 ```
-work toward 30 fps   [█████░░░░░░░░░░░░░░░]  27 %
+work toward 30 fps   [██████░░░░░░░░░░░░░░]  28 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (fork reference: 25,694 translated, 7 pipelines refused)
 measured fps         none yet — the title has not rendered a frame on this code
 baseline to beat     7.6 fps · 131.3 ms · ~4,500 draws · 356 dropped   (the layer being replaced)
@@ -21,13 +21,13 @@ second row and is the number that counts.
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
 | 3 | PE loader + console runtime | 15 | 0 % | 0 | — |
-| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 10 % | 1.5 | designed; IR, classifier and lane-doubling model built and proven bit-exact (100k programs); HLSL → DXC chosen; decoder in lane `shader` |
+| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 15 % | 2.25 | designed; IR, classifier, lane model (100k programs bit-exact) and HLSL → DXC emission proven on the card; decoder in lane `shader` |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 0 % | 0 | plan corrected: the upscale pass is found by bindings; lowering the internal resolution is its own task |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **27.3 ≈ 27 %** | |
+| | **total** | **100** | | **28.05 ≈ 28 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -80,6 +80,24 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — The shader core runs on the card; handover doc
+
+```
+[██████░░░░░░░░░░░░░░]  28 %   (was 27 %: +0.75 Build 4 emission proven)
+shaders     0 / 25,694
+measured fps   none yet
+```
+
+- **Built** `crates/sir/src/hlsl.rs` (two emission modes: agnostic wave32, and doubled with EXEC as data) and
+  `gen.rs` (random programs). Also `sirtest`, which runs IR → HLSL → DXC → GPU and compares with the interpreter.
+- **Measured:** 300 runs (100 agnostic + 200 doubled) match the 64-lane console on every lane of every output.
+  A per-lane `WaveReadLaneAt` index is exact on this card, which closes the design's open question.
+  [`runs/build4-sirtest.md`](runs/build4-sirtest.md)
+- **Handover:** `secondary-agent.md` now has a live "current state" (section 8) and "Taking over as lead"
+  (section 9): the owner's working rules, the next eight steps in order, and the owner-only items. It is
+  updated every step.
+- **Next:** the launcher (owner request; designed next), then `sir` live-mask analysis and memory lowering.
 
 ### 2026-11-27 — The shader core: design, and the lane model proven
 

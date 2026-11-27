@@ -4,7 +4,7 @@
 built around the right memory model from the first line, aiming at 30 frames a second.</b></p>
 
 <p align="center">
-  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-27%25-yellow?style=for-the-badge"></a>
+  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-28%25-yellow?style=for-the-badge"></a>
   <a href="progress.md"><img alt="frame" src="https://img.shields.io/badge/title%20frame-not%20yet-lightgrey?style=for-the-badge"></a>
   <a href="tasks.md"><img alt="shaders" src="https://img.shields.io/badge/shaders-0%20%2F%2025%2C694-lightgrey?style=for-the-badge"></a>
   <a href="plan.md"><img alt="target" src="https://img.shields.io/badge/target-30%20fps-blue?style=for-the-badge"></a>
@@ -14,11 +14,11 @@ built around the right memory model from the first line, aiming at 30 frames a s
   <a href="https://www.rust-lang.org"><img alt="Rust" src="https://img.shields.io/badge/Rust-1.100-000000?logo=rust"></a>
   <a href="https://learn.microsoft.com/windows/win32/direct3d12/directx-12-programming-guide"><img alt="Direct3D 12" src="https://img.shields.io/badge/Direct3D-12-0078D4"></a>
   <a href="HANDOFF.md"><img alt="GPU" src="https://img.shields.io/badge/tested%20on-RTX%204070%20Ti-76B900?logo=nvidia"></a>
-  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-35%20green-brightgreen"></a>
+  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-37%20green-brightgreen"></a>
   <a href="LICENSE"><img alt="licence" src="https://img.shields.io/badge/licence-GPL--3.0--only-blue"></a>
 </p>
 
-<p align="center"><a href="progress.md"><b>Progress <code>[█████░░░░░░░░░░░░░░░]</code> 27 %</b></a><br>
+<p align="center"><a href="progress.md"><b>Progress <code>[██████░░░░░░░░░░░░░░]</code> 28 %</b></a><br>
 <sub>work toward 30 fps, weighted by build step · no title frame measured yet</sub></p>
 
 <table align="center">
@@ -55,9 +55,9 @@ Measured on one machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB RAM, PCIe 3.0, Win
 | **CPU → GPU upload** | ✅ the ring: submit thread 32 µs a frame; 34 MB lands in 19 ms on workers, verified ([Build 2](runs/build2-ring.md)) | inside a frame, overlapped |
 | **List translation** | ✅ 0.43 µs a draw with the driver, 1.9 ms a frame ([Build 0 b](runs/build0b-lists.md)) | ≤ 7.4 µs a draw |
 | **Descriptors** | ✅ 12,027 a frame from a dirty list: 2.0 ms | no scan |
-| **Shaders** | 0 / 25,694; core designed, lane model bit-exact on 100k random programs ([design](docs/design/shader-ir.md)) | 25,694, wave32, 0 refused |
+| **Shaders** | 0 / 25,694; core proven on the card: IR → HLSL → DXC → GPU exact, wave64 on wave32 exact ([run](runs/build4-sirtest.md)) | 25,694, wave32, 0 refused |
 | **Upscaler** | not started; plan corrected (the title's upscale pass is found by bindings) | DLSS on NVIDIA, FSR on AMD |
-| **Tests** | 35 green (`crates/uma` 24, `crates/xlist` 5, `crates/sir` 6) | |
+| **Tests** | 37 green (`crates/uma` 24, `crates/xlist` 5, `crates/sir` 8) | |
 
 Every result is reported as **fps · ms · draws · dropped** together, with resolution and upscaler mode.
 A faster frame that draws less of the scene is not a win.
@@ -119,7 +119,7 @@ and replacing only the memory model has not been costed, and no title frame has 
 | 1 | **Tiled VRAM at console addresses**, sharing by address, arena | no copy-back, ever | ✅ closed |
 | 2 | **CPU-written memory on an async ring**; the GPU→CPU region | uploads off the submit thread; labels the title polls | ✅ closed |
 | 3 | **PE loader + console runtime** | the title's own code runs | ⏳ |
-| 4 | **Shaders**: 25,694 programs, our own core, wave32, offline | the full scene, no refusals, ~10-22 ms of GPU time back | 🔄 lane model proven |
+| 4 | **Shaders**: 25,694 programs, our own core, wave32, offline | the full scene, no refusals, ~10-22 ms of GPU time back | 🔄 core proven on the card |
 | 5 | **D3D12.X device, lists, descriptors, present** | a frame, and the frame line | ⏳ |
 | 6 | **List translation** on the title's threads | the CPU half of the frame | 🔄 core built |
 | 7 | **Upscaler**: find the title's pass, lower the internal resolution, DLSS + FSR | fewer pixels | ⏳ |
@@ -129,6 +129,9 @@ and replacing only the memory model has not been costed, and no title frame has 
 Full status with outcomes: **[tasks](tasks.md)** · **[progress](progress.md)**.
 
 ## 🔎 Recent findings
+
+- **The shader core runs on the card.** Random programs go IR → HLSL → DXC → GPU and match the 64-lane console
+  on every lane, in both modes (plain wave32, and wave64 doubled onto wave32).
 
 - **Wave64 on wave32, exactly.** One host lane carrying two console lanes, with EXEC as data, matches a 64-lane
   console bit for bit on 100,000 random programs, including the reduction the fork had to refuse.
@@ -155,7 +158,7 @@ Full status with outcomes: **[tasks](tasks.md)** · **[progress](progress.md)**.
 Requirements: Windows 10/11 x64, a Direct3D 12 GPU with tiled resources tier 2 or higher, and Rust.
 
 ```powershell
-cargo test --release                                  # 35 tests, no GPU or game data needed
+cargo test --release                                  # 37 tests, no GPU or game data needed
 cargo run --release --bin gputest                     # the GPU writes, the CPU reads, no copy
 cargo run --release --bin gputest -- --bare           # control: never blame the machine
 cargo run --release --bin gputest -- --tiled          # Build 1: tiles, console addresses, sharing
@@ -165,6 +168,7 @@ cargo run --release --bin gputest -- --ring           # Build 2: the upload ring
 cargo run --release --bin gputest -- --labels         # Build 2: GPU-written labels into title memory
 cargo run --release --bin uploadbench [-- --tiled]    # Build 0 (a): the upload benchmark
 cargo run --release --bin listbench                   # Build 0 (b): per-draw translation
+cargo run --release --bin sirtest                     # Build 4: shader core IR → HLSL → DXC → GPU, exact
 ```
 
 <details>
@@ -198,6 +202,6 @@ runs/             every measurement: a write-up and the raw output beside it
 | ✅ | [Tasks](tasks.md) | every task with the number that closes it; known traps from the fork |
 | 📊 | [Runs](runs/README.md) | Build 0 (a) upload, Build 0 (b) translation, Build 1 tiles |
 | 🔍 | [Handoff](HANDOFF.md) · [Review prompt](REVIEW-PROMPT.md) | the brief for an independent review |
-| 🤝 | [Helper agents](secondary-agent.md) | the temporary plan for helper agents: lanes, rules, hand-back |
+| 🤝 | [Helper agents and handover](secondary-agent.md) | helper lanes and rules; the live state; how a new session takes over as lead |
 | 📐 | [Shader core design](docs/design/shader-ir.md) | classify, uniformity, lane doubling, window addressing, HLSL → DXC |
 | 💭 | [Thoughts](thoughts.md) | the first reasoning, before the plan's corrections |

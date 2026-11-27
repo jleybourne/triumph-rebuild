@@ -1,6 +1,6 @@
 # Design — the shader core (plan decision 4)
 
-Status: **designed 2026-11-27. The IR, the classifier and the lane model are built and proven in `crates/sir`; emission is next.**
+Status: **designed 2026-11-27. The IR, the classifier, the lane model and HLSL emission are built, and proven on the card (`sirtest`, 300 runs exact).**
 Inputs: the fork's census and its cost analysis (`docs/research/native-60-gpu.md` and `docs/per-lane.md` on
 `jleybourne/Triumph`), and this repository's Builds 1-2.
 
@@ -83,8 +83,8 @@ Two conditions came out of building it, and both are rules for emission:
    contains a wave op is emitted as predication (both sides run, selects merge), not as a host branch.
    Live-mask analysis decides where a real branch is safe: no wave op inside, or the condition is uniform.
 2. **A swizzle reads another host lane with a per-lane index** (`WaveReadLaneAt(x, h ^ m)`). NVIDIA
-   hardware has this shuffle, but the HLSL documentation asks for a uniform index. [?] Checked by a GPU
-   test when emission lands; the fallback is LDS for that one operation.
+   hardware has this shuffle, but the HLSL documentation asks for a uniform index. **Checked on the card
+   (`sirtest`): exact.** No LDS fallback is needed.
 
 Graphics stages cannot double (one pixel is one thread). A `wave-wide` pixel or vertex program runs as
 two host waves, with the exchange done through wave intrinsics where the operation allows, and LDS
@@ -140,6 +140,7 @@ agree bit for bit.
 1. ✅ `crates/sir`: IR types, uniformity analysis, the wave-size classifier, and the lane-doubling model
    with its interpreter tests (100k random programs, bit-exact).
 2. Structurizer and SSA from decoded GFX10 (needs lane `shader` S3).
-3. HLSL emission and DXC compilation for the `agnostic` class, then census progress.
+3. ✅ HLSL emission and DXC compilation, both modes, proven on the card ([`runs/build4-sirtest.md`](../../runs/build4-sirtest.md)).
+   Then census progress once decoded programs arrive.
 4. Lane doubling emission, then the graphics fallback, by census weight.
 5. The oracle diff across all 25,694 programs.

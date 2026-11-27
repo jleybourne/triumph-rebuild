@@ -1,0 +1,5 @@
+sirtest — the shader core on the card: IR → HLSL → DXC → GPU, against the 64-lane interpreter
+dxc       C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\dxc.exe
+ran       100 agnostic (wave32, one console lane per thread) + 200 doubled (two console lanes per thread, EXEC as data)
+PROVEN    every lane of every output matches the 64-lane console interpreter, on the card
+PROVEN    a per-lane WaveReadLaneAt index (the doubled swizzle) is exact on this GPU

@@ -24,8 +24,10 @@ dependencies = [
 name = "rebuild"
 version = "0.1.0"
 dependencies = [
+ "rebuild-sir",
  "rebuild-uma",
  "rebuild-xlist",
+ "windows",
 ]
 
 [[package]]

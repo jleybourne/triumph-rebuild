@@ -83,7 +83,7 @@ decision 4.
 | done | design: [`docs/design/shader-ir.md`](docs/design/shader-ir.md): classify → uniformity → lower → HLSL → DXC 1.8 offline (SM 6.6, wave32, 16-bit) | DXC accepts `[WaveSize(32)]`, wave/quad intrinsics, `float16_t` |
 | done | the core's IR (`crates/sir`): uniformity, the wave-size classifier, the lane-doubling model (EXEC as data) | 100,000 random programs bit-exact against a 64-lane reference; the fork's refusal case exact |
 | todo | live-mask analysis: divergent branches with wave ops become predication; host branches elsewhere | IR tests |
-| todo | HLSL emission + DXC, run on the GPU and compared with the interpreter; the per-lane `WaveReadLaneAt` check | emitted programs match `sir::lanes::console` on the card |
+| done | HLSL emission + DXC, run on the GPU and compared with the interpreter; the per-lane `WaveReadLaneAt` check | `sirtest`: 300 runs (100 agnostic + 200 doubled) exact on every lane; per-lane `WaveReadLaneAt` exact — [`runs/build4-sirtest.md`](runs/build4-sirtest.md) |
 | todo | census tool: every program in `shaders.rpf` by hash, with stage, size and wave64 use; the census line above | `census` prints 25,694 rows; progress.md shows the shader bar |
 | todo | RDNA2 (GFX10) decode: VALU, SALU, LDS, scratch, images, samplers, control flow | corpus decodes; byte-exact re-encode |
 | todo | wave64 → wave32 lowering for every vendor; reductions that cannot reconverge are named | the 7 wave-64 pipelines build; divergence tests pass |

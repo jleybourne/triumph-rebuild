@@ -11,6 +11,8 @@
 //!   interpreter.
 
 pub mod classify;
+pub mod gen;
+pub mod hlsl;
 pub mod lanes;
 
 /// An SSA value: the index of the instruction that defines it.
