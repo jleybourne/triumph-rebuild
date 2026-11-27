@@ -8,7 +8,6 @@
 //!
 //! `REBUILD_CONSOLE=series-s` answers Series S; otherwise Series X (the target).
 
-// the host's own names, so the override table and the code read the same
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;

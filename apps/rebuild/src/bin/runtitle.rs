@@ -19,6 +19,8 @@ mod sampler;
 mod crash;
 #[path = "../watch.rs"]
 mod watch;
+#[path = "../patch.rs"]
+mod patch;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -291,6 +293,8 @@ fn main() {
         return;
     }
     crash::install(title.images.iter().map(|l| (l.name.clone(), l.base, l.image.size_of_image as u64)).collect());
+    // REBUILD_PATCH: diagnostic code patches, before the title runs
+    patch::apply(&title.images.iter().map(|l| (l.name.clone(), l.base, l.image.size_of_image as u64)).collect::<Vec<_>>());
     crash::on_fatal(device_report);
     // REBUILD_WATCH: who writes an address (hardware watchpoint on every thread)
     watch::install();
