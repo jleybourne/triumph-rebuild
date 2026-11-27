@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! REBUILD_SHADERS=D:\victory-data\shaders.rpf cargo run --release --bin execcheck -- [--stage cs|ps|vs|all]
-//!     [--only <hash>[,<hash>...] | @<file of hashes>] [--limit N] [--debug] [--gis] [--card] [--out <dir>]
+//!     [--only <hash>[,<hash>...] | @<file of hashes>] [--v0] [--limit N] [--debug] [--gis] [--card] [--out <dir>]
 //! ```
 //!
 //! - Programs: every agnostic VS/PS/CS the translator takes (`rebuild_sir::lift::lift_program`), compiled with
@@ -116,6 +116,9 @@ fn prepare(walk: &census::Walk, stages: &[&'static str], out: &Path, only: Optio
                         continue;
                     }
                     let single = row.blocks == 1;
+                    if !single && flag("--v0") {
+                        continue; // the straight-line set only
+                    }
                     let skip = |reason: String| skips.lock().unwrap().push(Skip { hash: p.hash.clone(), stage: kind, single, reason });
                     match translate(p, kind, &dxc, out) {
                         Ok(mut prog) => {
