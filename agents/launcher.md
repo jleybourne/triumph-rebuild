@@ -138,6 +138,7 @@ set, the first game points at that folder read-only, so its key art appears at r
 | 2 | `D:\victory-data\launcher-shots\pass-2\1280x800` | library, per-game; grain still on, harness panic at the end |
 | 3 | `D:\victory-data\launcher-shots\pass-3` | grain gone; Phosphor-first fonts broke body text |
 | 3b | `D:\victory-data\launcher-shots\pass-3b\{1280x800,1920x1080}` | text and icons fixed, hero scrim; the display is at 150 %, so 1280x800 is 1920x1200 px |
+| 4 | `D:\victory-data\launcher-shots\pass-4\{1280x800,1920x1080}` | card hairline dropped, a top scrim behind the window controls on Play, caret up/down for mod order, equal card baselines on hover |
 
 ## For the lead
 
