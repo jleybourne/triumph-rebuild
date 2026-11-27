@@ -316,7 +316,13 @@ impl Engine {
     /// Opens a console path for reading and registers it under `key` (the file object's address:
     /// requests name their file by it).
     pub fn open_file(&self, key: usize, path: &str) -> Result<(), Hresult> {
-        let handle = self.shared.vfs.open(path, OpenOptions::read()).map_err(|e| vfs_error(&e))?;
+        let handle = self.shared.vfs.open(path, OpenOptions::read()).map_err(|e| {
+            let hr = vfs_error(&e);
+            if trace_on() {
+                eprintln!("dstorage  open failed ({hr:#x}): {path}");
+            }
+            hr
+        })?;
         let old = self.shared.files.lock().unwrap_or_else(|e| e.into_inner()).insert(key, handle);
         if let Some(old) = old {
             let _ = self.shared.vfs.close(old);
@@ -482,6 +488,7 @@ fn work(shared: &Shared) {
             q.pending.remove(&job.seq);
             if let Err(hr) = result {
                 q.failures.insert(job.seq, hr);
+                trace("request failed", job.request.source as u64, hr);
             }
             q.flush();
         }
@@ -489,6 +496,19 @@ fn work(shared: &Shared) {
             shared.work.notify_all();
         }
         shared.finished.notify_all();
+    }
+}
+
+fn trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("REBUILD_TRACE_FILES").is_some())
+}
+
+/// `REBUILD_TRACE_FILES`: the first 100 failed requests on stderr.
+fn trace(what: &str, file: u64, hr: Hresult) {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if trace_on() && N.fetch_add(1, Ordering::Relaxed) < 100 {
+        eprintln!("dstorage  {what} ({:#x}): file {file:#x}", hr as u32);
     }
 }
 

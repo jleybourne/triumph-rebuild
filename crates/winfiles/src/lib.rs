@@ -384,6 +384,18 @@ impl Files {
     }
 }
 
+/// `REBUILD_TRACE_FILES`: name the first 200 opens that fail (function, console path, error) on stderr.
+fn trace_failed_open(function: &str, path: &str) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static N: AtomicU32 = AtomicU32::new(0);
+    if !*ON.get_or_init(|| std::env::var_os("REBUILD_TRACE_FILES").is_some()) || N.fetch_add(1, Ordering::Relaxed) >= 200 {
+        return;
+    }
+    let code = unsafe { host::GetLastError() };
+    eprintln!("files     {function} failed ({code}): {path}");
+}
+
 pub unsafe extern "system" fn CreateFileW(
     name: *const u16,
     access: u32,
@@ -394,11 +406,15 @@ pub unsafe extern "system" fn CreateFileW(
     template: HANDLE,
 ) -> HANDLE {
     let raw = host::from_wide(name).unwrap_or_default();
-    with("CreateFileW", INVALID_HANDLE_VALUE, |f| {
+    let h = with("CreateFileW", INVALID_HANDLE_VALUE, |f| {
         f.create("CreateFileW", &raw, access, disposition, flags, flags, |p| unsafe {
             host::CreateFileW(p.as_ptr(), access, share, sa, OPEN_EXISTING, flags, template)
         })
-    })
+    });
+    if h == INVALID_HANDLE_VALUE {
+        trace_failed_open("CreateFileW", &raw);
+    }
+    h
 }
 
 pub unsafe extern "system" fn CreateFileA(
@@ -411,11 +427,15 @@ pub unsafe extern "system" fn CreateFileA(
     template: HANDLE,
 ) -> HANDLE {
     let raw = host::from_ansi(name).unwrap_or_default();
-    with("CreateFileA", INVALID_HANDLE_VALUE, |f| {
+    let h = with("CreateFileA", INVALID_HANDLE_VALUE, |f| {
         f.create("CreateFileA", &raw, access, disposition, flags, flags, |p| unsafe {
             host::CreateFileW(p.as_ptr(), access, share, sa, OPEN_EXISTING, flags, template)
         })
-    })
+    });
+    if h == INVALID_HANDLE_VALUE {
+        trace_failed_open("CreateFileA", &raw);
+    }
+    h
 }
 
 pub unsafe extern "system" fn CreateFile2(
@@ -430,11 +450,15 @@ pub unsafe extern "system" fn CreateFile2(
         Some(p) => (p.dwFileAttributes, p.dwFileFlags),
         None => (0, 0),
     };
-    with("CreateFile2", INVALID_HANDLE_VALUE, |f| {
+    let h = with("CreateFile2", INVALID_HANDLE_VALUE, |f| {
         f.create("CreateFile2", &raw, access, disposition, attrs, flags, |p| unsafe {
             host::CreateFile2(p.as_ptr(), access, share, OPEN_EXISTING, params)
         })
-    })
+    });
+    if h == INVALID_HANDLE_VALUE {
+        trace_failed_open("CreateFile2", &raw);
+    }
+    h
 }
 
 // ---- delete, directories, move ------------------------------------------------------------------------
