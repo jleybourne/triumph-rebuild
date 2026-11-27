@@ -518,3 +518,54 @@ impl Setup {
         }
     }
 }
+
+/// Raw host objects of a [`Setup`], for driving the console list objects (`crate::console`) over
+/// the same frame in tests. Borrowed pointers: the setup keeps them alive.
+impl Setup {
+    pub fn pipeline_raw(&self, i: usize) -> *mut std::ffi::c_void {
+        self.pipelines[i].as_raw()
+    }
+    pub fn signature_raw(&self) -> *mut std::ffi::c_void {
+        self.signature.as_raw()
+    }
+    pub fn heap_raw(&self) -> *mut std::ffi::c_void {
+        self.heap.as_raw()
+    }
+    pub fn heap_gpu_start(&self) -> u64 {
+        unsafe { self.heap.GetGPUDescriptorHandleForHeapStart().ptr }
+    }
+    pub fn view_increment(&self) -> u32 {
+        unsafe { self.device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) }
+    }
+    pub fn rtv_cpu(&self) -> usize {
+        unsafe { self.rtv_heap.GetCPUDescriptorHandleForHeapStart().ptr }
+    }
+    pub fn memory_raw(&self) -> *mut std::ffi::c_void {
+        self.memory.as_raw()
+    }
+    pub fn memory_va(&self) -> u64 {
+        self.memory_va
+    }
+    pub fn target_raw(&self, i: usize) -> *mut std::ffi::c_void {
+        self.targets[i].as_raw()
+    }
+    pub fn indirect_raw(&self) -> *mut std::ffi::c_void {
+        self.indirect.as_raw()
+    }
+    pub fn render_target_size(&self) -> u32 {
+        RT
+    }
+
+    /// Submit `lists` on the setup's queue and wait for them.
+    pub fn submit(&mut self, lists: &[Option<ID3D12CommandList>]) -> Result<(), String> {
+        unsafe {
+            self.queue.ExecuteCommandLists(lists);
+            self.fence_value += 1;
+            self.queue
+                .Signal(&self.fence, self.fence_value)
+                .and_then(|_| self.fence.SetEventOnCompletion(self.fence_value, HANDLE::default()))
+                .and_then(|_| self.device.GetDeviceRemovedReason())
+                .map_err(|e| format!("submit: {e}"))
+        }
+    }
+}

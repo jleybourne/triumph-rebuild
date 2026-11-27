@@ -16,6 +16,9 @@
 #[cfg(windows)]
 pub mod d3d;
 
+#[cfg(windows)]
+pub mod console;
+
 pub mod frame;
 
 /// One recorded list call. Addresses are console GPU addresses.
