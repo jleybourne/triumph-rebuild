@@ -384,15 +384,24 @@ impl Files {
     }
 }
 
-/// `REBUILD_TRACE_FILES`: name the first 200 opens that fail (function, console path, error) on stderr.
-fn trace_failed_open(function: &str, path: &str) {
+/// `REBUILD_TRACE_FILES`: name the first 200 opens that fail (function, console path, error) on stderr;
+/// `REBUILD_TRACE_FILES=all` also names the first 2,000 that succeed.
+fn trace_open(function: &str, path: &str, ok: bool) {
     use std::sync::atomic::{AtomicU32, Ordering};
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    static N: AtomicU32 = AtomicU32::new(0);
+    static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    static FAILED: AtomicU32 = AtomicU32::new(0);
+    static OPENED: AtomicU32 = AtomicU32::new(0);
     // the title reads the last error next: reading the environment (and printing) must not change it
     let code = unsafe { host::GetLastError() };
-    if *ON.get_or_init(|| std::env::var_os("REBUILD_TRACE_FILES").is_some()) && N.fetch_add(1, Ordering::Relaxed) < 200 {
+    let mode = *MODE.get_or_init(|| match std::env::var("REBUILD_TRACE_FILES").as_deref() {
+        Ok("all") => 2,
+        Ok(_) => 1,
+        Err(_) => 0,
+    });
+    if !ok && mode >= 1 && FAILED.fetch_add(1, Ordering::Relaxed) < 200 {
         eprintln!("files     {function} failed ({code}): {path}");
+    } else if ok && mode == 2 && OPENED.fetch_add(1, Ordering::Relaxed) < 2000 {
+        eprintln!("files     {function} opened: {path}");
     }
     set_last_error(code);
 }
@@ -412,9 +421,7 @@ pub unsafe extern "system" fn CreateFileW(
             host::CreateFileW(p.as_ptr(), access, share, sa, OPEN_EXISTING, flags, template)
         })
     });
-    if h == INVALID_HANDLE_VALUE {
-        trace_failed_open("CreateFileW", &raw);
-    }
+    trace_open("CreateFileW", &raw, h != INVALID_HANDLE_VALUE);
     h
 }
 
@@ -433,9 +440,7 @@ pub unsafe extern "system" fn CreateFileA(
             host::CreateFileW(p.as_ptr(), access, share, sa, OPEN_EXISTING, flags, template)
         })
     });
-    if h == INVALID_HANDLE_VALUE {
-        trace_failed_open("CreateFileA", &raw);
-    }
+    trace_open("CreateFileA", &raw, h != INVALID_HANDLE_VALUE);
     h
 }
 
@@ -456,9 +461,7 @@ pub unsafe extern "system" fn CreateFile2(
             host::CreateFile2(p.as_ptr(), access, share, OPEN_EXISTING, params)
         })
     });
-    if h == INVALID_HANDLE_VALUE {
-        trace_failed_open("CreateFile2", &raw);
-    }
+    trace_open("CreateFile2", &raw, h != INVALID_HANDLE_VALUE);
     h
 }
 
