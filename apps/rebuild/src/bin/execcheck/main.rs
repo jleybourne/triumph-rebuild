@@ -38,6 +38,7 @@ use rebuild_shader::signature::{self, Element};
 use rebuild_sir::lift::res::{DescUse, Heap, View};
 
 mod gpu;
+mod ps;
 mod run;
 
 fn arg(name: &str) -> Option<String> {
@@ -49,7 +50,7 @@ fn flag(name: &str) -> bool {
     std::env::args().any(|a| a == name)
 }
 
-fn dxc() -> Option<PathBuf> {
+pub fn dxc() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("REBUILD_DXC") {
         return Some(p.into());
     }
@@ -71,6 +72,8 @@ pub struct Prog {
     /// one basic block (the v0 set) or several
     pub single: bool,
     pub dxil: Vec<u8>,
+    /// our HLSL (the pixel path builds its feeding vertex shader from the input struct)
+    pub src: String,
     pub uses: Vec<DescUse>,
     pub immediate: Vec<[u32; 4]>,
     pub compare: u32,
@@ -196,6 +199,7 @@ fn translate(p: &census::Program, kind: &'static str, dxc: &Path, out: &Path) ->
         stage: kind,
         single: true,
         dxil,
+        src,
         uses: l.desc_uses.clone(),
         immediate: l.immediate_samplers.clone(),
         compare,
@@ -278,9 +282,45 @@ impl Row {
     }
 }
 
+fn lead_agents() -> PathBuf {
+    PathBuf::from(std::env::var("REBUILD_LEAD_DIR").unwrap_or_else(|_| r"D:\Developer\triumph-rebuild".into())).join("agents")
+}
+
+/// What this lane writes into `agents\CARD`, so only its own lock is ever removed.
+const CARD_OWNER: &str = "shaderexec";
+
+/// The real card's exclusive lock (`agents\CARD`, created new): waits while another lane holds it or the lead is
+/// measuring. Released by [`card_release`], also after a worker dies.
+fn card_take() {
+    let lock = lead_agents().join("CARD");
+    let mut said = false;
+    loop {
+        measuring_wait();
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+            Ok(mut f) => {
+                let _ = f.write_all(CARD_OWNER.as_bytes());
+                return;
+            }
+            Err(_) => {
+                if !said {
+                    eprintln!("execcheck: {} exists (another lane has the card), waiting", lock.display());
+                    said = true;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+        }
+    }
+}
+
+fn card_release() {
+    let lock = lead_agents().join("CARD");
+    if std::fs::read_to_string(&lock).is_ok_and(|s| s.trim() == CARD_OWNER) {
+        let _ = std::fs::remove_file(&lock);
+    }
+}
+
 fn measuring_wait() {
-    let lead = PathBuf::from(std::env::var("REBUILD_LEAD_DIR").unwrap_or_else(|_| r"D:\Developer\triumph-rebuild".into()));
-    let lock = lead.join("agents").join("MEASURING");
+    let lock = lead_agents().join("MEASURING");
     let mut said = false;
     while lock.exists() {
         if !said {
@@ -330,6 +370,10 @@ fn main() {
             .filter_map(|l| l.split(',').next().map(str::to_string))
             .collect();
         let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&csv).expect("csv");
+        eprintln!("execcheck: running on {}", if flag("--card") { "the card (smoke set)" } else { "WARP" });
+        if flag("--card") {
+            card_take();
+        }
         let mut g = gpu::Gpu::new(flag("--card"), flag("--debug")).unwrap_or_else(|e| {
             eprintln!("execcheck: {e}");
             std::process::exit(2);
@@ -339,15 +383,30 @@ fn main() {
             std::fs::write(out.join("current"), &p.hash).unwrap();
             let row = match oracle(&odir, &p.hash) {
                 Err(e) => Row { hash: p.hash.clone(), stage: p.stage, single: p.single, verdict: "untested", reason: e, detail: String::new() },
-                Ok(o) => run::program(&mut g, p, &o),
+                Ok(o) => {
+                    let mut r = run::program(&mut g, p, &o, &out);
+                    if g.lost() && r.verdict != "crash" {
+                        r.detail = format!("{}: {}", r.reason, r.detail);
+                        r.verdict = "crash";
+                        r.reason = "device lost".into();
+                    }
+                    r
+                }
             };
             writeln!(f, "{}", row.csv()).unwrap();
             f.flush().unwrap();
             if g.lost() {
+                if flag("--card") {
+                    card_release();
+                }
                 std::process::exit(3);
             }
         }
         let _ = std::fs::remove_file(out.join("current"));
+        drop(g);
+        if flag("--card") {
+            card_release();
+        }
         return;
     }
 
@@ -370,6 +429,9 @@ fn main() {
     passthrough.push("--worker".into());
     for _attempt in 0..1000 {
         let st = std::process::Command::new(&exe).args(&passthrough).status().expect("worker");
+        if flag("--card") {
+            card_release(); // the worker's lock, even when it died holding it
+        }
         if st.success() {
             break;
         }

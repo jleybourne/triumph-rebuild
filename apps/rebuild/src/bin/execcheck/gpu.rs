@@ -13,8 +13,6 @@ pub const SAMPLER_SLOTS: u32 = 2048;
 
 pub struct Gpu {
     info: Option<ID3D12InfoQueue>,
-    /// the adapter: WARP (the default), or the card (`--card`)
-    pub adapter: &'static str,
     pub device: ID3D12Device,
     queue: ID3D12CommandQueue,
     alloc: ID3D12CommandAllocator,
@@ -23,6 +21,9 @@ pub struct Gpu {
     value: u64,
     pub heap: ID3D12DescriptorHeap,
     pub samplers: ID3D12DescriptorHeap,
+    rtvs: ID3D12DescriptorHeap,
+    dsvs: ID3D12DescriptorHeap,
+    rtv_inc: usize,
     inc: usize,
     sinc: usize,
     lost: bool,
@@ -118,9 +119,13 @@ impl Gpu {
                     NodeMask: 0,
                 })
                 .map_err(|e| e.to_string())?;
+            let plain = |ty, n| device.CreateDescriptorHeap::<ID3D12DescriptorHeap>(&D3D12_DESCRIPTOR_HEAP_DESC { Type: ty, NumDescriptors: n, Flags: D3D12_DESCRIPTOR_HEAP_FLAG_NONE, NodeMask: 0 });
+            let rtvs = plain(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 8).map_err(|e| e.to_string())?;
+            let dsvs = plain(D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1).map_err(|e| e.to_string())?;
+            let rtv_inc = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) as usize;
             let inc = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) as usize;
             let sinc = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) as usize;
-            let g = Gpu { info, adapter: if card { "card" } else { "warp" }, device, queue, alloc, list, fence, value: 0, heap, samplers, inc, sinc, lost: false };
+            let g = Gpu { info, device, queue, alloc, list, fence, value: 0, heap, samplers, rtvs, dsvs, rtv_inc, inc, sinc, lost: false };
             g.clear_heaps();
             Ok(g)
         }
@@ -185,6 +190,14 @@ impl Gpu {
         unsafe { self.device.CreateGraphicsPipelineState(desc).map_err(|e| self.reason(e)) }
     }
 
+    pub fn rtv(&self, k: u32) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        D3D12_CPU_DESCRIPTOR_HANDLE { ptr: unsafe { self.rtvs.GetCPUDescriptorHandleForHeapStart() }.ptr + k as usize * self.rtv_inc }
+    }
+
+    pub fn dsv(&self) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        unsafe { self.dsvs.GetCPUDescriptorHandleForHeapStart() }
+    }
+
     pub fn slot(&self, k: u32) -> D3D12_CPU_DESCRIPTOR_HANDLE {
         D3D12_CPU_DESCRIPTOR_HANDLE { ptr: unsafe { self.heap.GetCPUDescriptorHandleForHeapStart() }.ptr + k as usize * self.inc }
     }
@@ -236,12 +249,6 @@ impl Gpu {
     pub fn resource(&self, desc: D3D12_RESOURCE_DESC, state: D3D12_RESOURCE_STATES, written: bool, init: Vec<u8>) -> Result<Res, String> {
         let r = self.committed(D3D12_HEAP_TYPE_DEFAULT, &desc, D3D12_RESOURCE_STATE_COMMON, None)?;
         self.finish(r, desc, state, written, init)
-    }
-
-    /// A render target or depth buffer, cleared to `clear` by the copy of its contents.
-    pub fn target(&self, desc: D3D12_RESOURCE_DESC, state: D3D12_RESOURCE_STATES, init: Vec<u8>, clear: &D3D12_CLEAR_VALUE) -> Result<Res, String> {
-        let r = self.committed(D3D12_HEAP_TYPE_DEFAULT, &desc, D3D12_RESOURCE_STATE_COMMON, Some(clear))?;
-        self.finish(r, desc, state, true, init)
     }
 
     fn finish(&self, r: ID3D12Resource, desc: D3D12_RESOURCE_DESC, state: D3D12_RESOURCE_STATES, written: bool, init: Vec<u8>) -> Result<Res, String> {

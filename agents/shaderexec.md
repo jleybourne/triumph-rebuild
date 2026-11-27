@@ -16,6 +16,12 @@ Status: **in progress** (2026-11-27).
    real card only with `--card`: a small smoke set of straight-line (v0, no loops) programs, one at a time, only while
    `agents\MEASURING` is absent.
 3. **Parallel DXC and translation are capped at logical processors − 4, at most 12** (16 here: 12).
+4. **The card lock** (lead, 21:40): before any run on the real card, `agents\MEASURING` must be absent and the lane
+   takes `agents\CARD` with create-new semantics (another lane holding it: wait and retry), and deletes it when done,
+   even on failure. Built into `execcheck --card`: the worker takes the lock (the file holds `shaderexec`); the worker
+   and the supervisor release it, the supervisor also after a worker dies, and only a lock this lane wrote is removed.
+5. Lanes `shadercov` and `wave64` also work in `crates/sir`: this lane keeps to execution-mismatch fixes, small
+   commits, rebased on `origin/master` often.
 
 ## What is built
 

@@ -46,12 +46,12 @@ pub fn word(set: u32, salt: u64, i: u64) -> u32 {
 }
 
 /// Floats in [0, 1): texture contents.
-fn texel(set: u32, salt: u64, i: u64) -> u32 {
+pub fn texel(set: u32, salt: u64, i: u64) -> u32 {
     let r = word(1, salt ^ 0x5151, i ^ (set as u64) << 40);
     ((f32::from_bits(r) + 2.0) / 4.0).to_bits()
 }
 
-fn bytes_of(words: impl Iterator<Item = u32>) -> Vec<u8> {
+pub fn bytes_of(words: impl Iterator<Item = u32>) -> Vec<u8> {
     words.flat_map(|w| w.to_le_bytes()).collect()
 }
 
@@ -328,7 +328,7 @@ fn describe(g: &Gpu, slot: u32, b: &Bound) {
     }
 }
 
-fn oracle_root(statics: &[[u32; 10]], ours: &RootDesc) -> RootDesc {
+fn oracle_root(statics: &[[u32; 10]], ours: &RootDesc, vis: Visibility) -> RootDesc {
     let samplers = statics
         .iter()
         .enumerate()
@@ -346,7 +346,7 @@ fn oracle_root(statics: &[[u32; 10]], ours: &RootDesc) -> RootDesc {
             },
             register: k as u32,
             space: 0,
-            vis: Visibility::All,
+            vis,
         })
         .collect();
     RootDesc { params: ours.params.clone(), samplers, flags: ours.flags }
@@ -429,7 +429,7 @@ impl Diff {
 }
 
 /// Runs a compute program and the oracle's on every input set.
-pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle) -> Row {
+pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path) -> Row {
     let trace = std::env::var_os("REBUILD_EXEC_TRACE").is_some();
     let step = |s: &str| {
         if trace {
@@ -440,7 +440,7 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle) -> Row {
     if o.root_views > 0 {
         return row("untested", "the oracle binds root views".into(), String::new());
     }
-    if p.stage != "cs" {
+    if p.stage == "vs" {
         return row("untested", "stage not run yet".into(), String::new());
     }
     let pl = match plan(p) {
@@ -448,9 +448,14 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle) -> Row {
         Err(e) => return row("untested", e, String::new()),
     };
     step(&format!("plan {:?}", p.uses));
+    let cs = p.stage == "cs";
     let ours_layout = StageLayout { user_data: true, shadow: true, samplers: p.immediate.clone(), compare: p.compare };
-    let ours_root = RootDesc::compute(&ours_layout, layout::USER_DATA_DWORDS);
-    let oracle_root = oracle_root(&o.statics, &ours_root);
+    let ours_root = if cs {
+        RootDesc::compute(&ours_layout, layout::USER_DATA_DWORDS)
+    } else {
+        RootDesc::graphics(&StageLayout::default(), &ours_layout, layout::USER_DATA_DWORDS)
+    };
+    let oracle_root = oracle_root(&o.statics, &ours_root, if cs { Visibility::All } else { Visibility::Pixel });
     let roots = [&ours_root, &oracle_root].map(|r| rebuild_pipelines::d3d::serialize(r).and_then(|b| g.root_signature(&b)));
     let (ours_rs, oracle_rs) = match roots {
         [Ok(a), Ok(b)] => (a, b),
@@ -458,13 +463,20 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle) -> Row {
         [_, Err(e)] => return row("error", "the oracle's root signature refused".into(), e),
     };
     step("roots");
-    let ours = match g.compute(&ours_rs, &p.dxil) {
-        Ok(x) => x,
-        Err(e) => return row("error", "our pipeline refused".into(), e),
+    let targets = if cs { Vec::new() } else { super::ps::targets_of(&p.outputs) };
+    let pipelines = if cs {
+        (g.compute(&ours_rs, &p.dxil), g.compute(&oracle_rs, &o.dxil))
+    } else {
+        let vs = match super::ps::feed_vs(&p.src).and_then(|src| super::ps::compile_vs(&src, out, &p.hash)) {
+            Ok(v) => v,
+            Err(e) => return row("untested", "no feeding vertex shader".into(), e),
+        };
+        (super::ps::pipeline(g, &ours_rs, &vs, &p.dxil, &targets), super::ps::pipeline(g, &oracle_rs, &vs, &o.dxil, &targets))
     };
-    let theirs = match g.compute(&oracle_rs, &o.dxil) {
-        Ok(x) => x,
-        Err(e) => return row("error", "the oracle's pipeline refused".into(), e),
+    let (ours, theirs) = match pipelines {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) => return row("error", "our pipeline refused".into(), e),
+        (_, Err(e)) => return row("error", "the oracle's pipeline refused".into(), e),
     };
     step("pipelines");
     // the shadow table: raw buffers read by index hold records of the access's size (what the oracle assumes),
@@ -506,47 +518,58 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle) -> Row {
                 Err(e) => return row("error", "input resource".into(), e),
             }
         }
-    step("resources");
+        let tres = match super::ps::make_targets(g, &targets, set) {
+            Ok(t) => t,
+            Err(e) => return row("error", "render target".into(), e),
+        };
+        step("resources");
         g.clear_heaps();
         for (slots, b) in &bound {
             for s in slots {
-                step(&format!("slot {s} {:?}", b.view));
                 describe(g, *s, b);
             }
         }
-        step("samplers");
         for (s, v) in &pl.sampler_slots {
             g.sampler(*s, *v == View::SamplerCmp);
         }
-    step("descriptors");
+        step("descriptors");
+        let all: Vec<&Res> = bound.iter().map(|(_, b)| &b.res).chain(tres.iter()).collect();
         let mut outs: Vec<Vec<Vec<u8>>> = Vec::new();
         for (pso, rs) in [(&ours, &ours_rs), (&theirs, &oracle_rs)] {
             g.begin();
-            for (_, b) in &bound {
-                g.upload(&b.res);
+            for r in &all {
+                g.upload(r);
             }
             unsafe {
                 let l = &g.list;
                 l.SetDescriptorHeaps(&[Some(g.heap.clone()), Some(g.samplers.clone())]);
-                l.SetComputeRootSignature(rs);
                 l.SetPipelineState(pso);
-                l.SetComputeRoot32BitConstants(0, 16, pl.ud[set as usize].as_ptr() as *const _, 0);
-                l.SetComputeRootShaderResourceView(1, shadow.GetGPUVirtualAddress());
-                l.Dispatch(groups[0], groups[1], groups[2]);
+                let ud = pl.ud[set as usize].as_ptr() as *const _;
+                if cs {
+                    l.SetComputeRootSignature(rs);
+                    l.SetComputeRoot32BitConstants(layout::param::CS_USER_DATA, 16, ud, 0);
+                    l.SetComputeRootShaderResourceView(layout::param::CS_SHADOW, shadow.GetGPUVirtualAddress());
+                    l.Dispatch(groups[0], groups[1], groups[2]);
+                } else {
+                    l.SetGraphicsRootSignature(rs);
+                    l.SetGraphicsRoot32BitConstants(layout::param::PS_USER_DATA, 16, ud, 0);
+                    l.SetGraphicsRootShaderResourceView(layout::param::GFX_SHADOW, shadow.GetGPUVirtualAddress());
+                    super::ps::draw(g, &targets, &tres);
+                }
             }
-            for (_, b) in &bound {
-                g.download(&b.res);
+            for r in &all {
+                g.download(r);
             }
             if let Err(e) = g.end() {
                 return row("crash", "device lost".into(), e);
             }
-            outs.push(bound.iter().map(|(_, b)| g.read(&b.res)).collect());
+            outs.push(all.iter().map(|r| g.read(r)).collect());
         }
-    step("ran");
+        step("ran");
         let mut d = Diff::default();
-        for (k, (_, b)) in bound.iter().enumerate() {
-            if b.res.written {
-                compare(&mut d, k, &b.res.init, &outs[0][k], &outs[1][k]);
+        for (k, r) in all.iter().enumerate() {
+            if r.written {
+                compare(&mut d, k, &r.init, &outs[0][k], &outs[1][k]);
             }
         }
         per_set.push(format!("set{set} {}/{}w {}d", d.changed, d.words, d.differ));
