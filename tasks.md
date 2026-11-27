@@ -180,7 +180,7 @@ Design: [`docs/design/launcher.md`](docs/design/launcher.md). Its own bar in `pr
 | done | L2 setup and system check: GPU, driver, tiled tier, SM 6.6, DXC, VRAM, ReBAR (lane `launcher`) | each check has pass/fail and a fix line |
 | done | L3 title settings applied to a copy of `settings.xml` in the write overlay (lane `launcher`) | the original's hash is unchanged |
 | done | L4 mods tab: enable, order, conflicts (lane `launcher`) using `crates/vfs::mods` (merged) | conflicts listed; order respected |
-| todo | L5 in-game menu on the present path, input isolated with `crates/input::menu` (lead, after Build 5). **Input is polled on its own thread** (a poll costs ~170 µs with focus); the present path reads the last state | live options toggle; isolation test passes; the present thread does no polling |
+| done | L5 in-game menu on the present path (`crates/overlay`, lane `overlay`, `agents/overlay.md`): F10 or View+Menu; Settings (vsync, frame rate, cap, readout) live and saved to `REBUILD_CONFIG`; Stats; Developer page with pluggable, online-gated actions (placeholders until `docs/research/devmenu.md`). **Input polled on its own thread**; the present only reads | 4K on the 4070 Ti: 17 µs CPU, 9.5 µs GPU a frame; isolation tests pass; WARP: pixels change only inside the panel; GPU-based validation clean |
 
 ## Known traps, from the fork (jleybourne/Triumph) — each must be designed out, not rediscovered
 

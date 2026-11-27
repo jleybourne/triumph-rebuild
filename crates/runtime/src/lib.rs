@@ -33,6 +33,7 @@ pub mod physical;
 pub mod overlap;
 pub mod pipeline;
 pub mod registry;
+pub mod overlay;
 pub mod present;
 pub mod titlemem;
 #[cfg(all(test, windows))]

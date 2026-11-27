@@ -13,6 +13,9 @@ use crate::source::{Frame, Source, PADS};
 /// Opens and closes the menu unless another is chosen. Not in the stand-in pad's table (a test checks).
 pub const MENU_KEY: u8 = vk::F10;
 
+/// The pad chord the runtime uses: View and Menu together (Back + Start on an Xbox pad).
+pub const PAD_CHORD: u32 = crate::pad::buttons::VIEW | crate::pad::buttons::MENU;
+
 /// The keys `menu.key` may name, by the setting's spelling. None is in the stand-in pad's table (a test checks).
 pub const MENU_KEYS: [(&str, u8); 5] = [("F10", vk::F10), ("F11", vk::F11), ("F12", vk::F12), ("Insert", vk::INSERT), ("Home", vk::HOME)];
 
@@ -57,7 +60,9 @@ pub struct Input<S: Source> {
     source: S,
     phase: Phase,
     menu_key: u8,
-    menu_key_was_down: bool,
+    /// Pad buttons that, held together on one pad, toggle the menu like the menu key (0 = none).
+    chord: u32,
+    toggle_was_down: bool,
 }
 
 impl<S: Source> Input<S> {
@@ -68,7 +73,19 @@ impl<S: Source> Input<S> {
 
     /// With the menu key `menu.key` chose ([`menu_key_named`]).
     pub fn with_menu_key(source: S, menu_key: u8) -> Self {
-        Input { source, phase: Phase::Closed, menu_key, menu_key_was_down: false }
+        Input { source, phase: Phase::Closed, menu_key, chord: 0, toggle_was_down: false }
+    }
+
+    /// Also toggle the menu when every button of `chord` is held on one pad (for pad-only play; see
+    /// [`PAD_CHORD`]). Until the chord is complete the title sees its first button: a chord can't be
+    /// recognised before it is complete.
+    pub fn with_pad_chord(mut self, chord: u32) -> Self {
+        self.chord = chord;
+        self
+    }
+
+    pub fn pad_chord(&self) -> u32 {
+        self.chord
     }
 
     pub fn menu_key(&self) -> u8 {
@@ -112,9 +129,10 @@ impl<S: Source> Input<S> {
     /// Poll every device once and split the result.
     pub fn poll(&mut self) -> Polled {
         let raw = Frame::read(&mut self.source);
-        let down = raw.key(self.menu_key);
-        let pressed = down && !self.menu_key_was_down;
-        self.menu_key_was_down = down;
+        let chord = self.chord != 0 && raw.pads.iter().flatten().any(|p| p.buttons & self.chord == self.chord);
+        let down = raw.key(self.menu_key) || chord;
+        let pressed = down && !self.toggle_was_down;
+        self.toggle_was_down = down;
 
         let mut change = Change::None;
         if pressed {
@@ -305,6 +323,33 @@ mod tests {
         let p = i.poll();
         assert_eq!(p.change, Change::Released);
         assert!(p.title.keys.is_empty());
+    }
+
+    #[test]
+    fn the_pad_chord_toggles_and_its_buttons_never_reach_the_title_once_complete() {
+        let mut i = Input::new(Fake::default()).with_pad_chord(PAD_CHORD);
+        i.source_mut().pads[1] = Some(PadState { buttons: buttons::VIEW, ..NEUTRAL });
+        let p = i.poll();
+        assert_eq!(p.change, Change::None, "half a chord is the title's");
+        assert_eq!(p.title.pads[1].unwrap().buttons, buttons::VIEW);
+        i.source_mut().pads[1] = Some(PadState { buttons: PAD_CHORD, ..NEUTRAL });
+        let p = i.poll();
+        assert_eq!(p.change, Change::Opened);
+        assert_eq!(p.title.pads[1], Some(NEUTRAL));
+        // held: no re-toggle
+        assert_eq!(i.poll().change, Change::None);
+        i.source_mut().pads[1] = Some(NEUTRAL);
+        i.poll();
+        // the chord on another pad closes; the title stays neutral until it is released
+        i.source_mut().pads[0] = Some(PadState { buttons: PAD_CHORD | buttons::A, ..NEUTRAL });
+        assert_eq!(i.poll().change, Change::Closed);
+        assert_eq!(i.poll().title.pads[0], Some(NEUTRAL));
+        i.source_mut().pads[0] = Some(NEUTRAL);
+        assert_eq!(i.poll().change, Change::Released);
+        // without a chord set, the buttons are ordinary
+        let mut j = input();
+        j.source_mut().pads[0] = Some(PadState { buttons: PAD_CHORD, ..NEUTRAL });
+        assert_eq!(j.poll().change, Change::None);
     }
 
     #[test]

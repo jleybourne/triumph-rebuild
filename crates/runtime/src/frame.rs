@@ -145,6 +145,10 @@ pub fn describe() -> String {
     format!("frame rate {limit} | vsync {vsync}")
 }
 
+/// The pacing state is process-wide: the tests that change it (here and in `overlay`) run one at a time.
+#[cfg(test)]
+pub(crate) static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
 // ------------------------------------------------------------------------------------- the clock
 
 /// The interval in µs the title asked for (default 1/60 s until it sets one).
@@ -285,8 +289,7 @@ pub unsafe extern "system" fn GetFrameStatisticsX(_this: *mut c_void, _token: u6
 mod tests {
     use super::*;
 
-    /// The pacing state is process-wide: the tests that change it run one at a time.
-    static SERIAL: Mutex<()> = Mutex::new(());
+    use super::TEST_SERIAL as SERIAL;
 
     fn wait(timeout_ms: u32, flags: u32, t: &mut u64) -> i32 {
         unsafe { WaitFrameEventX(std::ptr::null_mut(), 0, timeout_ms, std::ptr::null(), flags, t) }
