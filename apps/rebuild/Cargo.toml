@@ -8,6 +8,7 @@ version.workspace = true
 rebuild-uma = { path = "../../crates/uma" }
 rebuild-xlist = { path = "../../crates/xlist" }
 rebuild-sir = { path = "../../crates/sir" }
+rebuild-upscale = { path = "../../crates/upscale" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Direct3D", "Win32_Graphics_Dxgi_Common"] }
