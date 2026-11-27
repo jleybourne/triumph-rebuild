@@ -301,11 +301,13 @@ pub extern "system" fn XMemMapPhysicalPagesScatter(addresses: *const *mut c_void
     let ok = with(|s| {
         (0..n).all(|i| {
             let at = unsafe { *addresses.add(i) } as u64;
-            if pages.is_null() {
+            // a null array, or page 0 in it, unmaps that address (the title writes 0 for "no page")
+            let page = if pages.is_null() { 0 } else { unsafe { *pages.add(i) } };
+            if page == 0 {
                 s.physical.unmap(at);
                 true
             } else {
-                s.physical.map(at, unsafe { *pages.add(i) })
+                s.physical.map(at, page)
             }
         })
     });

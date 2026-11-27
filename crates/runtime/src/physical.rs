@@ -17,13 +17,26 @@ use windows::Win32::System::Threading::GetCurrentProcess;
 
 pub const FRAME: usize = 64 << 10;
 
-/// The first frame number handed to the title. Page numbers are opaque to titles, but 0 reads as "no page":
-/// handing out frame 0 let the title treat a live page as free and map it a second time, so its shader arena's
-/// first allocation was overwritten (the null-program crash on frame 2). The fork numbers from here too.
+/// The first 64 KiB frame handed to the title (0 reads as "no page"; the fork numbers from here too).
 pub const FIRST_PAGE: usize = 0x10_0000;
 
+/// Page numbers as the console gives them: **4 KiB units**, so a 64 KiB page is a multiple of 16. The title keeps
+/// them shifted right by 4 in a packed 21-bit table and shifts them back when it builds a scatter list; with
+/// consecutive numbers every 16 pages collapsed onto one, and its 420 MB shader arena became one page (the
+/// null-program crash on frame 2). Numbers stay below 2^25 so `>> 4` fits 21 bits.
+pub const PAGE_SHIFT: u32 = 4;
+
+/// The page number the title sees for frame-table index `i`.
+fn number(i: usize) -> usize {
+    (i + FIRST_PAGE) << PAGE_SHIFT
+}
+
+/// The frame-table index of a page number the title passes (`None`: not one of ours).
 fn index(frame: usize) -> Option<usize> {
-    frame.checked_sub(FIRST_PAGE)
+    if frame & ((1 << PAGE_SHIFT) - 1) != 0 {
+        return None;
+    }
+    (frame >> PAGE_SHIFT).checked_sub(FIRST_PAGE)
 }
 
 struct Section {
@@ -97,7 +110,7 @@ impl Physical {
         self.sections.push(Section { handle, frames: n, live: n, view: 0 });
         let first = self.frames.len();
         self.frames.extend((0..n).map(|k| Some((si, k))));
-        Some((first + FIRST_PAGE..first + n + FIRST_PAGE).collect())
+        Some((first..first + n).map(number).collect())
     }
 
     /// Free frames (their mappings must be gone first).
@@ -109,7 +122,8 @@ impl Physical {
             return false;
         }
         for &f in frames {
-            let Some((si, _)) = self.frames[f - FIRST_PAGE].take() else { continue };
+            let Some(i) = index(f) else { continue };
+            let Some((si, _)) = self.frames[i].take() else { continue };
             let s = &mut self.sections[si];
             s.live -= 1;
             if s.live == 0 {
@@ -251,5 +265,18 @@ mod tests {
         }
         assert!(p.free(&frames));
         assert_eq!(p.live_frames(), 0);
+    }
+
+    #[test]
+    fn page_numbers_are_4k_units_and_survive_the_titles_packing() {
+        let mut p = Physical::default();
+        let frames = p.allocate(40).unwrap();
+        // what the title does: keep `n >> 4` in a 21-bit field, rebuild `(field << 4) & 0x1FFFFF0`
+        let rebuilt: Vec<usize> = frames.iter().map(|&n| ((n >> 4) << 4) & 0x1FF_FFF0).collect();
+        assert_eq!(rebuilt, frames, "every page survives the round trip");
+        assert!(frames.iter().all(|n| n % 16 == 0 && *n != 0));
+        let distinct: std::collections::HashSet<_> = rebuilt.iter().collect();
+        assert_eq!(distinct.len(), 40, "no two pages collapse onto one");
+        assert!(p.free(&frames));
     }
 }
