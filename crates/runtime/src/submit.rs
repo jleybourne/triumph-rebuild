@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
-use rebuild_xlist::console::{segments, stats, MemoryWait};
+use rebuild_xlist::console::{segments, stats, sync_descriptors, MemoryWait};
 use windows::core::Interface;
 
 use crate::queue::Queue;
@@ -76,6 +76,8 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
             FOREIGN.fetch_add(1, Ordering::Relaxed);
             continue;
         };
+        // the descriptor tables its translated programs read, mirrored from the title's bytes (the root seam)
+        sync_descriptors(list);
         if let Some(s) = stats(list) {
             draws += u64::from(s.draws);
             dispatches += u64::from(s.dispatches);

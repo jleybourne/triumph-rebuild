@@ -1138,6 +1138,7 @@ impl Resources {
             console_stride: h.stride,
             host_base: h.host.gpu,
             host_stride: h.host.step,
+            shadow_va: h.shadow.as_ref().map_or(0, |s| s.va),
         })
     }
 

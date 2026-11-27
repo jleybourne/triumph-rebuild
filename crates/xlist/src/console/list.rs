@@ -18,7 +18,7 @@ use windows::Win32::Graphics::Direct3D12::*;
 
 use super::alloc::{self, AllocatorState};
 use super::slots::{self, Fp};
-use super::{Backend, HeapBinding, Header, LabelValue, LabelWrite, ListHost, MemoryRange, MemoryWait, Raw, WaitAction, CONSOLE_RTV_INCREMENT, TITLE_BYTES};
+use super::{Backend, HeapBinding, Header, LabelValue, LabelWrite, ListHost, MemoryRange, MemoryWait, Raw, UserMap, UserSource, WaitAction, CONSOLE_RTV_INCREMENT, TITLE_BYTES, USER_DWORDS};
 
 const DXGI_ERROR_NOT_FOUND: HRESULT = HRESULT(0x887A_0002_u32 as i32);
 const DXGI_ERROR_MORE_DATA: HRESULT = HRESULT(0x887A_0003_u32 as i32);
@@ -60,6 +60,12 @@ pub struct ListStats {
     pub splits: u32,
     /// draws and dispatches dropped because their pipeline has no host object (never run with the one before)
     pub skipped: u32,
+    /// user-data writes in the program library's root layout (root constants, one call per stage that changed)
+    pub user_sets: u32,
+    /// descriptor shadow tables bound (`t0, space101`)
+    pub shadow_sets: u32,
+    /// user-data dwords made from a root argument the title had not set, or a table outside the bound heaps (0)
+    pub user_unset: u32,
 }
 
 /// The list as the title sees it: [`TITLE_BYTES`] of console layout, then ours.
@@ -104,10 +110,25 @@ struct Shadow {
     /// the console pipeline set last has no host pipeline: draws and dispatches are dropped until one does
     pso_missing: bool,
     pso: Raw,
-    /// 0 graphics, 1 compute
+    /// the side (0 graphics, 1 compute) of the pipeline set last: what ExecuteIndirect runs
+    pso_side: usize,
+    /// host root signatures, 0 graphics, 1 compute
     root: [Raw; 2],
+    /// the title's root signatures (console objects): its arguments live until it changes
+    title_root: [Raw; 2],
+    /// the title's root arguments by its parameter numbers: on the host list too while `user` is `None`,
+    /// console state only while it is `Some`
     args: [[Arg; 64]; 2],
     consts: [Option<Box<Consts>>; 2],
+    /// the bound translated pipeline's user-data map, per side (`docs/design/root-seam.md`)
+    user: [Option<&'static UserMap>; 2],
+    /// the library layout of a side may be out of date: written at its next draw or dispatch
+    user_dirty: [bool; 2],
+    /// the user-data words last written per side and stage, and whether the host list holds them
+    user_words: [[[u32; USER_DWORDS]; 2]; 2],
+    user_valid: [[bool; 2]; 2],
+    /// the shadow table address bound per side (0: none)
+    shadow_va: [u64; 2],
     heaps_console: [Raw; 2],
     heaps_host: [Raw; 2],
     heap_count: u32,
@@ -138,9 +159,16 @@ impl Shadow {
             console_pipeline: NULL,
             pso_missing: false,
             pso: NULL,
+            pso_side: 0,
             root: [NULL; 2],
+            title_root: [NULL; 2],
             args: [[Arg::default(); 64]; 2],
             consts: [None, None],
+            user: [None; 2],
+            user_dirty: [false; 2],
+            user_words: [[[0; USER_DWORDS]; 2]; 2],
+            user_valid: [[false; 2]; 2],
+            shadow_va: [0; 2],
             heaps_console: [NULL; 2],
             heaps_host: [NULL; 2],
             heap_count: 0,
@@ -173,14 +201,33 @@ impl Shadow {
         }
     }
 
-    fn root_changed(&mut self, k: usize, root: Raw) {
-        self.root[k] = root;
+    /// The title's root arguments of side `k` are gone (its root signature changed).
+    fn title_args_cleared(&mut self, k: usize) {
         self.args[k] = [Arg::default(); 64];
         if let Some(c) = self.consts[k].as_mut() {
             c.mask = [0; 64];
         }
+        self.user_dirty[k] = true;
+    }
+
+    /// What the host list holds in the library layout of side `k` is to be written again (a new host root
+    /// signature, a fresh host list).
+    fn library_layout_lost(&mut self, k: usize) {
+        self.user_valid[k] = [false; 2];
+        self.shadow_va[k] = 0;
+        self.user_dirty[k] = true;
     }
 }
+
+/// Descriptor memory a list's translated programs read through tables, per heap: synced before submission.
+#[derive(Clone, Copy, Default)]
+struct Span {
+    heap: u64,
+    lo: u64,
+    hi: u64,
+}
+
+const SPANS: usize = 4;
 
 pub(crate) struct ListState {
     host: Arc<dyn ListHost>,
@@ -207,6 +254,8 @@ pub(crate) struct ListState {
     buffers: Vec<[u8; 40]>,
     stats: ListStats,
     private: Vec<(GUID, Vec<u8>)>,
+    /// tables the translated programs read since the reset ([`sync_descriptors`])
+    spans: [Span; SPANS],
 }
 
 // SAFETY: a list is recorded by one thread at a time (D3D12's rule, and the title's).
@@ -296,7 +345,12 @@ impl ListState {
         } else {
             call!(self.SetComputeRootSignature(root));
         }
-        self.sh.root_changed(k, root);
+        self.sh.root[k] = root;
+        self.sh.library_layout_lost(k);
+        // the title's arguments were on the host list in the title's layout: gone with that root signature
+        if self.sh.user[k].is_none() {
+            self.sh.title_args_cleared(k);
+        }
     }
 
     fn set_pipeline(&mut self, console: Raw) {
@@ -311,13 +365,129 @@ impl ListState {
             return;
         };
         self.sh.pso_missing = false;
+        let k = p.compute as usize;
+        self.sh.pso_side = k;
+        if self.sh.user[k] != p.user {
+            self.sh.user[k] = p.user;
+            self.sh.user_dirty[k] = true;
+        }
         if !p.root_signature.is_null() {
-            self.set_root(p.compute as usize, p.root_signature);
+            self.set_root(k, p.root_signature);
         }
         if p.pso != self.sh.pso {
             call!(self.SetPipelineState(p.pso));
             self.sh.pso = p.pso;
         }
+    }
+
+    /// Before a draw (`k` 0) or dispatch (`k` 1): if the title's root arguments, the pipeline, the heaps or the
+    /// host list changed since the last one, write the bound translated pipeline's user data and shadow table
+    /// in the library's layout. Only stages whose words changed are written. No lock, no allocation.
+    #[inline]
+    fn bind_library(&mut self, k: usize) {
+        if self.sh.user_dirty[k] {
+            self.write_library(k);
+        }
+    }
+
+    fn write_library(&mut self, k: usize) {
+        self.sh.user_dirty[k] = false;
+        let Some(m) = self.sh.user[k] else { return };
+        for st in 0..(m.stage_count as usize).min(2) {
+            let stage = &m.stages[st];
+            let n = (stage.dwords as usize).min(USER_DWORDS);
+            if n == 0 {
+                continue;
+            }
+            let mut w = [0u32; USER_DWORDS];
+            for (i, src) in stage.src[..n].iter().enumerate() {
+                w[i] = self.user_word(k, *src);
+            }
+            if self.sh.user_valid[k][st] && self.sh.user_words[k][st][..n] == w[..n] {
+                continue;
+            }
+            self.sh.user_words[k][st] = w;
+            self.sh.user_valid[k][st] = true;
+            self.stats.user_sets += 1;
+            if k == 0 {
+                call!(self.SetGraphicsRoot32BitConstants(stage.param, n as u32, w.as_ptr().cast(), 0));
+            } else {
+                call!(self.SetComputeRoot32BitConstants(stage.param, n as u32, w.as_ptr().cast(), 0));
+            }
+        }
+        // the shadow table of the bound view heap
+        let va = self.heaps.iter().flatten().map(|h| h.shadow_va).find(|&va| va != 0).unwrap_or(0);
+        if va != 0 && va != self.sh.shadow_va[k] {
+            self.sh.shadow_va[k] = va;
+            self.stats.shadow_sets += 1;
+            if k == 0 {
+                call!(self.SetGraphicsRootShaderResourceView(m.shadow_param, va));
+            } else {
+                call!(self.SetComputeRootShaderResourceView(m.shadow_param, va));
+            }
+        }
+    }
+
+    /// One user-data dword from the title's root arguments of side `k`.
+    #[inline]
+    fn user_word(&mut self, k: usize, src: UserSource) -> u32 {
+        match src {
+            UserSource::Zero => 0,
+            UserSource::Constant { slot, dword } => match &self.sh.consts[k] {
+                Some(c) if (dword as usize) < 64 && c.mask[slot as usize & 63] >> dword & 1 != 0 => c.v[slot as usize & 63][dword as usize],
+                _ => {
+                    self.stats.user_unset += 1;
+                    0
+                }
+            },
+            UserSource::Table { slot, bytes } => {
+                let a = self.sh.args[k][slot as usize & 63];
+                let heap = if a.kind == 1 { self.heaps.iter().flatten().find(|h| a.console.wrapping_sub(h.console_base) < h.console_bytes).copied() } else { None };
+                match heap {
+                    Some(h) => {
+                        self.note_span(h.console_base, a.console, u64::from(bytes.max(h.console_stride)));
+                        (a.console - h.console_base) as u32
+                    }
+                    None => {
+                        self.stats.user_unset += 1;
+                        0
+                    }
+                }
+            }
+            UserSource::AddressLo { slot } | UserSource::AddressHi { slot } => {
+                let a = self.sh.args[k][slot as usize & 63];
+                if !(2..=4).contains(&a.kind) {
+                    self.stats.user_unset += 1;
+                    return 0;
+                }
+                if matches!(src, UserSource::AddressLo { .. }) {
+                    a.console as u32
+                } else {
+                    (a.console >> 32) as u32
+                }
+            }
+        }
+    }
+
+    /// Descriptors `at..at + bytes` of the heap at `heap` are read by this list: synced before submission.
+    #[inline]
+    fn note_span(&mut self, heap: u64, at: u64, bytes: u64) {
+        let end = at + bytes;
+        for s in &mut self.spans {
+            if s.heap == heap && s.hi > s.lo {
+                s.lo = s.lo.min(at);
+                s.hi = s.hi.max(end);
+                return;
+            }
+            if s.hi == s.lo {
+                *s = Span { heap, lo: at, hi: end };
+                return;
+            }
+        }
+        // more heaps than spans: the last one grows (still exact for the slots it covers)
+        let s = &mut self.spans[SPANS - 1];
+        s.lo = s.lo.min(at);
+        s.hi = s.hi.max(end);
     }
 
     /// A barrier that orders every earlier shader write before every later access.
@@ -360,6 +530,8 @@ impl ListState {
                 self.point_at_current();
                 self.stats.splits += 1;
                 self.replay();
+                self.sh.library_layout_lost(0);
+                self.sh.library_layout_lost(1);
                 self.seg_work = false;
                 self.work_since_barrier = false;
             }
@@ -384,6 +556,10 @@ impl ListState {
             call!(self.SetPipelineState(sh.pso));
         }
         for k in 0..2 {
+            if sh.user[k].is_some() {
+                // the title's arguments are console state: the library layout is written at the next draw
+                continue;
+            }
             for (slot, a) in sh.args[k].iter().enumerate() {
                 let slot = slot as u32;
                 match (k, a.kind) {
@@ -503,6 +679,7 @@ pub fn create_list(kind: u32, allocator: Raw, pipeline: Raw) -> windows::core::R
             buffers: Vec::new(),
             stats: ListStats::default(),
             private: Vec::new(),
+            spans: [Span::default(); SPANS],
         },
     });
     let p: Raw = Box::into_raw(obj).cast();
@@ -540,6 +717,14 @@ pub fn forget_bound_state(list: Raw) -> bool {
     }
     s.sh.pso_missing = true;
     true
+}
+
+/// Before `list` is submitted: the host mirror of every descriptor table its translated programs read is
+/// brought up to date with the title's bytes ([`ListHost::sync_descriptors`]). Returns the slots looked at; 0
+/// for a list that is not ours or read no tables.
+pub fn sync_descriptors(list: Raw) -> u32 {
+    let Some(s) = state(list) else { return 0 };
+    s.spans.iter().filter(|p| p.hi > p.lo).map(|p| s.host.sync_descriptors(p.lo, p.hi - p.lo)).sum()
 }
 
 /// The host lists to submit for `list`, in order, each after its waits hold.
@@ -701,6 +886,7 @@ unsafe extern "system" fn reset(this: Raw, allocator: Raw, pipeline: Raw) -> HRE
     s.sh.clear();
     s.heaps = [None; 2];
     s.stats = ListStats::default();
+    s.spans = [Span::default(); SPANS];
     if !pipeline.is_null() {
         s.set_pipeline(pipeline);
     }
@@ -720,6 +906,7 @@ unsafe extern "system" fn draw_instanced(this: Raw, vertices: u32, instances: u3
         s.stats.skipped += 1;
         return;
     }
+    s.bind_library(0);
     s.work();
     s.stats.draws += 1;
     call!(s.DrawInstanced(vertices, instances, first_vertex, first_instance));
@@ -731,6 +918,7 @@ unsafe extern "system" fn draw_indexed(this: Raw, indices: u32, instances: u32, 
         s.stats.skipped += 1;
         return;
     }
+    s.bind_library(0);
     s.work();
     s.stats.draws += 1;
     call!(s.DrawIndexedInstanced(indices, instances, first_index, base_vertex, first_instance));
@@ -742,6 +930,7 @@ unsafe extern "system" fn dispatch(this: Raw, x: u32, y: u32, z: u32) {
         s.stats.skipped += 1;
         return;
     }
+    s.bind_library(1);
     s.work();
     s.stats.dispatches += 1;
     call!(s.Dispatch(x, y, z));
@@ -759,6 +948,7 @@ unsafe extern "system" fn dispatch_mesh(this: Raw, x: u32, y: u32, z: u32) {
         s.stats.skipped += 1;
         return;
     }
+    s.bind_library(0);
     s.work();
     s.stats.dispatches += 1;
     match &s.current().l6 {
@@ -774,6 +964,7 @@ unsafe extern "system" fn execute_indirect(this: Raw, signature: Raw, max: u32, 
         s.stats.skipped += 1;
         return;
     }
+    s.bind_library(s.sh.pso_side);
     s.work();
     s.stats.draws += 1;
     let Some(sig) = s.host.command_signature(signature) else {
@@ -1079,16 +1270,42 @@ unsafe extern "system" fn descriptor_heaps(this: Raw, n: u32, heaps: *const Raw)
         }
     }
     s.sh.heap_count = count as u32;
+    // table offsets and the shadow table follow the heaps
+    s.sh.user_dirty = [true; 2];
     call!(s.SetDescriptorHeaps(count as u32, s.sh.heaps_host.as_ptr()));
 }
 
-/// 0x108 / 0x110 Set{Compute,Graphics}RootSignature.
+/// 0x108 / 0x110 Set{Compute,Graphics}RootSignature. While a translated pipeline is bound on that side, the
+/// host keeps the program library's root signature: the title's only ends its arguments' lifetime.
 unsafe extern "system" fn root_signature<const K: usize>(this: Raw, root: Raw) {
     let s = enter(this);
+    if s.sh.user[K].is_some() {
+        if s.sh.title_root[K] == root {
+            s.stats.elided += 1;
+        } else {
+            s.sh.title_root[K] = root;
+            s.sh.title_args_cleared(K);
+        }
+        return;
+    }
+    s.sh.title_root[K] = root;
     match s.host.root_signature(root) {
         Some(r) => s.set_root(K, r),
         // the pipeline brings its own
         None => s.stats.elided += 1,
+    }
+}
+
+impl ListState {
+    /// A title root argument at `slot` of side `k` changed while a translated pipeline is bound there: kept as
+    /// console state, and the library layout is written at the next draw or dispatch if the pipeline reads it.
+    #[inline]
+    fn library_arg(&mut self, k: usize, slot: u32) {
+        if let Some(m) = self.sh.user[k] {
+            if m.slots >> (slot & 63) & 1 != 0 {
+                self.sh.user_dirty[k] = true;
+            }
+        }
     }
 }
 
@@ -1098,6 +1315,11 @@ unsafe extern "system" fn root_table<const K: usize>(this: Raw, slot: u32, handl
     let a = s.sh.args[K][i];
     if a.kind == 1 && a.console == handle {
         s.stats.elided += 1;
+        return;
+    }
+    if s.sh.user[K].is_some() {
+        s.sh.args[K][i] = Arg { kind: 1, console: handle, host: 0 };
+        s.library_arg(K, slot);
         return;
     }
     let Some(h) = s.table(handle) else {
@@ -1122,6 +1344,11 @@ unsafe extern "system" fn root_view<const K: usize, const V: u8>(this: Raw, slot
         s.stats.elided += 1;
         return;
     }
+    if s.sh.user[K].is_some() {
+        s.sh.args[K][i] = Arg { kind: V, console: va, host: 0 };
+        s.library_arg(K, slot);
+        return;
+    }
     let Some(h) = s.va(va) else {
         s.stats.refused += 1;
         return;
@@ -1138,23 +1365,32 @@ unsafe extern "system" fn root_view<const K: usize, const V: u8>(this: Raw, slot
 }
 
 impl ListState {
+    /// Keep the title's root constants; with a translated pipeline bound on side `k`, that is all (true: the
+    /// caller is done).
     #[inline]
-    fn keep_consts(&mut self, k: usize, slot: u32, values: &[u32], offset: u32) {
+    fn keep_consts(&mut self, k: usize, slot: u32, values: &[u32], offset: u32) -> bool {
         let c = self.sh.consts[k].get_or_insert_with(|| Box::new(Consts { v: [[0; 64]; 64], mask: [0; 64] }));
-        let slot = slot as usize & 63;
-        for (i, &v) in values.iter().enumerate() {
-            let o = offset as usize + i;
+        let i = slot as usize & 63;
+        for (j, &v) in values.iter().enumerate() {
+            let o = offset as usize + j;
             if o < 64 {
-                c.v[slot][o] = v;
-                c.mask[slot] |= 1 << o;
+                c.v[i][o] = v;
+                c.mask[i] |= 1 << o;
             }
         }
+        if self.sh.user[k].is_some() {
+            self.library_arg(k, slot);
+            return true;
+        }
+        false
     }
 }
 
 unsafe extern "system" fn root_constant<const K: usize>(this: Raw, slot: u32, value: u32, offset: u32) {
     let s = enter(this);
-    s.keep_consts(K, slot, &[value], offset);
+    if s.keep_consts(K, slot, &[value], offset) {
+        return;
+    }
     if K == 0 {
         call!(s.SetGraphicsRoot32BitConstant(slot, value, offset));
     } else {
@@ -1168,7 +1404,9 @@ unsafe extern "system" fn root_constants<const K: usize>(this: Raw, slot: u32, n
         s.stats.refused += 1;
         return;
     }
-    s.keep_consts(K, slot, unsafe { std::slice::from_raw_parts(data, n.min(64) as usize) }, offset);
+    if s.keep_consts(K, slot, unsafe { std::slice::from_raw_parts(data, n.min(64) as usize) }, offset) {
+        return;
+    }
     if K == 0 {
         call!(s.SetGraphicsRoot32BitConstants(slot, n, data.cast(), offset));
     } else {

@@ -2180,6 +2180,7 @@ version = "0.1.0"
 dependencies = [
  "rebuild-shader",
  "rebuild-sir",
+ "rebuild-xlist",
  "windows",
 ]
 
