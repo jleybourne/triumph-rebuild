@@ -27,6 +27,58 @@ pub mod scene;
 pub mod d3d;
 #[cfg(windows)]
 pub mod dlss;
+#[cfg(windows)]
+pub mod fsr;
+
+/// How a backend maps the layer's convention onto its SDK's: each factor multiplies one axis.
+/// Measured per SDK with `upscaletest --sweep` (`agents/upscale.md`, P5).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Signs {
+    /// Multiplies the layer's jitter (+y down) before it goes to the SDK.
+    pub jitter: [f32; 2],
+    /// Multiplies the layer's motion scale before it goes to the SDK.
+    pub motion: [f32; 2],
+}
+
+impl Signs {
+    /// The layer's convention passed through unchanged (what the sweep calls (+,+,+,+)).
+    pub const LAYER: Signs = Signs { jitter: [1.0, 1.0], motion: [1.0, 1.0] };
+    /// Measured on the RTX 4070 Ti (2560x1440 quality, 16 sign combinations): Streamline's
+    /// `jitterOffset` is the NEGATED sample offset on both axes (31.58 dB against 27.16 dB passed
+    /// through); its motion vectors are previous − current, +y down, like the layer's (every flipped
+    /// motion sign falls to 18-20 dB).
+    pub const STREAMLINE: Signs = Signs { jitter: [-1.0, -1.0], motion: [1.0, 1.0] };
+    /// Measured the same way for FidelityFX FSR 3.1.6: the same mapping as Streamline (33.00 dB against
+    /// 27.77 dB passed through; every flipped motion sign falls to 20-22 dB). FSR's own jitter query
+    /// returns exactly the layer's Halton values, so FSR's `jitterOffset` is likewise the negated
+    /// sample offset.
+    pub const FIDELITYFX: Signs = Signs { jitter: [-1.0, -1.0], motion: [1.0, 1.0] };
+}
+
+/// The file version of a DLL ("major.minor.build.revision"), for the frame line's `upscaler` field.
+#[cfg(windows)]
+pub fn file_version(path: &std::path::Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO};
+    let w: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let n = GetFileVersionInfoSizeW(PCWSTR(w.as_ptr()), None);
+        if n == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; n as usize];
+        GetFileVersionInfoW(PCWSTR(w.as_ptr()), 0, n, buf.as_mut_ptr().cast()).ok()?;
+        let mut p: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut len = 0u32;
+        let root: Vec<u16> = "\\".encode_utf16().chain(Some(0)).collect();
+        if !VerQueryValueW(buf.as_ptr().cast(), PCWSTR(root.as_ptr()), &mut p, &mut len).as_bool() || p.is_null() {
+            return None;
+        }
+        let f = &*(p as *const VS_FIXEDFILEINFO);
+        Some(format!("{}.{}.{}.{}", f.dwFileVersionMS >> 16, f.dwFileVersionMS & 0xffff, f.dwFileVersionLS >> 16, f.dwFileVersionLS & 0xffff))
+    }
+}
 
 /// A width and height in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,6 +263,9 @@ pub trait Upscaler {
     /// unordered-access state; they are left in those states. The list's pipeline, root signature
     /// and descriptor heaps are NOT preserved: the caller rebinds after this call.
     fn evaluate(&mut self, list: &Self::CommandList, mode: Mode, inputs: &Inputs<Self::Resource>) -> Result<(), String>;
+
+    /// Override the backend's sign mapping (the sweep; normally the measured default stays).
+    fn set_signs(&mut self, signs: Signs);
 }
 
 #[cfg(test)]

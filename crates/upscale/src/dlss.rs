@@ -18,7 +18,7 @@ use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
-use crate::{Inputs, Mode, Size, Upscaler};
+use crate::{Inputs, Mode, Signs, Size, Upscaler};
 
 // ---- sl_struct.h ----
 
@@ -307,25 +307,6 @@ unsafe extern "C" fn log(kind: u32, msg: *const c_char) {
     }
 }
 
-/// How this backend maps the layer's convention onto Streamline's (measured: `upscaletest --sweep`).
-#[derive(Clone, Copy, Debug)]
-pub struct Signs {
-    /// Multiplies the layer's jitter (+y down) before it goes to `Constants::jitterOffset`.
-    pub jitter: [f32; 2],
-    /// Multiplies the layer's motion scale before it goes to `Constants::mvecScale` (Ã· render size).
-    pub motion: [f32; 2],
-}
-
-impl Signs {
-    /// The layer's convention passed through unchanged (what the sweep calls (+,+,+,+)).
-    pub const LAYER: Signs = Signs { jitter: [1.0, 1.0], motion: [1.0, 1.0] };
-    /// Measured on the RTX 4070 Ti (`upscaletest --sweep`, 2560x1440 quality, 16 sign combinations):
-    /// Streamline's `jitterOffset` is the NEGATED sample offset on both axes (31.58 dB against 27.16 dB
-    /// passed through), and its motion vectors are previous − current, +y down, like the layer's
-    /// (every flipped motion sign falls to 18-20 dB).
-    pub const STREAMLINE: Signs = Signs { jitter: [-1.0, -1.0], motion: [1.0, 1.0] };
-}
-
 pub struct Dlss {
     _lib: HMODULE,
     shutdown: FnShutdown,
@@ -336,6 +317,7 @@ pub struct Dlss {
     optimal: Option<FnDlssGetOptimalSettings>,
     set_options: Option<FnDlssSetOptions>,
     version: String,
+    dll_version: String,
     frame: u32,
     viewport: u32,
     pub signs: Signs,
@@ -418,6 +400,7 @@ impl Dlss {
                 optimal: None,
                 set_options: None,
                 version: String::new(),
+                dll_version: crate::file_version(dlss_dll).unwrap_or_else(|| "?".into()),
                 frame: 0,
                 viewport: 0,
                 signs: Signs::STREAMLINE,
@@ -454,7 +437,8 @@ impl Dlss {
             let ver: FnGetFeatureVersion = proc(self._lib, "slGetFeatureVersion")?;
             let mut v = FeatureVersion { base: Base::new(FEATURE_VERSION, 1), sl: Version::default(), ngx: Version::default() };
             check("slGetFeatureVersion", ver(FEATURE_DLSS, &mut v))?;
-            self.version = format!("Streamline {}.{}.{}, DLSS {}.{}.{}", v.sl.major, v.sl.minor, v.sl.build, v.ngx.major, v.ngx.minor, v.ngx.build);
+            // NGX reports 0.0.0 here (Streamline logs "ngxResult not implemented"): the DLL's file version is the truth
+            self.version = format!("DLSS {} (Streamline {}.{}.{})", self.dll_version, v.sl.major, v.sl.minor, v.sl.build);
         }
         Ok(())
     }
@@ -533,6 +517,10 @@ impl Upscaler for Dlss {
 
     fn render_size(&self, output: Size, mode: Mode) -> Result<Size, String> {
         self.sizes(output, mode).map(|s| s.0)
+    }
+
+    fn set_signs(&mut self, signs: Signs) {
+        self.signs = signs;
     }
 
     fn evaluate(&mut self, list: &ID3D12GraphicsCommandList, mode: Mode, i: &Inputs<ID3D12Resource>) -> Result<(), String> {

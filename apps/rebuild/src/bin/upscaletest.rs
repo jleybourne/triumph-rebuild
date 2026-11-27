@@ -1,16 +1,18 @@
 //! The upscaler backends on the card, standalone (Build 7 piece, lane `upscale`).
 //!
 //! A synthetic scene (`rebuild_upscale::scene`) is rendered on the CPU at the render size with Halton
-//! jitter, exact motion vectors and depth, uploaded, and upscaled by the backend. Every output frame is
-//! checked for NaN and black; the last frames are compared with a 4x4-supersampled truth (PSNR) and
-//! with a bilinear upscale of the same input (the baseline); a static camera gives the temporal
-//! stability number (mean frame-to-frame difference, 0-255 scale).
+//! jitter, exact motion vectors and depth, uploaded once per frame, and upscaled by every selected
+//! backend from the same inputs. Every output frame is checked for NaN and black; the last frames are
+//! compared with a 4x4-supersampled truth (PSNR) and with a bilinear upscale of the same input (the
+//! baseline); a static camera gives the temporal stability number (mean frame-to-frame difference,
+//! 0-255 scale). With two backends, a side-by-side crop shows truth | bilinear | DLSS | FSR.
 //!
-//! cargo run --release --bin upscaletest -- [--output 2560x1440] [--mode quality] [--frames 64]
-//!     [--out DIR] [--sweep] [--preset N]
+//! cargo run --release --bin upscaletest -- [--backend dlss|fsr|both] [--output 2560x1440]
+//!     [--mode quality] [--frames 64] [--out DIR] [--sweep] [--preset N]
 //!
 //! DLSS: REBUILD_STREAMLINE_DIR (sl.interposer.dll, sl.common.dll, sl.dlss.dll) and REBUILD_DLSS_DLL
-//! (nvngx_dlss.dll; the registry entry `upscaler.dlss_dll` once the lead adds it). PNGs go to `--out`
+//! (nvngx_dlss.dll; registry `upscaler.dlss_dll`). FSR: REBUILD_FIDELITYFX_DIR (holding
+//! amd_fidelityfx_loader_dx12.dll and amd_fidelityfx_upscaler_dx12.dll). PNGs go to `--out`
 //! (default: %TEMP%\rebuild-upscaletest), never into the repository.
 
 use std::collections::HashMap;
@@ -18,10 +20,11 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use rebuild_upscale::d3d::{self, Gpu, Texture};
-use rebuild_upscale::dlss::{Dlss, Signs};
+use rebuild_upscale::dlss::Dlss;
+use rebuild_upscale::fsr::Fsr;
 use rebuild_upscale::image::{self, bad_pixels, bilinear, mean_abs_diff, psnr};
 use rebuild_upscale::scene::{Frame, Scene};
-use rebuild_upscale::{jitter, jitter_phases, Inputs, Mode, Size, Upscaler};
+use rebuild_upscale::{jitter, jitter_phases, Inputs, Mode, Signs, Size, Upscaler};
 
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
@@ -29,7 +32,11 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 const MEASURED: u32 = 8;
 const SS: u32 = 4;
 
+type Backend = Box<dyn Upscaler<Resource = ID3D12Resource, CommandList = ID3D12GraphicsCommandList>>;
+
 struct Args {
+    dlss: bool,
+    fsr: bool,
     output: Size,
     mode: Mode,
     frames: u32,
@@ -40,6 +47,8 @@ struct Args {
 
 fn args() -> Result<Args, String> {
     let mut a = Args {
+        dlss: true,
+        fsr: false,
         output: Size::new(2560, 1440),
         mode: Mode::Quality,
         frames: 64,
@@ -51,6 +60,12 @@ fn args() -> Result<Args, String> {
     while let Some(k) = it.next() {
         let mut v = || it.next().ok_or(format!("{k} needs a value"));
         match k.as_str() {
+            "--backend" => match v()?.as_str() {
+                "dlss" => (a.dlss, a.fsr) = (true, false),
+                "fsr" => (a.dlss, a.fsr) = (false, true),
+                "both" => (a.dlss, a.fsr) = (true, true),
+                _ => return Err("--backend dlss|fsr|both".into()),
+            },
             "--output" => {
                 let s = v()?;
                 let (w, h) = s.split_once('x').ok_or("--output WxH")?;
@@ -67,6 +82,9 @@ fn args() -> Result<Args, String> {
     if a.frames <= MEASURED {
         return Err(format!("--frames must be above {MEASURED}"));
     }
+    if a.sweep && a.dlss && a.fsr {
+        return Err("--sweep takes one backend".into());
+    }
     Ok(a)
 }
 
@@ -76,26 +94,23 @@ fn env_path(name: &str) -> Result<PathBuf, String> {
 
 struct Bench {
     gpu: Gpu,
-    dlss: Dlss,
+    backends: Vec<(&'static str, Backend, Texture)>,
     render: Size,
     output: Size,
     mode: Mode,
     colour: Texture,
     depth: Texture,
     motion: Texture,
-    out: Texture,
     queries: ID3D12QueryHeap,
     stamps: ID3D12Resource,
     tick_ms: f64,
     truths: HashMap<(bool, u32), Vec<[f32; 4]>>,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct Stats {
     psnr: f64,
-    psnr_bilinear: f64,
     stability: f64,
-    stability_bilinear: f64,
     nan: usize,
     black_frames: usize,
 }
@@ -103,25 +118,19 @@ struct Stats {
 const SRV: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATES(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0 | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0);
 
 impl Bench {
-    fn truth(&mut self, scene: Scene, frame: u32) -> &Vec<[f32; 4]> {
+    fn truth(&mut self, scene: Scene, frame: u32) -> Vec<[f32; 4]> {
         let key = (scene.moving, if scene.moving { frame } else { 0 });
         let output = self.output;
-        self.truths.entry(key).or_insert_with(|| scene.truth(frame, output, SS))
+        self.truths.entry(key).or_insert_with(|| scene.truth(frame, output, SS)).clone()
     }
 
-    /// One frame through the backend: returns the output and the GPU time of the upscale alone.
-    fn step(&mut self, f: &Frame, j: [f32; 2], reset: bool) -> Result<(Vec<[f32; 4]>, f64), String> {
-        let g = &self.gpu;
-        g.begin();
-        let _s1 = g.upload(&mut self.colour, &d3d::rgba16f(&f.colour));
-        let _s2 = g.upload(&mut self.depth, &d3d::r32f(&f.depth));
-        let _s3 = g.upload(&mut self.motion, &d3d::rg16f(&f.motion));
-        let inputs = Inputs {
-            colour: &self.colour.resource,
-            depth: &self.depth.resource,
-            motion: &self.motion.resource,
+    fn inputs<'a>(&self, colour: &'a ID3D12Resource, depth: &'a ID3D12Resource, motion: &'a ID3D12Resource, out: &'a ID3D12Resource, j: [f32; 2], reset: bool) -> Inputs<'a, ID3D12Resource> {
+        Inputs {
+            colour,
+            depth,
+            motion,
             exposure: None,
-            output: &self.out.resource,
+            output: out,
             render: self.render,
             output_size: self.output,
             jitter: j,
@@ -134,109 +143,105 @@ impl Bench {
             near: 0.1,
             far: 1000.0,
             fov_y: 1.0,
-        };
-        unsafe { g.list.EndQuery(&self.queries, D3D12_QUERY_TYPE_TIMESTAMP, 0) };
-        self.dlss.evaluate(&g.list, self.mode, &inputs)?;
-        unsafe {
-            g.list.EndQuery(&self.queries, D3D12_QUERY_TYPE_TIMESTAMP, 1);
-            g.list.ResolveQueryData(&self.queries, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, &self.stamps, 0);
         }
-        let back = g.copy_out(&mut self.out);
-        self.gpu.finish()?;
-        let out = d3d::from_rgba16f(&Gpu::read(&self.out, &back));
-        let ms = self.stamp_ms()?;
-        Ok((out, ms))
     }
 
-    /// GPU time of the upscale alone, `n` evaluations on the inputs already uploaded: (median, p90) ms.
-    fn time(&mut self, n: usize) -> Result<(f64, f64), String> {
+    /// One frame: upload once, every backend upscales the same inputs; returns each output.
+    fn step(&mut self, f: &Frame, j: [f32; 2], reset: bool) -> Result<Vec<Vec<[f32; 4]>>, String> {
+        let g = &self.gpu;
+        g.begin();
+        let _s1 = g.upload(&mut self.colour, &d3d::rgba16f(&f.colour));
+        let _s2 = g.upload(&mut self.depth, &d3d::r32f(&f.depth));
+        let _s3 = g.upload(&mut self.motion, &d3d::rg16f(&f.motion));
+        let mut backs = Vec::new();
+        for k in 0..self.backends.len() {
+            let out = self.backends[k].2.resource.clone();
+            let i = self.inputs(&self.colour.resource, &self.depth.resource, &self.motion.resource, &out, j, reset);
+            let (name, b, _) = &mut self.backends[k];
+            b.evaluate(&g.list, self.mode, &i).map_err(|e| format!("{name}: {e}"))?;
+        }
+        for (_, _, out) in self.backends.iter_mut() {
+            backs.push(g.copy_out(out));
+        }
+        self.gpu.finish()?;
+        Ok(self.backends.iter().zip(&backs).map(|((_, _, t), b)| d3d::from_rgba16f(&Gpu::read(t, b))).collect())
+    }
+
+    /// GPU time of backend `k` alone, `n` evaluations back to back on the inputs already uploaded.
+    fn time(&mut self, k: usize, n: usize) -> Result<(f64, f64), String> {
         let mut ms = Vec::with_capacity(n);
         for _ in 0..n {
             let g = &self.gpu;
             g.begin();
-            let inputs = Inputs {
-                colour: &self.colour.resource,
-                depth: &self.depth.resource,
-                motion: &self.motion.resource,
-                exposure: None,
-                output: &self.out.resource,
-                render: self.render,
-                output_size: self.output,
-                jitter: [0.0, 0.0],
-                motion_scale: [1.0, 1.0],
-                depth_reversed: false,
-                reset: false,
-                hdr: false,
-                pre_exposure: 1.0,
-                frame_ms: 16.7,
-                near: 0.1,
-                far: 1000.0,
-                fov_y: 1.0,
-            };
+            let out = self.backends[k].2.resource.clone();
+            let i = self.inputs(&self.colour.resource, &self.depth.resource, &self.motion.resource, &out, [0.0, 0.0], false);
             unsafe { g.list.EndQuery(&self.queries, D3D12_QUERY_TYPE_TIMESTAMP, 0) };
-            self.dlss.evaluate(&g.list, self.mode, &inputs)?;
+            self.backends[k].1.evaluate(&g.list, self.mode, &i)?;
             unsafe {
                 g.list.EndQuery(&self.queries, D3D12_QUERY_TYPE_TIMESTAMP, 1);
                 g.list.ResolveQueryData(&self.queries, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, &self.stamps, 0);
             }
             self.gpu.finish()?;
-            ms.push(self.stamp_ms()?);
+            unsafe {
+                let mut m: *mut std::ffi::c_void = std::ptr::null_mut();
+                self.stamps.Map(0, None, Some(&mut m)).map_err(|e| e.to_string())?;
+                let t = std::slice::from_raw_parts(m as *const u64, 2);
+                ms.push(t[1].wrapping_sub(t[0]) as f64 * self.tick_ms);
+                self.stamps.Unmap(0, None);
+            }
         }
         ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
         Ok((ms[n / 2], ms[n * 9 / 10]))
     }
 
-    fn stamp_ms(&self) -> Result<f64, String> {
-        unsafe {
-            let mut m: *mut std::ffi::c_void = std::ptr::null_mut();
-            self.stamps.Map(0, None, Some(&mut m)).map_err(|e| e.to_string())?;
-            let t = std::slice::from_raw_parts(m as *const u64, 2);
-            let d = t[1].wrapping_sub(t[0]) as f64 * self.tick_ms;
-            self.stamps.Unmap(0, None);
-            Ok(d)
-        }
-    }
-
     /// A whole sequence from a reset: per-frame checks on every frame, quality on the last MEASURED.
-    fn sequence(&mut self, scene: Scene, frames: u32, signs: Signs, keep: Option<&PathBuf>) -> Result<Stats, String> {
-        self.dlss.signs = signs;
+    /// Returns one Stats per backend, then the bilinear baseline.
+    fn sequence(&mut self, scene: Scene, frames: u32, keep: Option<&PathBuf>) -> Result<Vec<Stats>, String> {
         let phases = jitter_phases(self.render, self.output);
-        let mut st = Stats::default();
-        let (mut prev, mut prev_b): (Option<Vec<[f32; 4]>>, Option<Vec<[f32; 4]>>) = (None, None);
+        let n = self.backends.len();
+        let mut st = vec![Stats::default(); n + 1];
+        let mut prev: Option<Vec<Vec<[f32; 4]>>> = None;
         for frame in 0..frames {
             let j = jitter(frame, phases);
             let f = scene.render(frame, self.render, j);
-            let (out, _) = self.step(&f, j, frame == 0)?;
-            let (nan, black) = bad_pixels(&out);
-            st.nan += nan;
-            if black == out.len() {
-                st.black_frames += 1;
+            let mut outs = self.step(&f, j, frame == 0)?;
+            for (k, out) in outs.iter().enumerate() {
+                let (nan, black) = bad_pixels(out);
+                st[k].nan += nan;
+                if black == out.len() {
+                    st[k].black_frames += 1;
+                }
             }
             if frame + MEASURED < frames {
                 continue;
             }
-            let b = bilinear(&f.colour, self.render, self.output);
-            let truth = self.truth(scene, frame).clone();
-            st.psnr += psnr(&out, &truth) / MEASURED as f64;
-            st.psnr_bilinear += psnr(&b, &truth) / MEASURED as f64;
-            if let (Some(p), Some(pb)) = (&prev, &prev_b) {
-                st.stability += mean_abs_diff(&out, p) / (MEASURED - 1) as f64;
-                st.stability_bilinear += mean_abs_diff(&b, pb) / (MEASURED - 1) as f64;
+            outs.push(bilinear(&f.colour, self.render, self.output));
+            let truth = self.truth(scene, frame);
+            for (k, out) in outs.iter().enumerate() {
+                st[k].psnr += psnr(out, &truth) / MEASURED as f64;
+                if let Some(p) = &prev {
+                    st[k].stability += mean_abs_diff(out, &p[k]) / (MEASURED - 1) as f64;
+                }
             }
             if frame + 1 == frames {
                 if let Some(dir) = keep {
                     let tag = if scene.moving { "moving" } else { "static" };
-                    let w = |name: &str, size: Size, px: &[[f32; 4]]| std::fs::write(dir.join(format!("{tag}-{name}.png")), image::png(size, px));
-                    w("input", self.render, &f.colour).map_err(|e| e.to_string())?;
-                    w("bilinear", self.output, &b).map_err(|e| e.to_string())?;
-                    w("dlss", self.output, &out).map_err(|e| e.to_string())?;
-                    w("truth", self.output, &truth).map_err(|e| e.to_string())?;
-                    let crop = side_by_side(&[&truth, &b, &out], self.output, 2);
-                    w("side-by-side-truth-bilinear-dlss", crop.0, &crop.1).map_err(|e| e.to_string())?;
+                    let w = |name: &str, size: Size, px: &[[f32; 4]]| std::fs::write(dir.join(format!("{tag}-{name}.png")), image::png(size, px)).map_err(|e| e.to_string());
+                    w("input", self.render, &f.colour)?;
+                    w("truth", self.output, &truth)?;
+                    w("bilinear", self.output, &outs[n])?;
+                    let mut row: Vec<&Vec<[f32; 4]>> = vec![&truth, &outs[n]];
+                    let mut label = String::from("truth-bilinear");
+                    for (k, (name, _, _)) in self.backends.iter().enumerate() {
+                        w(name, self.output, &outs[k])?;
+                        row.push(&outs[k]);
+                        label += &format!("-{name}");
+                    }
+                    let (size, px) = side_by_side(&row, self.output, 2);
+                    w(&format!("side-by-side-{label}"), size, &px)?;
                 }
             }
-            prev = Some(out);
-            prev_b = Some(b);
+            prev = Some(outs);
         }
         Ok(st)
     }
@@ -252,8 +257,7 @@ fn side_by_side(images: &[&Vec<[f32; 4]>], size: Size, zoom: u32) -> (Size, Vec<
         let ox = n as u32 * (cw * zoom + 4);
         for y in 0..ch * zoom {
             for x in 0..cw * zoom {
-                let s = img[((y0 + y / zoom) * size.width + x0 + x / zoom) as usize];
-                px[(y * out.width + ox + x) as usize] = s;
+                px[(y * out.width + ox + x) as usize] = img[((y0 + y / zoom) * size.width + x0 + x / zoom) as usize];
             }
         }
     }
@@ -274,42 +278,58 @@ fn main() {
     }
 }
 
-fn run(a: Args) -> Result<(), String> {
-    let sl = env_path("REBUILD_STREAMLINE_DIR")?;
-    let dll = env_path("REBUILD_DLSS_DLL")?;
-    std::fs::create_dir_all(&a.out).map_err(|e| format!("{}: {e}", a.out.display()))?;
-
-    println!("upscaletest — the upscaler backends on a synthetic scene, standalone");
-    let logs = std::env::var_os("REBUILD_SL_LOGS").map(PathBuf::from);
-    let mut dlss = Dlss::init(&sl, &dll, logs.as_deref())?;
-    let gpu = Gpu::new()?;
-    dlss.attach(&gpu.device, gpu.luid())?;
-    dlss.preset = a.preset;
-    println!("backend   {}", dlss.name());
-    for m in Mode::ALL {
-        let (opt, min, max) = dlss.sizes(a.output, m)?;
-        let ours = m.render_size(a.output);
-        println!(
-            "mode      {:<18} render {}x{} (range {}x{} .. {}x{}; ratio rule gives {}x{})",
-            m.name(),
-            opt.width,
-            opt.height,
-            min.width,
-            min.height,
-            max.width,
-            max.height,
-            ours.width,
-            ours.height
-        );
+fn sign(v: f32) -> &'static str {
+    if v > 0.0 {
+        "+"
+    } else {
+        "-"
     }
-    let render = dlss.render_size(a.output, a.mode)?;
+}
+
+fn run(a: Args) -> Result<(), String> {
+    std::fs::create_dir_all(&a.out).map_err(|e| format!("{}: {e}", a.out.display()))?;
+    println!("upscaletest — the upscaler backends on a synthetic scene, standalone");
+
+    // Streamline must be initialised before the device exists
+    let mut dlss = if a.dlss {
+        let logs = std::env::var_os("REBUILD_SL_LOGS").map(PathBuf::from);
+        Some(Dlss::init(&env_path("REBUILD_STREAMLINE_DIR")?, &env_path("REBUILD_DLSS_DLL")?, logs.as_deref())?)
+    } else {
+        None
+    };
+    let gpu = Gpu::new()?;
+    let mut backends: Vec<(&'static str, Backend)> = Vec::new();
+    if let Some(mut d) = dlss.take() {
+        d.attach(&gpu.device, gpu.luid())?;
+        d.preset = a.preset;
+        backends.push(("dlss", Box::new(d)));
+    }
+    if a.fsr {
+        let mut f = Fsr::load(&env_path("REBUILD_FIDELITYFX_DIR")?)?;
+        f.attach(&gpu.device, a.output)?;
+        println!("fsr       providers in the DLL: {}", f.providers.join(", "));
+        let phases = f.sdk_phases(Mode::Quality.render_size(a.output).width, a.output.width)?;
+        let sdk: Vec<String> = (0..4).map(|i| f.sdk_jitter(i, phases).map(|j| format!("({:+.4}, {:+.4})", j[0], j[1]))).collect::<Result<_, _>>()?;
+        let ours: Vec<String> = (0..4u32).map(|i| jitter(i, phases as u32)).map(|j| format!("({:+.4}, {:+.4})", j[0], j[1])).collect();
+        println!("fsr       jitter phases {phases} (ours {}); FSR's first four {} · ours {}", jitter_phases(Mode::Quality.render_size(a.output), a.output), sdk.join(" "), ours.join(" "));
+        backends.push(("fsr", Box::new(f)));
+    }
+    for (_, b) in &backends {
+        println!("backend   {}", b.name());
+    }
+    for m in Mode::ALL {
+        let sizes: Vec<String> = backends.iter().map(|(n, b)| b.render_size(a.output, m).map(|s| format!("{n} {}x{}", s.width, s.height))).collect::<Result<_, _>>()?;
+        let ours = m.render_size(a.output);
+        println!("mode      {:<18} render {} (ratio rule {}x{})", m.name(), sizes.join(", "), ours.width, ours.height);
+    }
+    // one render size for every backend, so they see identical inputs: the first backend's
+    let render = backends[0].1.render_size(a.output, a.mode)?;
     println!("run       output {}x{}, {} → render {}x{}, {} frames, truth {SS}x{SS} supersampled, measured on the last {MEASURED}", a.output.width, a.output.height, a.mode.name(), render.width, render.height, a.frames);
     println!("out       {}", a.out.display());
 
     let colour = gpu.texture(render, DXGI_FORMAT_R16G16B16A16_FLOAT, false, SRV);
     let depth = gpu.texture(render, DXGI_FORMAT_R32_FLOAT, false, SRV);
     let motion = gpu.texture(render, DXGI_FORMAT_R16G16_FLOAT, false, SRV);
-    let out = gpu.texture(a.output, DXGI_FORMAT_R16G16B16A16_FLOAT, true, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     let (queries, stamps, tick_ms) = unsafe {
         let mut q: Option<ID3D12QueryHeap> = None;
         gpu.device.CreateQueryHeap(&D3D12_QUERY_HEAP_DESC { Type: D3D12_QUERY_HEAP_TYPE_TIMESTAMP, Count: 2, NodeMask: 0 }, &mut q).map_err(|e| e.to_string())?;
@@ -330,56 +350,69 @@ fn run(a: Args) -> Result<(), String> {
         let hz = gpu.queue.GetTimestampFrequency().map_err(|e| e.to_string())?;
         (q.unwrap(), r.unwrap(), 1000.0 / hz as f64)
     };
-    let mut b = Bench { gpu, dlss, render, output: a.output, mode: a.mode, colour, depth, motion, out, queries, stamps, tick_ms, truths: HashMap::new() };
+    let backends = backends.into_iter().map(|(n, b)| (n, b, gpu.texture(a.output, DXGI_FORMAT_R16G16B16A16_FLOAT, true, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))).collect();
+    let mut b = Bench { gpu, backends, render, output: a.output, mode: a.mode, colour, depth, motion, queries, stamps, tick_ms, truths: HashMap::new() };
 
     if a.sweep {
+        let name = b.backends[0].0;
         println!();
-        println!("sweep     jitter and motion-vector signs into Streamline (moving scene, {} frames each); (+,+,+,+) is the layer's convention passed through", a.frames);
-        println!("          jitter x  jitter y  motion x  motion y   PSNR dB   stability");
+        println!("sweep     {name}: jitter and motion-vector signs (moving scene, {} frames each); (+,+,+,+) is the layer's convention passed through", a.frames);
+        println!("          jitter x  jitter y  motion x  motion y   PSNR dB   frame-to-frame");
         let mut best = (f64::MIN, Signs::LAYER);
         for code in 0..16u32 {
             let s = |bit: u32| if code & (1 << bit) != 0 { -1.0 } else { 1.0 };
             let signs = Signs { jitter: [s(0), s(1)], motion: [s(2), s(3)] };
-            let st = b.sequence(Scene { moving: true, depth_reversed: false }, a.frames, signs, None)?;
-            let sign = |v: f32| if v > 0.0 { "+" } else { "-" };
+            b.backends[0].1.set_signs(signs);
+            let st = b.sequence(Scene { moving: true, depth_reversed: false }, a.frames, None)?;
             println!(
                 "          {:>8}  {:>8}  {:>8}  {:>8}   {:>7.2}   {:>9.2}",
                 sign(signs.jitter[0]),
                 sign(signs.jitter[1]),
                 sign(signs.motion[0]),
                 sign(signs.motion[1]),
-                st.psnr,
-                st.stability
+                st[0].psnr,
+                st[0].stability
             );
-            if st.psnr > best.0 {
-                best = (st.psnr, signs);
+            if st[0].psnr > best.0 {
+                best = (st[0].psnr, signs);
             }
         }
-        println!("best      {:?} at {:.2} dB", best.1, best.0);
+        println!("best      {name} {:?} at {:.2} dB", best.1, best.0);
         return Ok(());
     }
 
     let t = Instant::now();
     let mut all_ok = true;
+    let names: Vec<&str> = b.backends.iter().map(|x| x.0).collect();
     for moving in [true, false] {
-        let scene = Scene { moving, depth_reversed: false };
-        let st = b.sequence(scene, a.frames, Signs::STREAMLINE, Some(&a.out))?;
-        let name = if moving { "moving" } else { "static" };
+        let st = b.sequence(Scene { moving, depth_reversed: false }, a.frames, Some(&a.out))?;
+        let base = st.last().unwrap().clone();
         println!();
-        println!("{name:<9} NaN pixels {} · black frames {} (over {} frames)", st.nan, st.black_frames, a.frames);
-        println!("          PSNR vs truth      DLSS {:6.2} dB   bilinear {:6.2} dB   ({:+.2} dB)", st.psnr, st.psnr_bilinear, st.psnr - st.psnr_bilinear);
-        println!("          frame-to-frame     DLSS {:6.3}      bilinear {:6.3}      (mean |Δ|, 0-255; {})", st.stability, st.stability_bilinear, if moving { "the scene moves: not a stability number" } else { "static camera: the temporal-stability number" });
-        all_ok &= st.nan == 0 && st.black_frames == 0 && st.psnr > st.psnr_bilinear;
-        if !moving {
-            all_ok &= st.stability < st.stability_bilinear;
+        println!("{}  ({} frames; quality on the last {MEASURED})", if moving { "moving" } else { "static" }, a.frames);
+        println!("          {:<9} {:>10} {:>12} {:>14} {:>8} {:>13}", "", "PSNR dB", "vs bilinear", "frame-to-frame", "NaN px", "black frames");
+        for (k, s) in st.iter().enumerate() {
+            let name = names.get(k).copied().unwrap_or("bilinear");
+            println!("          {:<9} {:>10.2} {:>+12.2} {:>14.3} {:>8} {:>13}", name, s.psnr, s.psnr - base.psnr, s.stability, s.nan, s.black_frames);
+            if k < names.len() {
+                all_ok &= s.nan == 0 && s.black_frames == 0 && s.psnr > base.psnr;
+                if !moving {
+                    all_ok &= s.stability < base.stability;
+                }
+            }
         }
+        println!("          (frame-to-frame = mean |Δ| between consecutive outputs, 0-255; {})", if moving { "the scene moves: not a stability number" } else { "static camera: the temporal-stability number" });
     }
-    b.dlss.refresh_version()?;
-    let (median, p90) = b.time(200)?;
     println!();
-    println!("timing    {}: upscale alone, 200 evaluations back to back on one frame: median {median:.3} ms, p90 {p90:.3} ms", b.dlss.name());
+    for k in 0..b.backends.len() {
+        let (median, p90) = b.time(k, 200)?;
+        println!("timing    {:<5} upscale alone, 200 evaluations back to back: median {median:.3} ms, p90 {p90:.3} ms — {}", names[k], b.backends[k].1.name());
+    }
     println!();
-    println!("result    {} ({:.1} s)", if all_ok { "PASS: no NaN, no black frame, DLSS beats bilinear on PSNR and on static stability" } else { "FAIL" }, t.elapsed().as_secs_f64());
+    println!(
+        "result    {} ({:.1} s)",
+        if all_ok { "PASS: no NaN, no black frame; every backend beats bilinear on PSNR and on static stability" } else { "FAIL" },
+        t.elapsed().as_secs_f64()
+    );
     if !all_ok {
         return Err("checks failed".into());
     }
