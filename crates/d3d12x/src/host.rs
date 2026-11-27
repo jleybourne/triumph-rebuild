@@ -3,7 +3,7 @@
 //! pipelines (and anything else it overrides), or calls the [`Resources`] methods from its own
 //! `ListHost`.
 
-use rebuild_xlist::console::{HostPipeline, ListHost, PipelineSource};
+use rebuild_xlist::console::{HostPipeline, HostSignature, LibrarySignature, ListHost, PipelineSource, UserMap};
 
 use crate::{HeapBinding, MemoryRange, Raw, Resources};
 
@@ -24,8 +24,11 @@ impl<P: PipelineSource + Send + Sync> ListHost for Host<P> {
         self.resources.inner.device.load(std::sync::atomic::Ordering::Relaxed)
     }
     #[inline]
-    fn command_signature(&self, console: Raw) -> Option<Raw> {
+    fn command_signature(&self, console: Raw) -> Option<HostSignature> {
         self.resources.host_command_signature(console)
+    }
+    fn library_signature(&self, console: Raw, root: Raw, map: &'static UserMap) -> Option<LibrarySignature> {
+        self.resources.library_signature(console, root, map)
     }
     #[inline]
     fn root_signature(&self, console: Raw) -> Option<Raw> {

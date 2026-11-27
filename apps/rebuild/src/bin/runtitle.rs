@@ -122,6 +122,14 @@ fn device_report() {
         );
         let ir = &rebuild_xlist::console::INDIRECT_REFUSED;
         println!("lists     {} indirect calls with no host signature on a graphics pipeline, {} on a compute one", ir[0].load(Relaxed), ir[1].load(Relaxed));
+        {
+            use rebuild_xlist::console::indirect::*;
+            let n: Vec<u64> = rebuild_xlist::console::INDIRECT.iter().map(|c| c.load(Relaxed)).collect();
+            println!(
+                "lists     {} indirect calls ({} dropped: no host pipeline); by work: {} draw, {} draw-indexed, {} dispatch, {} mesh, {} none, {} other; {} with root arguments under the library root (mapped); refused: {} side, {} buffer views, {} unmappable, {} wrong root",
+                n[CALLS], n[NO_PIPELINE], n[1], n[2], n[3], n[4], n[0], n[5], n[MAPPED], n[SIDE], n[BUFFER_VIEWS], n[UNMAPPABLE], n[WRONG_ROOT]
+            );
+        }
         println!("lists     {} draws and dispatches dropped: a library pipeline with no shadow table bound", rebuild_xlist::console::NO_SHADOW.load(Relaxed));
         println!("views     {} UAVs of resources without unordered access written as null views", rebuild_d3d12x::heap::NO_UAV.load(Relaxed));
     }

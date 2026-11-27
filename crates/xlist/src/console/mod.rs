@@ -36,6 +36,7 @@
 #![cfg(windows)]
 
 mod alloc;
+pub mod indirect;
 mod list;
 mod slots;
 
@@ -51,7 +52,7 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
 
 pub use alloc::{create_allocator, host_allocator, upload_range};
-pub use list::{create_list, CLOSE_FAILED, INDIRECT_REFUSED, NO_SHADOW, forget_bound_state, host_list, segments, skip, stats, sync_descriptors, HostList, ListStats, Segment};
+pub use list::{create_list, CLOSE_FAILED, INDIRECT, INDIRECT_REFUSED, NO_SHADOW, forget_bound_state, host_list, segments, skip, stats, sync_descriptors, HostList, ListStats, Segment};
 pub use slots::{allocator_slots, list_slots, traps, Returns, SlotInfo, SlotKind, Trap, ALLOCATOR_SLOTS, LIST_SLOTS};
 
 /// A COM or console object pointer, borrowed: never released through this.
@@ -83,6 +84,104 @@ pub struct HostPipeline {
     /// The PSO's primitive topology type (1 point, 2 line, 3 triangle, 4 patch), or 0 when not known (no check):
     /// a draw whose topology is outside it is refused by the host (debug #611, the list's Close fails), so dropped.
     pub topology: u8,
+}
+
+/// What a command signature's arguments do, read from its description ([`IndirectShape::of`]). The list runs a
+/// signature only under a root it fits: one that changes root arguments names the title's root parameters,
+/// while a translated pipeline is bound with the program library's root.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IndirectShape {
+    /// The work argument (the last): one of the `WORK_*` values.
+    pub work: u8,
+    /// Some argument is `CONSTANT` (root constants by the title's parameter numbers).
+    pub constants: bool,
+    /// Some argument is a root `CONSTANT_BUFFER_VIEW`, `SHADER_RESOURCE_VIEW` or `UNORDERED_ACCESS_VIEW` (a
+    /// console GPU address in the argument buffer).
+    pub root_views: bool,
+    /// Some argument is a `VERTEX_BUFFER_VIEW` or `INDEX_BUFFER_VIEW` (console GPU addresses in the argument
+    /// buffer, which the host would read as its own).
+    pub buffer_views: bool,
+    /// Some argument is of a type the host does not know (a console-only one).
+    pub other: bool,
+}
+
+impl IndirectShape {
+    pub const WORK_NONE: u8 = 0;
+    pub const WORK_DRAW: u8 = 1;
+    pub const WORK_DRAW_INDEXED: u8 = 2;
+    pub const WORK_DISPATCH: u8 = 3;
+    pub const WORK_MESH: u8 = 4;
+    /// Rays, two work arguments, or one that is not last.
+    pub const WORK_OTHER: u8 = 5;
+
+    pub fn of(args: &[D3D12_INDIRECT_ARGUMENT_DESC]) -> IndirectShape {
+        let mut s = IndirectShape::default();
+        for (i, a) in args.iter().enumerate() {
+            let work = match a.Type {
+                D3D12_INDIRECT_ARGUMENT_TYPE_DRAW => IndirectShape::WORK_DRAW,
+                D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED => IndirectShape::WORK_DRAW_INDEXED,
+                D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH => IndirectShape::WORK_DISPATCH,
+                D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH => IndirectShape::WORK_MESH,
+                D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS => IndirectShape::WORK_OTHER,
+                D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT => {
+                    s.constants = true;
+                    0
+                }
+                D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW
+                | D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW
+                | D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW => {
+                    s.root_views = true;
+                    0
+                }
+                D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW | D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW => {
+                    s.buffer_views = true;
+                    0
+                }
+                _ => {
+                    s.other = true;
+                    0
+                }
+            };
+            if work != 0 {
+                s.work = if i + 1 == args.len() && s.work == 0 { work } else { IndirectShape::WORK_OTHER };
+            }
+        }
+        s
+    }
+
+    /// The root side the work runs on (0 graphics, 1 compute), or `None` for no or unknown work.
+    pub fn side(&self) -> Option<usize> {
+        match self.work {
+            IndirectShape::WORK_DRAW | IndirectShape::WORK_DRAW_INDEXED | IndirectShape::WORK_MESH => Some(0),
+            IndirectShape::WORK_DISPATCH => Some(1),
+            _ => None,
+        }
+    }
+
+    /// Some argument changes a root parameter (the host signature was made against the title's root).
+    pub fn changes_root(&self) -> bool {
+        self.constants || self.root_views
+    }
+}
+
+/// A console command signature (device 0x148) on the host.
+#[derive(Clone, Copy, Debug)]
+pub struct HostSignature {
+    /// `ID3D12CommandSignature`, borrowed.
+    pub signature: Raw,
+    /// The host root signature it was made against (`ID3D12RootSignature`, borrowed): the title's, when an
+    /// argument changes root parameters; null when none does (then it runs under any root).
+    pub root: Raw,
+    pub shape: IndirectShape,
+}
+
+/// A console command signature rewritten into the program library's layout ([`ListHost::library_signature`]).
+#[derive(Clone, Copy, Debug)]
+pub struct LibrarySignature {
+    /// `ID3D12CommandSignature`, borrowed (lives as long as the console signature).
+    pub signature: Raw,
+    /// Bit per stage (0 VS or CS, 1 PS) whose user-data constants its commands write.
+    pub stages: u8,
 }
 
 /// User-data dwords a translated program's root constants carry (`rebuild_pipelines::layout::USER_DATA_DWORDS`).
@@ -298,8 +397,14 @@ pub trait ListHost: PipelineSource + Send + Sync {
     /// A console CPU descriptor handle (RTV, DSV, or the CPU side of a UAV clear) as a host CPU
     /// handle.
     fn cpu_descriptor(&self, console: usize) -> Option<usize>;
-    /// A console command signature (device 0x148) as an `ID3D12CommandSignature`.
-    fn command_signature(&self, _console: Raw) -> Option<Raw> {
+    /// A console command signature (device 0x148) on the host; `None` when the host refused it.
+    fn command_signature(&self, _console: Raw) -> Option<HostSignature> {
+        None
+    }
+    /// Console signature `console` (one whose arguments change root parameters) rewritten into the program
+    /// library's layout of `map` ([`indirect::library_arguments`]) and made against `root`, the library root
+    /// bound. Made once per signature and map. `None` when it cannot be mapped or made: the list refuses it.
+    fn library_signature(&self, _console: Raw, _root: Raw, _map: &'static UserMap) -> Option<LibrarySignature> {
         None
     }
     /// The range of console GPU memory holding `va`. Asked only when the list's cached range

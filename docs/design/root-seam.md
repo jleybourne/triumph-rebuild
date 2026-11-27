@@ -119,6 +119,50 @@ That calls `ListHost::sync_descriptors(start, len)`, which `d3d12x` serves with 
 fingerprint is unchanged costs a read and a compare. Write-watch over the heap pages would replace this. Until
 then, descriptors a program reads by a dynamic index beyond its static ranges are not covered.
 
+## ExecuteIndirect
+
+`crates/xlist/src/console/indirect.rs`; the list side is `list.rs` `execute_indirect`.
+
+**What the title uses** (WARP, 40 s, ~1,000 frames, 2026-11-28): five signatures, one argument each: `DRAW` (stride
+16), `DRAW_INDEXED` (20), `DISPATCH` (12), `DISPATCH_MESH` (12), and console type `0x69` (12; the host refuses it).
+None changes a root argument. **It recorded no ExecuteIndirect in that run**, so "most draws are indirect" does not
+hold for the menus and loading a 40 s WARP run reaches. `runtitle` prints the calls by kind (`lists  N indirect
+calls ...`).
+
+`d3d12x` reads each signature's shape (`IndirectShape`: its work argument, and whether it holds constants, root
+views or vertex/index buffer views). A root signature is passed to the host only when an argument changes root
+parameters: the host refuses a root for a signature without them (seen on WARP). The list then decides per call:
+
+| signature | bound pipeline | done |
+|:--|:--|:--|
+| work only (draw, draw-indexed, dispatch, mesh) | any | runs as it is, after `bind_library` |
+| work on the other side than the bound pipeline (a dispatch under a graphics one) | any | refused (counted) |
+| vertex or index buffer views | any | refused: console addresses in the argument buffer, which a host signature cannot translate |
+| constants | title's layout (`user` `None`), its root bound | runs as it is |
+| constants | title's layout, another root bound | refused |
+| root CBV/SRV/UAV | title's layout | refused: the argument is a console address |
+| constants or root views | translated (library root) | rewritten into the library layout (below), or refused |
+
+**The rewrite** (`library_arguments`, made by `d3d12x` once per signature and user-data map, against the bound
+library root, then looked up): each title dword in a command goes to the user-data dword that reads it. A constant
+goes to the dword with `Constant { slot, dword }`, and a root view's 8 bytes go to the dwords with `AddressLo`/`Hi`
+(user data holds the console address as it is, so no translation is needed). Dwords no stage reads go to spare
+user-data dwords, past the ones a stage reads. A run a stage reads in order is one host `CONSTANT` argument. The
+bytes and the stride are unchanged, so the title's argument buffer is used as it is: no GPU pre-pass and no CPU
+read. After such a call, the stages it wrote are marked to be written again at the next direct draw.
+
+The host's rule, found on WARP (`crates/pipelines/tests/indirect_warp.rs`): a signature's constants must rise in
+(root parameter, dword) order and must not overlap. The rewrite cannot reorder a command's bytes, so it refuses
+(`Unmappable`, counted) when:
+
+- a dword is read by both stages, or twice (`ReadTwice`);
+- dwords would land out of order (`Order`), e.g. a pixel-stage constant before a vertex-stage one;
+- there is no spare room (`NoRoom`);
+- there are buffer views (`BufferView`).
+
+Each of these needs a compute pre-pass that rewrites the argument buffer into a library-layout copy: duplicate,
+reorder, and translate VB/IB addresses. That pass is not built: the title has no such signature.
+
 ## What this does not cover yet
 
 1. **Resource type at the primary index (for the lead).** For buffer descriptors, d3d12x puts a **raw SRV** at
@@ -132,8 +176,9 @@ then, descriptors a program reads by a dynamic index beyond its static ranges ar
 2. **`lead` is not applied (for the lead).** A raw view starts at the 16-byte-aligned address below the
    descriptor's first byte, and the shadow entry's `lead` says by how much. The lifted code adds no `lead`, so a
    buffer descriptor not 16-byte aligned reads `lead` bytes early.
-3. **ExecuteIndirect** command signatures that change root constants or views are not mapped. Only the
-   arguments set before the call are written.
+3. **ExecuteIndirect** with root arguments the host signature cannot rewrite (see above) is refused, not
+   mapped. Console semantics after such a call (the last command's root values remain) are not kept. The next
+   direct draw writes the values the title set before the call.
 4. **Graphics pipelines** use the same path (VS at parameter 0, PS at 1, the shadow table at 2). They are tested
    on the stand-in, not yet on a device.
 5. UAV clears still map through `HeapBinding` to the raw primary, not `own_kind_gpu` (deepdive 4.4).
