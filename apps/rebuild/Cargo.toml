@@ -7,6 +7,7 @@ version.workspace = true
 [dependencies]
 rebuild-uma = { path = "../../crates/uma" }
 rebuild-xlist = { path = "../../crates/xlist" }
+rebuild-d3d12x = { path = "../../crates/d3d12x" }
 rebuild-loader = { path = "../../crates/loader" }
 rebuild-sir = { path = "../../crates/sir" }
 rebuild-runtime = { path = "../../crates/runtime" }

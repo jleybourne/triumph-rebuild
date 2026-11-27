@@ -43,6 +43,32 @@ static CALLS: [AtomicU32; SLOTS] = [const { AtomicU32::new(0) }; SLOTS];
 /// Microseconds after device creation of each slot's first call, plus one (0: never called).
 static FIRST: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
 static REFS: AtomicU32 = AtomicU32::new(1);
+/// What the command lists see: resources and descriptors from crates/d3d12x, pipelines from [`Pipelines`].
+static LIST_HOST: OnceLock<std::sync::Arc<dyn rebuild_xlist::console::ListHost>> = OnceLock::new();
+
+/// Events from the resources crate and the lists, printed as they happen (first traps, unknown interfaces,
+/// first occurrences of things worth a line).
+pub struct Log;
+impl rebuild_d3d12x::Events for Log {
+    fn first_trap(&self, object: &'static str, offset: usize) {
+        eprintln!("trap      {object} {offset:#05x} (first call)");
+    }
+    fn unknown_iid(&self, object: &'static str, iid: &windows::core::GUID) {
+        eprintln!("iid       {object} asked for {iid:?}");
+    }
+    fn note(&self, what: &'static str, value: u64) {
+        eprintln!("note      {what} {value:#x}");
+    }
+}
+
+/// Pipelines for the lists. Until the title creates one (device 0x50 / 0x58 / 0x1f0 / 0x2b0, served from the
+/// pipeline library and the pool in crates/pipelines), there are none.
+pub struct Pipelines;
+impl rebuild_xlist::console::PipelineSource for Pipelines {
+    fn pipeline(&self, _console: rebuild_xlist::console::Raw) -> Option<rebuild_xlist::console::HostPipeline> {
+        None
+    }
+}
 /// Slots with an implementation (ours or another crate's), by index.
 static WRITTEN: [std::sync::atomic::AtomicBool; SLOTS] = [const { std::sync::atomic::AtomicBool::new(false) }; SLOTS];
 
@@ -131,6 +157,17 @@ pub fn traps() -> Vec<(usize, &'static str, u32, f64)> {
     v
 }
 
+/// Every slot the title called through our own functions (implemented or not), first call first. Slots served by
+/// other crates' thunks (resources, views) count in those crates.
+pub fn called() -> Vec<(usize, &'static str, u32, f64, bool)> {
+    let mut v: Vec<_> = (0..SLOTS)
+        .filter(|&s| CALLS[s].load(Ordering::Relaxed) > 0)
+        .map(|s| (s * 8, slot_name(s * 8), CALLS[s].load(Ordering::Relaxed), (FIRST[s].load(Ordering::Relaxed) - 1) as f64 / 1000.0, implemented(s * 8)))
+        .collect();
+    v.sort_by(|a, b| a.3.total_cmp(&b.3));
+    v
+}
+
 fn implemented(off: usize) -> bool {
     WRITTEN[off / 8].load(Ordering::Relaxed)
 }
@@ -189,10 +226,19 @@ unsafe extern "system" fn QueryInterface(this: *mut c_void, iid: *const [u8; 16]
         unsafe { *out = this };
         return 0;
     }
+    if crate::dxgi::is_dxgi_device(unsafe { &*iid }) {
+        unsafe { *out = crate::dxgi::device() };
+        return 0;
+    }
     unsafe { *out = std::ptr::null_mut() };
     UNKNOWN_IID.fetch_add(1, Ordering::Relaxed);
     let _ = LAST_IID.set(unsafe { *iid });
     E_NOINTERFACE
+}
+
+/// For the DXGI device's `QueryInterface` (it answers for the D3D12 device too).
+pub fn is_device_iid_pub(g: &[u8; 16]) -> bool {
+    is_device_iid(g)
 }
 
 static UNKNOWN_IID: AtomicU32 = AtomicU32::new(0);
@@ -261,6 +307,107 @@ unsafe extern "system" fn CreateCommandQueue(
     }
 }
 
+unsafe extern "system" fn CreateFence(_this: *mut c_void, initial: u64, _flags: u32, _iid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
+    note(0x120 / 8);
+    if out.is_null() {
+        return 0x8007_0057u32 as i32;
+    }
+    match crate::fence::create(initial) {
+        Ok(f) => {
+            unsafe { *out = f as *mut c_void };
+            0
+        }
+        Err(hr) => hr,
+    }
+}
+
+/// `CreateCommandQueueX(*{type, flags, engine or pipe, queue}, iid, out)`: the console's extended description;
+/// on the host a queue of that type.
+unsafe extern "system" fn CreateCommandQueueX(_this: *mut c_void, desc: *const [u32; 4], _iid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
+    note(0x180 / 8);
+    if desc.is_null() || out.is_null() {
+        return 0x8007_0057u32 as i32;
+    }
+    let d = unsafe { *desc };
+    let host = windows::Win32::Graphics::Direct3D12::D3D12_COMMAND_QUEUE_DESC {
+        Type: windows::Win32::Graphics::Direct3D12::D3D12_COMMAND_LIST_TYPE(d[0] as i32),
+        ..Default::default()
+    };
+    match crate::queue::create(&host) {
+        Ok(q) => {
+            unsafe { *out = q as *mut c_void };
+            0
+        }
+        Err(hr) => hr,
+    }
+}
+
+fn hr(e: windows::core::Error) -> i32 {
+    e.code().0
+}
+
+/// `CreateCommandAllocator(type, iid, out)`: crates/xlist's console allocator over the host device.
+unsafe extern "system" fn CreateCommandAllocator(_this: *mut c_void, kind: u32, _iid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
+    note(0x48 / 8);
+    let (Some(d), Some(host)) = (DEVICE.get(), LIST_HOST.get()) else { return 0x8000_4005u32 as i32 };
+    if out.is_null() {
+        return 0x8007_0057u32 as i32;
+    }
+    match rebuild_xlist::console::create_allocator(kind, &d.host, host.clone()) {
+        Ok(a) => {
+            unsafe { *out = a };
+            0
+        }
+        Err(e) => hr(e),
+    }
+}
+
+/// `CreateCommandList(nodemask, type, allocator, pipeline, iid, out)`: an open console list (crates/xlist).
+unsafe extern "system" fn CreateCommandList(
+    _this: *mut c_void,
+    _nodemask: u32,
+    kind: u32,
+    allocator: *mut c_void,
+    pipeline: *mut c_void,
+    _iid: *const [u8; 16],
+    out: *mut *mut c_void,
+) -> i32 {
+    note(0x60 / 8);
+    if out.is_null() || allocator.is_null() {
+        return 0x8007_0057u32 as i32;
+    }
+    match rebuild_xlist::console::create_list(kind, allocator, pipeline) {
+        Ok(l) => {
+            unsafe { *out = l };
+            0
+        }
+        Err(e) => hr(e),
+    }
+}
+
+/// `CreateCommandListX(*{type, flags, nodemask, barrier batch}, allocator, pipeline, iid, out)`.
+unsafe extern "system" fn CreateCommandListX(
+    _this: *mut c_void,
+    desc: *const [u32; 4],
+    allocator: *mut c_void,
+    pipeline: *mut c_void,
+    _iid: *const [u8; 16],
+    out: *mut *mut c_void,
+) -> i32 {
+    note(0x248 / 8);
+    if desc.is_null() || out.is_null() || allocator.is_null() {
+        return 0x8007_0057u32 as i32;
+    }
+    let kind = unsafe { (*desc)[0] };
+    match rebuild_xlist::console::create_list(kind, allocator, pipeline) {
+        Ok(l) => {
+            unsafe { *out = l };
+            0
+        }
+        Err(e) => hr(e),
+    }
+}
+
 // ------------------------------------------------------------------------------------- creation
 
 static VTABLE: OnceLock<Box<[usize; SLOTS]>> = OnceLock::new();
@@ -283,7 +430,18 @@ fn vtable() -> &'static [usize; SLOTS] {
         for s in 0..=7 {
             WRITTEN[s].store(true, Ordering::Relaxed);
         }
-        WRITTEN[0x40 / 8].store(true, Ordering::Relaxed);
+        t[0x120 / 8] = CreateFence as *const () as usize;
+        t[0x180 / 8] = CreateCommandQueueX as *const () as usize;
+        t[0x48 / 8] = CreateCommandAllocator as *const () as usize;
+        t[0x60 / 8] = CreateCommandList as *const () as usize;
+        t[0x248 / 8] = CreateCommandListX as *const () as usize;
+        t[0x270 / 8] = crate::frame::SetFrameIntervalX as *const () as usize;
+        t[0x278 / 8] = crate::frame::ScheduleFrameEventX as *const () as usize;
+        t[0x280 / 8] = crate::frame::WaitFrameEventX as *const () as usize;
+        t[0x288 / 8] = crate::frame::GetFrameStatisticsX as *const () as usize;
+        for off in [0x40, 0x48, 0x60, 0x120, 0x180, 0x248, 0x270, 0x278, 0x280, 0x288] {
+            WRITTEN[off / 8].store(true, Ordering::Relaxed);
+        }
         // resources, heaps, views (crates/d3d12x)
         for (off, _name, f) in rebuild_d3d12x::thunks::device_slots() {
             t[off / 8] = f.0 as usize;
@@ -317,7 +475,7 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
                 return e.code().0;
             }
         };
-        let resources = match rebuild_d3d12x::Resources::new(&host, std::sync::Arc::new(memory), std::sync::Arc::new(rebuild_d3d12x::Quiet)) {
+        let resources = match rebuild_d3d12x::Resources::new(&host, std::sync::Arc::new(memory), std::sync::Arc::new(Log)) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("device: resources: {e}");
@@ -325,6 +483,7 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
             }
         };
         let resources_ref = resources.clone();
+        let _ = LIST_HOST.set(std::sync::Arc::new(rebuild_d3d12x::Host { resources: resources.clone(), pipelines: Pipelines }));
         rebuild_d3d12x::thunks::install(resources);
         // the console object: method table first, byte +0x18 = 1 (calls, not inline work)
         let object = Box::leak(Box::new([0u8; OBJECT_SIZE]));
@@ -364,9 +523,10 @@ mod tests {
         let table = unsafe { *(obj as *const *const usize) };
         let node: unsafe extern "system" fn(*mut c_void) -> u32 = unsafe { std::mem::transmute(*table.add(7)) };
         assert_eq!(unsafe { node(out) }, 1);
-        let fence: Trap = unsafe { std::mem::transmute(*table.add(0x120 / 8)) };
-        assert_eq!(unsafe { fence(out, 0, 0, 0, 0, 0, 0) }, E_NOTIMPL);
-        assert!(traps().iter().any(|t| t.0 == 0x120 && t.1 == "CreateFence"));
+        // 0x1c8 stays a trap on purpose (the console pipeline path the research says fails)
+        let console_pipeline: Trap = unsafe { std::mem::transmute(*table.add(0x1c8 / 8)) };
+        assert_eq!(unsafe { console_pipeline(out, 0, 0, 0, 0, 0, 0) }, E_NOTIMPL);
+        assert!(traps().iter().any(|t| t.0 == 0x1c8));
         // the same device for a second ask
         let mut again: *mut c_void = std::ptr::null_mut();
         assert_eq!(create(&iid, &mut again), 0);

@@ -121,12 +121,23 @@ pub fn graphics_regions() -> Vec<Region> {
 pub extern "system" fn XMemVirtualAlloc(base: *mut c_void, size: usize, kind: u32, flags: u64, protect: u32) -> *mut c_void {
     with(|s| {
         // a 64 KiB-page reservation with no commit: a placeholder the title will map physical pages into
-        if kind & (PAGES_2M | PAGES_64K_BIT) == (PAGES_2M | PAGES_64K_BIT) && kind & MEM_COMMIT.0 == 0 && base.is_null() {
-            let a = reserve_placeholder(size);
-            if a != 0 {
-                s.xmem.record(Region { base: a, size: size as u64, flags, protect });
+        if kind & (PAGES_2M | PAGES_64K_BIT) == (PAGES_2M | PAGES_64K_BIT) && kind & MEM_COMMIT.0 == 0 {
+            if base.is_null() {
+                let a = reserve_placeholder(size);
+                if a == 0 {
+                    eprintln!("xmem      placeholder reserve failed: size {size:#x}: {}", std::io::Error::last_os_error());
+                } else {
+                    s.xmem.record(Region { base: a, size: size as u64, flags, protect });
+                }
+                return a as *mut c_void;
             }
-            return a as *mut c_void;
+            // a 64 KiB-page reservation over a piece of a placeholder the title split (MEM_REPLACE_PLACEHOLDER): the
+            // piece already is the placeholder physical pages map into (physical.rs), so it stays one; only
+            // recorded. Turning it into a plain reservation would leave nothing to map into.
+            if kind & MEM_REPLACE_PLACEHOLDER.0 != 0 {
+                s.xmem.record(Region { base: base as u64, size: size as u64, flags, protect });
+                return base;
+            }
         }
         host::virtual_alloc(&mut s.xmem, base as u64, size as u64, kind, flags, protect) as *mut c_void
     })
@@ -220,6 +231,7 @@ pub extern "system" fn XMemAllocatePhysicalPages(_flags: u64, count: *mut usize,
             BOOL(1)
         }
         None => {
+            eprintln!("xmem      allocate physical pages failed: {n} frames ({} MiB used of the budget)", crate::budget::used() >> 20);
             unsafe { *count = 0 };
             BOOL(0)
         }
@@ -248,6 +260,12 @@ pub extern "system" fn XMemMapPhysicalPages(address: *mut c_void, n: usize, page
             }
         })
     });
+    if !ok {
+        static FAILED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+            eprintln!("xmem      map physical pages failed: address {base:#x} pages {n}: {}", std::io::Error::last_os_error());
+        }
+    }
     if ok { address } else { std::ptr::null_mut() }
 }
 

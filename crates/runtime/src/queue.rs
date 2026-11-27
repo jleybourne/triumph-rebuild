@@ -67,7 +67,7 @@ fn slot_name(off: usize) -> &'static str {
 }
 
 fn implemented(off: usize) -> bool {
-    matches!(off, 0x000..=0x038 | 0x058..=0x068 | 0x090 | 0x0e0)
+    matches!(off, 0x000..=0x038 | 0x058..=0x068 | 0x080 | 0x088 | 0x090 | 0x0e0 | 0x110)
 }
 
 /// Queue slots called but not written: (offset, name, calls, first call in ms after the device).
@@ -170,6 +170,40 @@ unsafe extern "system" fn GetDesc(this: *mut c_void, out: *mut D3D12_COMMAND_QUE
     out
 }
 
+/// Signal (GPU): the host queue signals the host fence; the fence's watcher writes the title's cell when it passes.
+unsafe extern "system" fn Signal(this: *mut c_void, fence: *mut c_void, value: u64) -> i32 {
+    note(0x80 / 8);
+    signal(this, fence, value)
+}
+
+/// SignalX(fence, value, *bottom-of-pipe settings, *top-of-pipe settings): the sync settings are the host's
+/// business (a host Signal waits for all prior work).
+unsafe extern "system" fn SignalX(this: *mut c_void, fence: *mut c_void, value: u64, _bottom: *const c_void, _top: *const c_void) -> i32 {
+    note(0x110 / 8);
+    signal(this, fence, value)
+}
+
+fn signal(this: *mut c_void, fence: *mut c_void, value: u64) -> i32 {
+    let (Some(q), Some(f)) = (find(this as usize), crate::fence::find(fence as usize)) else { return 0x8007_0057u32 as i32 };
+    match unsafe { q.host.Signal(&f.host, value) } {
+        Ok(()) => {
+            f.expect(value);
+            0
+        }
+        Err(e) => e.code().0,
+    }
+}
+
+/// Wait (GPU side): the host queue waits for the host fence.
+unsafe extern "system" fn Wait(this: *mut c_void, fence: *mut c_void, value: u64) -> i32 {
+    note(0x88 / 8);
+    let (Some(q), Some(f)) = (find(this as usize), crate::fence::find(fence as usize)) else { return 0x8007_0057u32 as i32 };
+    match unsafe { q.host.Wait(&f.host, value) } {
+        Ok(()) => 0,
+        Err(e) => e.code().0,
+    }
+}
+
 static VTABLE: OnceLock<Box<[usize; SLOTS]>> = OnceLock::new();
 
 fn vtable() -> &'static [usize; SLOTS] {
@@ -191,6 +225,9 @@ fn vtable() -> &'static [usize; SLOTS] {
         for s in [0x58 / 8, 0x60 / 8, 0x68 / 8] {
             t[s] = Marker as *const () as usize;
         }
+        t[0x80 / 8] = Signal as *const () as usize;
+        t[0x88 / 8] = Wait as *const () as usize;
+        t[0x110 / 8] = SignalX as *const () as usize;
         t[0x90 / 8] = GetTimestampFrequency as *const () as usize;
         t[0xe0 / 8] = GetDesc as *const () as usize;
         t

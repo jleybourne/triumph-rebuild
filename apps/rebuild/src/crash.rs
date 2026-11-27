@@ -178,8 +178,16 @@ unsafe extern "system" fn first_chance(p: *mut EXCEPTION_POINTERS) -> i32 {
     }
     // a title assert (int3) or a fail-fast ends the run without reaching the unhandled filter: report it here
     let c = code.0 as u32;
-    if (c == STATUS_BREAKPOINT || c == STATUS_STACK_BUFFER_OVERRUN) && FATAL.fetch_add(1, Ordering::Relaxed) == 0 {
-        unsafe { report(if c == STATUS_BREAKPOINT { "breakpoint (a title assert)" } else { "fail-fast" }, p) };
+    const ILLEGAL: u32 = 0xC000_001D;
+    const PRIVILEGED: u32 = 0xC000_0096;
+    if matches!(c, STATUS_BREAKPOINT | STATUS_STACK_BUFFER_OVERRUN | ILLEGAL | PRIVILEGED) && FATAL.fetch_add(1, Ordering::Relaxed) == 0 {
+        let what = match c {
+            STATUS_BREAKPOINT => "breakpoint (a title assert)",
+            STATUS_STACK_BUFFER_OVERRUN => "fail-fast",
+            ILLEGAL => "illegal instruction",
+            _ => "privileged instruction",
+        };
+        unsafe { report(what, p) };
         if let Some(f) = ON_FATAL.get() {
             f();
         }

@@ -107,6 +107,38 @@ fn device_report() {
             println!("  {off:#05x}  {name:<36} {n:>8}×  first at {ms:>9.3} ms");
         }
     }
+    let lt = rebuild_xlist::console::traps();
+    if !lt.is_empty() {
+        println!("list      slots called that are not written yet: {}", lt.len());
+        for t in lt.iter().take(30) {
+            println!("          {t:?}");
+        }
+    }
+    println!("device    every slot called through the device's own functions:");
+    for (off, name, n, ms, imp) in rebuild_runtime::device::called() {
+        println!("  {off:#05x}  {name:<36} {n:>8}×  first at {ms:>9.3} ms{}", if imp { "" } else { "  (trap)" });
+    }
+    let fc: Vec<u64> = rebuild_runtime::frame::CALLS.iter().map(|c| c.load(std::sync::atomic::Ordering::Relaxed)).collect();
+    println!("frame     interval/schedule/wait/statistics calls: {fc:?}");
+    let rt = rebuild_d3d12x::traps();
+    if !rt.is_empty() {
+        println!("resources slots called that trap: {}", rt.len());
+        for t in rt.iter().take(30) {
+            println!("          {} {:#05x} {}x first at {:.3} ms", t.object, t.offset, t.count, t.first_ns as f64 / 1e6);
+        }
+    }
+    let dx = rebuild_runtime::dxgi::traps();
+    if !dx.is_empty() {
+        println!("dxgi      slots called that are not written yet: {dx:x?}");
+    }
+    let f = rebuild_runtime::fence::traps();
+    if !f.is_empty() {
+        println!("fence     slots called that are not written yet: {f:x?}");
+    }
+    let p = rebuild_runtime::cpu::patched();
+    if p > 0 {
+        println!("cpu       {p} clwb sites patched to NOPs (the host CPU has no clwb)");
+    }
     let (n, iid) = rebuild_runtime::device::unknown_iid();
     if n > 0 {
         println!("  QueryInterface: {n} asks for interfaces the device does not serve; last {iid:02x?}");
@@ -251,6 +283,8 @@ fn main() {
     }
     crash::install(title.images.iter().map(|l| (l.name.clone(), l.base, l.image.size_of_image as u64)).collect());
     crash::on_fatal(device_report);
+    // console CPU instructions the host lacks (clwb), patched where the title uses them; first in the handler line
+    rebuild_runtime::cpu::install();
     // the title's code assumes its TLS block is slot 0 (an exe's): give it slot 0 before any thread runs
     if let Some(tls) = &exe.image.tls {
         let index = (exe.base + (tls.index_va - exe.image.image_base)) as *mut u32;

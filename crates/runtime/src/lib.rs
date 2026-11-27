@@ -17,7 +17,11 @@
 pub mod budget;
 pub mod limits;
 pub mod device;
+pub mod cpu;
 pub mod drives;
+pub mod dxgi;
+pub mod frame;
+pub mod fence;
 pub mod queue;
 #[cfg(windows)]
 pub mod exports;

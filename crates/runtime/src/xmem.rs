@@ -134,7 +134,10 @@ pub mod host {
             0 => PAGE_NOACCESS.0,
             p => p,
         };
-        if graphics && kind & MEM_RESERVE.0 != 0 {
+        // a placeholder reservation (the title maps physical pages into it later, physical.rs) cannot be
+        // write-watched, and needs no watch: its contents are physical pages the GPU reads in place
+        let placeholder = kind & MEM_RESERVE_PLACEHOLDER.0 != 0;
+        if graphics && kind & MEM_RESERVE.0 != 0 && !placeholder {
             kind |= MEM_WRITE_WATCH;
         }
         let got = if base != 0 {
@@ -164,6 +167,15 @@ pub mod host {
             got
         };
         if got.is_null() {
+            // a failed placement is a title-visible failure: name it (the first few)
+            static FAILED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+                let err = std::io::Error::last_os_error();
+                eprintln!(
+                    "xmem      placement failed: base {base:#x} size {size:#x} kind {kind:#x} flags {flags:#x} protect {protect:#x} range {:x?}: {err}",
+                    address_range(flags)
+                );
+            }
             return 0;
         }
         let at = got as u64;
@@ -200,8 +212,21 @@ pub mod host {
     }
 
     pub fn virtual_free(x: &mut Xmem, base: u64, size: u64, kind: u32) -> bool {
-        let ok = unsafe { VirtualFree(base as *mut c_void, size as usize, VIRTUAL_FREE_TYPE(kind)) }.is_ok();
-        if ok && kind & MEM_RELEASE.0 != 0 {
+        let r = unsafe { VirtualFree(base as *mut c_void, size as usize, VIRTUAL_FREE_TYPE(kind)) };
+        if let Err(e) = &r {
+            static FAILED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+                let mut m = MEMORY_BASIC_INFORMATION::default();
+                unsafe { VirtualQuery(Some(base as *const c_void), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
+                eprintln!(
+                    "xmem      free failed: base {base:#x} size {size:#x} kind {kind:#x}: {e}; region there: base {:#x} size {:#x} state {:#x} type {:#x}",
+                    m.BaseAddress as u64, m.RegionSize, m.State.0, m.Type.0
+                );
+            }
+        }
+        let ok = r.is_ok();
+        // splitting a placeholder (MEM_PRESERVE_PLACEHOLDER) leaves the reservation: only a real release forgets it
+        if ok && kind & MEM_RELEASE.0 != 0 && kind & MEM_PRESERVE_PLACEHOLDER.0 == 0 {
             x.forget(base);
         }
         ok
@@ -255,6 +280,21 @@ mod tests {
         unsafe { (a as *mut u64).write_volatile(7) };
         assert!(x.find(a).is_some(), "recorded as a region");
         assert!(host::virtual_free(&mut x, a, 0, MEM_RELEASE.0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_graphics_placeholder_reservation_is_placed_without_write_watch() {
+        use windows::Win32::System::Memory::{MEM_RESERVE, MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS};
+        let mut x = Xmem::default();
+        // as the title asks for its descriptor memory: reserve | placeholder, graphics + 32-bit, no access
+        let a = host::virtual_alloc(&mut x, 0, 0xB90_0000, MEM_RESERVE.0 | MEM_RESERVE_PLACEHOLDER.0, GRAPHICS | ADDRESS_32BIT, PAGE_NOACCESS.0);
+        assert_ne!(a, 0);
+        assert!(a + 0xB90_0000 <= u32::MAX as u64 + 1, "below 4 GiB as asked");
+        // the title then splits it (VirtualFree with MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER), piece by piece
+        let ok = host::virtual_free(&mut x, a, 0x10_0000, 0x8002);
+        assert!(ok, "split: {}", std::io::Error::last_os_error());
+        assert!(host::virtual_free(&mut x, a + 0x10_0000, 0x10_0000, 0x8002), "second split: {}", std::io::Error::last_os_error());
     }
 
     #[test]
