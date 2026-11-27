@@ -17,6 +17,8 @@
 //! - [`sidecar`]: the translator's `<hash>.<stage>.samplers` files.
 //! - [`translate`]: one console program to DXIL (the `translate v1` path), for the binary and for programs
 //!   the library does not hold.
+//! - [`rectgs`]: the geometry stage that draws the console's rectangle lists, made from a vertex shader's
+//!   outputs, compiled once per signature.
 //! - [`ondemand`]: those programs, translated on a pool worker when the title first creates them, cached on
 //!   disk for the next session.
 //! - `rootmap` (Windows): the root seam, how a translated program's user data is made from the title's root
@@ -27,6 +29,7 @@ pub mod layout;
 pub mod library;
 pub mod ondemand;
 pub mod pool;
+pub mod rectgs;
 pub mod session;
 pub mod sidecar;
 pub mod state;

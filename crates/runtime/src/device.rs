@@ -67,7 +67,14 @@ pub struct Pipelines;
 impl rebuild_xlist::console::PipelineSource for Pipelines {
     #[inline]
     fn pipeline(&self, console: rebuild_xlist::console::Raw) -> Option<rebuild_xlist::console::HostPipeline> {
-        crate::pipeline::host(console)
+        let h = crate::pipeline::host(console);
+        if rebuild_xlist::console::trace::on() {
+            eprintln!("xcall     pipeline {console:p} ({}): {}", if h.is_some() { "host" } else { "NO HOST" }, crate::pipeline::describe(console));
+        }
+        h
+    }
+    fn input_layout(&self, console: rebuild_xlist::console::Raw) -> Option<Vec<(u32, u32, u32, bool)>> {
+        crate::pipeline::input_layout(console)
     }
 }
 /// Slots with an implementation (ours or another crate's), by index.
@@ -667,7 +674,7 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
                 return e.code().0;
             }
         };
-        let memory = Accounted { inner: memory, title: std::sync::Mutex::new(std::collections::HashMap::new()) };
+        let memory = Accounted { inner: memory, title: std::sync::Mutex::new(std::collections::HashMap::new()), own: crate::titlemem::TitleMemory::new(&host) };
         let resources = match rebuild_d3d12x::Resources::new(&host, std::sync::Arc::new(memory), std::sync::Arc::new(Log)) {
             Ok(r) => r,
             Err(e) => {
@@ -720,6 +727,8 @@ struct Accounted<M> {
     inner: M,
     /// our address -> the title's
     title: std::sync::Mutex<std::collections::HashMap<u64, u64>>,
+    /// the title's own allocations, opened for the GPU in place (an address `inner` does not hold)
+    own: Option<crate::titlemem::TitleMemory>,
 }
 
 impl<M: rebuild_d3d12x::Memory> rebuild_d3d12x::Memory for Accounted<M> {
@@ -738,7 +747,7 @@ impl<M: rebuild_d3d12x::Memory> rebuild_d3d12x::Memory for Accounted<M> {
         self.inner.free(address, bytes);
     }
     fn range(&self, va: u64) -> Option<rebuild_d3d12x::MemoryRange> {
-        self.inner.range(va)
+        self.inner.range(va).or_else(|| self.own.as_ref()?.range(va))
     }
     fn buffer(&self, address: u64, bytes: u64) -> Option<windows::Win32::Graphics::Direct3D12::ID3D12Resource> {
         self.inner.buffer(address, bytes)

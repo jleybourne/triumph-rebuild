@@ -120,6 +120,30 @@ fn device_report() {
             LISTS.load(Relaxed), FOREIGN.load(Relaxed), REEXECUTED.load(Relaxed), BAD.load(Relaxed),
             rebuild_xlist::console::CLOSE_FAILED.load(Relaxed)
         );
+        {
+            use rebuild_runtime::submit::*;
+            println!(
+                "work      {} draws, {} dispatches recorded; dropped: {} no host pipeline, {} topology outside the pipeline's type, {} other; {} clears, {} copies; {} render targets with no host view",
+                RUN_DRAWS.load(Relaxed),
+                RUN_DISPATCHES.load(Relaxed),
+                RUN_SKIPPED_PIPELINE.load(Relaxed),
+                RUN_SKIPPED_TOPOLOGY.load(Relaxed),
+                RUN_SKIPPED_OTHER.load(Relaxed),
+                RUN_CLEARS.load(Relaxed),
+                RUN_COPIES.load(Relaxed),
+                RUN_RT_UNMAPPED.load(Relaxed)
+            );
+            println!(
+                "lists     {} rectangle-list draws expanded to triangles, {} dropped (no input layout, vertices not from buffers, or indexed)",
+                rebuild_xlist::console::RECTS_EXPANDED.load(Relaxed),
+                rebuild_xlist::console::RECTS_DROPPED.load(Relaxed)
+            );
+            println!(
+                "titlemem  {} of the title's allocations opened for the GPU in place, {} could not be",
+                rebuild_runtime::titlemem::OPENED.load(Relaxed),
+                rebuild_runtime::titlemem::OPEN_FAILED.load(Relaxed)
+            );
+        }
         let ir = &rebuild_xlist::console::INDIRECT_REFUSED;
         println!("lists     {} indirect calls with no host signature on a graphics pipeline, {} on a compute one", ir[0].load(Relaxed), ir[1].load(Relaxed));
         {

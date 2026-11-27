@@ -60,7 +60,7 @@ const MEM_HOST: u64 = 0x7_0000_0000;
 
 impl PipelineSource for TestHost {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
-        (console != BAD).then_some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: 0x5160 as Raw, compute: false, user: None, topology: 0 })
+        (console != BAD).then_some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: 0x5160 as Raw, compute: false, user: None, topology: 0, rects: false })
     }
 }
 
@@ -657,9 +657,9 @@ impl PipelineSource for SeamHost {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
         let (g, c) = seam_maps();
         match console {
-            SEAM_GFX | SEAM_OTHER_GFX => Some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: LIB_GFX_ROOT, compute: false, user: Some(g), topology: 0 }),
-            SEAM_CS => Some(HostPipeline { pso: 0x8000_6C00 as Raw, root_signature: LIB_CS_ROOT, compute: true, user: Some(c), topology: 0 }),
-            SEAM_TITLE_GFX => Some(HostPipeline { pso: 0x8000_6D00 as Raw, root_signature: std::ptr::null_mut(), compute: false, user: None, topology: 0 }),
+            SEAM_GFX | SEAM_OTHER_GFX => Some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: LIB_GFX_ROOT, compute: false, user: Some(g), topology: 0, rects: false }),
+            SEAM_CS => Some(HostPipeline { pso: 0x8000_6C00 as Raw, root_signature: LIB_CS_ROOT, compute: true, user: Some(c), topology: 0, rects: false }),
+            SEAM_TITLE_GFX => Some(HostPipeline { pso: 0x8000_6D00 as Raw, root_signature: std::ptr::null_mut(), compute: false, user: None, topology: 0, rects: false }),
             _ => None,
         }
     }
@@ -898,7 +898,7 @@ impl BenchHost {
 impl PipelineSource for BenchHost {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
         let i = self.pipelines.get(console as u64)?;
-        Some(HostPipeline { pso: self.pso[i as usize] as Raw, root_signature: self.root as Raw, compute: false, user: self.user, topology: 0 })
+        Some(HostPipeline { pso: self.pso[i as usize] as Raw, root_signature: self.root as Raw, compute: false, user: self.user, topology: 0, rects: false })
     }
 }
 
@@ -1439,4 +1439,130 @@ fn lists_recording_at_once_on_one_allocator_get_their_own_host_allocators() {
     for l in [l1, l2, l3] {
         release(l);
     }
+}
+
+// ---- rectangle lists ----
+
+/// A host whose pipeline 0x5EC7 builds as triangles, takes float3 / unorm8x4 / float2 from slot 0, and whose
+/// memory is a real block (console addresses are its CPU addresses).
+struct RectHost {
+    mem: Box<[u8]>,
+}
+
+const RECT_PSO: Raw = 0x5EC7 as Raw;
+/// The same pipeline built with the rectangle geometry stage.
+const RECT_GS_PSO: Raw = 0x5EC8 as Raw;
+
+impl PipelineSource for RectHost {
+    fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
+        let rects = console == RECT_GS_PSO;
+        (console == RECT_PSO || rects).then_some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: 0x5160 as Raw, compute: false, user: None, topology: 3, rects })
+    }
+    fn input_layout(&self, console: Raw) -> Option<Vec<(u32, u32, u32, bool)>> {
+        (console == RECT_PSO).then(|| vec![(0, 0, 6, false), (0, 12, 28, false), (0, 16, 16, false)])
+    }
+}
+
+impl ListHost for RectHost {
+    fn resource(&self, console: Raw) -> Option<Raw> {
+        Some(console)
+    }
+    fn descriptor_heap(&self, _console: Raw) -> Option<HeapBinding> {
+        None
+    }
+    fn cpu_descriptor(&self, console: usize) -> Option<usize> {
+        Some(console)
+    }
+    fn memory(&self, va: u64) -> Option<MemoryRange> {
+        let base = self.mem.as_ptr() as u64;
+        let r = MemoryRange { console: base, bytes: self.mem.len() as u64, host_va: base ^ (1 << 45), resource: 0x77 as Raw, resource_offset: 0 };
+        r.map(va).map(|_| r)
+    }
+}
+
+#[test]
+fn a_rectangle_list_draw_goes_out_as_two_triangles_a_rectangle() {
+    let mut mem = vec![0u8; 4096].into_boxed_slice();
+    // the loading screen's rectangle: top left, bottom left, bottom right
+    for (i, (x, y, u, v)) in [(-1.0f32, 1.0f32, 0.0f32, 0.0f32), (-1.0, -1.0, 0.0, 1.0), (1.0, -1.0, 1.0, 1.0)].into_iter().enumerate() {
+        let at = i * 24;
+        mem[at..at + 4].copy_from_slice(&x.to_le_bytes());
+        mem[at + 4..at + 8].copy_from_slice(&y.to_le_bytes());
+        mem[at + 12..at + 16].copy_from_slice(&[255; 4]);
+        mem[at + 16..at + 20].copy_from_slice(&u.to_le_bytes());
+        mem[at + 20..at + 24].copy_from_slice(&v.to_le_bytes());
+    }
+    let va = mem.as_ptr() as u64;
+    let h: Arc<dyn ListHost> = Arc::new(RectHost { mem });
+    let a = alloc::create_on(0, fake::backend(), h).unwrap();
+    let l = create_list(0, a, std::ptr::null_mut()).unwrap();
+    let f = fake::host_of(l);
+    type SetPso = unsafe extern "system" fn(Raw, Raw);
+    type Topo = unsafe extern "system" fn(Raw, i32);
+    type Vbs = unsafe extern "system" fn(Raw, u32, u32, *const D3D12_VERTEX_BUFFER_VIEW);
+    type Draw4 = unsafe extern "system" fn(Raw, u32, u32, u32, u32);
+    let before = RECTS_EXPANDED.load(std::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        method::<SetPso>(l, 0xc8)(l, RECT_PSO);
+        method::<Topo>(l, 0xa0)(l, crate::console::rect::RECTLIST);
+        let view = D3D12_VERTEX_BUFFER_VIEW { BufferLocation: va, SizeInBytes: 4096, StrideInBytes: 24 };
+        method::<Vbs>(l, 0x180)(l, 0, 1, &view);
+        method::<Draw4>(l, 0x60)(l, 3, 1, 0, 0);
+    }
+    // the host never sees topology 17: triangles
+    assert_eq!(f.last(20, 0), 4, "IASetPrimitiveTopology");
+    assert_eq!(f.count(host::DRAW_INSTANCED), 1, "the draw was recorded, not dropped");
+    assert_eq!((f.last(host::DRAW_INSTANCED, 0), f.last(host::DRAW_INSTANCED, 1), f.last(host::DRAW_INSTANCED, 2)), (6, 1, 0), "six vertices from the expanded buffer");
+    // the title's buffer, the expanded one, the title's again
+    assert_eq!(f.count(44), 3, "IASetVertexBuffers");
+    let s = stats(l).unwrap();
+    assert_eq!((s.draws, s.skipped), (1, 0));
+    assert!(RECTS_EXPANDED.load(std::sync::atomic::Ordering::Relaxed) > before);
+
+    // an indexed rectangle draw is still dropped (counted), never sent as a triangle
+    type Draw5 = unsafe extern "system" fn(Raw, u32, u32, u32, i32, u32);
+    unsafe { method::<Draw5>(l, 0x68)(l, 3, 1, 0, 0, 0) };
+    assert_eq!(f.count(host::DRAW_INDEXED), 0);
+    assert_eq!(stats(l).unwrap().skipped_topology, 1);
+    release(l);
+    release(a);
+}
+
+#[test]
+fn a_geometry_stage_pipeline_draws_rectangles_of_every_kind_with_the_titles_counts() {
+    let mem = vec![0u8; 4096].into_boxed_slice();
+    let h: Arc<dyn ListHost> = Arc::new(RectHost { mem });
+    let a = alloc::create_on(0, fake::backend(), h).unwrap();
+    let l = create_list(0, a, std::ptr::null_mut()).unwrap();
+    let f = fake::host_of(l);
+    type SetPso = unsafe extern "system" fn(Raw, Raw);
+    type Topo = unsafe extern "system" fn(Raw, i32);
+    type Draw4 = unsafe extern "system" fn(Raw, u32, u32, u32, u32);
+    type Draw5 = unsafe extern "system" fn(Raw, u32, u32, u32, i32, u32);
+    let expanded = RECTS_EXPANDED.load(std::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        method::<SetPso>(l, 0xc8)(l, RECT_GS_PSO);
+        method::<Topo>(l, 0xa0)(l, crate::console::rect::RECTLIST);
+        // positions from the vertex number: no vertex buffer at all
+        method::<Draw4>(l, 0x60)(l, 6, 2, 3, 1);
+        method::<Draw5>(l, 0x68)(l, 12, 1, 6, -3, 0);
+    }
+    assert_eq!(f.last(20, 0), 4, "the host draws the triangle list the geometry stage completes");
+    assert_eq!(f.count(host::DRAW_INSTANCED), 1);
+    assert_eq!((0..3).map(|i| f.last(host::DRAW_INSTANCED, i)).collect::<Vec<_>>(), [6, 2, 3], "the title's counts, three vertices a rectangle");
+    assert_eq!(f.count(host::DRAW_INDEXED), 1, "indexed rectangles are drawn, not dropped");
+    assert_eq!(f.last(host::DRAW_INDEXED, 0), 12);
+    assert_eq!(f.count(44), 0, "no vertex buffer rewritten");
+    assert_eq!(RECTS_EXPANDED.load(std::sync::atomic::Ordering::Relaxed), expanded, "nothing expanded on the CPU");
+    let s = stats(l).unwrap();
+    assert_eq!((s.draws, s.skipped), (2, 0));
+    // another topology under a rectangle pipeline is outside its type: dropped, as the host would refuse it
+    unsafe {
+        method::<Topo>(l, 0xa0)(l, 4);
+        method::<Draw4>(l, 0x60)(l, 3, 1, 0, 0);
+    }
+    assert_eq!(f.count(host::DRAW_INSTANCED), 1);
+    assert_eq!(stats(l).unwrap().skipped_topology, 1);
+    release(l);
+    release(a);
 }

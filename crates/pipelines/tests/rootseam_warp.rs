@@ -46,7 +46,7 @@ unsafe impl Sync for WarpHost {}
 
 impl PipelineSource for WarpHost {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
-        (console == PIPELINE_TOKEN).then_some(HostPipeline { pso: self.pso as Raw, root_signature: self.root as Raw, compute: true, user: Some(self.user), topology: 0 })
+        (console == PIPELINE_TOKEN).then_some(HostPipeline { pso: self.pso as Raw, root_signature: self.root as Raw, compute: true, user: Some(self.user), topology: 0, rects: false })
     }
 }
 

@@ -24,7 +24,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use rebuild_pipelines::library::Library;
@@ -174,6 +174,26 @@ struct Pipeline {
     user: Option<&'static UserMap>,
     /// the host PSO's primitive topology type (1 point, 2 line, 3 triangle, 4 patch; 0 compute)
     topology: u8,
+    /// its input layout: (slot, byte offset, DXGI format, per instance)
+    input: Box<[(u32, u32, u32, bool)]>,
+    /// a rectangle-list pipeline: [`RECT_NO`] (not one), [`RECT_UNKNOWN`], then whether the pool built it with the
+    /// geometry stage ([`RECT_GS`]) or without ([`RECT_CPU`]), asked once
+    rect: AtomicU8,
+}
+
+const RECT_NO: u8 = 0;
+const RECT_UNKNOWN: u8 = 1;
+const RECT_GS: u8 = 2;
+const RECT_CPU: u8 = 3;
+
+/// A console pipeline's description, as `hand_out` keeps it.
+struct Made {
+    key: Key,
+    handle: Option<Handle>,
+    user: Option<&'static UserMap>,
+    topology: u8,
+    input: Box<[(u32, u32, u32, bool)]>,
+    rect: bool,
 }
 
 const SLOTS: usize = 16;
@@ -293,13 +313,15 @@ unsafe fn create_compute(desc: *const ComputeDesc, iid: *const GUID, out: *mut R
         }
     };
     let user = handle.and_then(|_| compute_map(cs, bytes));
-    unsafe { hand_out(key, handle, user, 0, iid, out) }
+    unsafe { hand_out(Made { key, handle, user, topology: 0, input: Box::new([]), rect: false }, iid, out) }
 }
 
 /// The console object for a pipeline (with its pool handle, or none), answered as `iid` into `out`.
-unsafe fn hand_out(key: Key, handle: Option<Handle>, user: Option<&'static UserMap>, topology: u8, iid: *const GUID, out: *mut Raw) -> i32 {
+unsafe fn hand_out(m: Made, iid: *const GUID, out: *mut Raw) -> i32 {
+    let Made { key, handle, user, topology, input, rect } = m;
+    let rect = AtomicU8::new(if rect { RECT_UNKNOWN } else { RECT_NO });
     CREATED.fetch_add(1, Ordering::Relaxed);
-    let p = Box::into_raw(Box::new(Pipeline { table: table().as_ptr(), bits: 0, refs: AtomicU32::new(1), key, handle, root: AtomicUsize::new(0), user, topology }));
+    let p = Box::into_raw(Box::new(Pipeline { table: table().as_ptr(), bits: 0, refs: AtomicU32::new(1), key, handle, root: AtomicUsize::new(0), user, topology, input, rect }));
     if out.is_null() {
         unsafe { release(p as Raw) };
         return 1; // S_FALSE: creation would succeed
@@ -337,7 +359,7 @@ fn console_sizes() -> &'static [(u32, usize)] {
 
 /// A graphics or compute description read: requested from the pool when its programs are in the library, with
 /// its programs' user-data map (read from the bytes `mem` saw).
-fn request(parsed: Result<Parsed, Refusal>, mem: &Capture) -> (Key, Option<Handle>, Option<&'static UserMap>, u8) {
+fn request(parsed: Result<Parsed, Refusal>, mem: &Capture) -> Made {
     let p = match parsed {
         Ok(p) => p,
         Err(r) => {
@@ -350,7 +372,7 @@ fn request(parsed: Result<Parsed, Refusal>, mem: &Capture) -> (Key, Option<Handl
                 eprintln!("pipeline  no host pipeline: {r} (counted from now on)");
             }
             *n += 1;
-            return (Key { compute: false, shaders: [0, 0], state: 0 }, None, None, 0);
+            return Made { key: Key { compute: false, shaders: [0, 0], state: 0 }, handle: None, user: None, topology: 0, input: Box::new([]), rect: false };
         }
     };
     if p.skipped > 0 {
@@ -384,7 +406,12 @@ fn request(parsed: Result<Parsed, Refusal>, mem: &Capture) -> (Key, Option<Handl
         Desc::Graphics { .. } => 3,
         Desc::Compute { .. } => 0,
     };
-    (key, pool.filter(|_| all).map(|pool| pool.request(key, p.desc)), user, topology)
+    let input = match &p.desc {
+        Desc::Graphics { state, .. } => state.input.iter().map(|e| (e.slot, e.offset, e.format, e.per_instance)).collect(),
+        Desc::Compute { .. } => Box::new([]) as Box<[_]>,
+    };
+    let rect = matches!(&p.desc, Desc::Graphics { state, .. } if state.topology == rebuild_pipelines::rectgs::RECT_TOPOLOGY_TYPE);
+    Made { key, handle: pool.filter(|_| all).map(|pool| pool.request(key, p.desc)), user, topology, input, rect }
 }
 
 /// The user-data map of a description's programs (`None`, counted, when a program's root layout is unreadable).
@@ -425,8 +452,7 @@ pub unsafe extern "system" fn CreateGraphicsPipelineState(_this: Raw, desc: *con
     // SAFETY: the title passes a whole description, and what it points at is live for the call
     let d = unsafe { std::slice::from_raw_parts(desc as *const u8, stream::graphics_desc::SIZE) };
     let mem = unsafe { Capture::new() };
-    let (key, handle, user, topology) = request(stream::parse_graphics(d, &mem), &mem);
-    unsafe { hand_out(key, handle, user, topology, iid, out) }
+    unsafe { hand_out(request(stream::parse_graphics(d, &mem), &mem), iid, out) }
 }
 
 /// 0x2b0 CreatePipelineState: a pipeline state stream, console subobject numbering.
@@ -438,8 +464,7 @@ pub unsafe extern "system" fn CreatePipelineState(_this: Raw, desc: *const c_voi
     // SAFETY: the title passes `size` bytes of stream, and what it points at is live for the call
     let s = unsafe { std::slice::from_raw_parts(d.stream, d.size) };
     let mem = unsafe { Capture::new() };
-    let (key, handle, user, topology) = request(stream::parse_stream(s, &mem, Numbering::Console, console_sizes()), &mem);
-    unsafe { hand_out(key, handle, user, topology, iid, out) }
+    unsafe { hand_out(request(stream::parse_stream(s, &mem, Numbering::Console, console_sizes()), &mem), iid, out) }
 }
 
 /// The host pipeline of a console one, for the lists. Waits for the pool at a pipeline's first use. A pipeline
@@ -466,7 +491,46 @@ pub fn host(console: Raw) -> Option<HostPipeline> {
         root = r.as_raw() as usize;
         p.root.store(root, Ordering::Relaxed);
     }
-    Some(HostPipeline { pso: pso.as_raw(), root_signature: root as Raw, compute: p.key.compute, user: Some(user), topology: p.topology })
+    // a rectangle-list pipeline: whether its PSO has the geometry stage, asked of the pool once (the PSO exists)
+    let mut rect = p.rect.load(Ordering::Relaxed);
+    if rect == RECT_UNKNOWN {
+        rect = if pool.creator().rect_gs(&p.key) { RECT_GS } else { RECT_CPU };
+        p.rect.store(rect, Ordering::Relaxed);
+    }
+    Some(HostPipeline { pso: pso.as_raw(), root_signature: root as Raw, compute: p.key.compute, user: Some(user), topology: p.topology, rects: rect == RECT_GS })
+}
+
+/// A console graphics pipeline's input layout: (slot, byte offset, DXGI format, per instance).
+pub fn input_layout(console: Raw) -> Option<Vec<(u32, u32, u32, bool)>> {
+    of(console).filter(|p| !p.key.compute).map(|p| p.input.to_vec())
+}
+
+/// Why a console pipeline has no host pipeline, for traces: its programs, which of them the library lacks, and
+/// whether it has a pool request and a user-data map.
+pub fn describe(console: Raw) -> String {
+    let Some(p) = of(console) else { return format!("{console:p} is not a pipeline of ours") };
+    let lib = pool().map(|pool| pool.creator().programs().library());
+    let has = |h: u64, stage: Stage| if h == 0 { "-" } else if lib.is_some_and(|l| l.get(h, stage).is_some()) { "in library" } else { "NOT in library" };
+    let (a, b) = if p.key.compute { (Stage::Cs, Stage::Ps) } else { (Stage::Vs, Stage::Ps) };
+    format!(
+        "{} {:016x} ({}) {:016x} ({}), state {:016x}, pool request {}, user map {}, topology type {}{}, input {:?}",
+        if p.key.compute { "compute" } else { "graphics" },
+        p.key.shaders[0],
+        has(p.key.shaders[0], a),
+        p.key.shaders[1],
+        has(p.key.shaders[1], b),
+        p.key.state,
+        p.handle.is_some(),
+        p.user.is_some(),
+        p.topology,
+        match p.rect.load(Ordering::Relaxed) {
+            RECT_UNKNOWN => " (rectangles)",
+            RECT_GS => " (rectangles, geometry stage)",
+            RECT_CPU => " (rectangles, no geometry stage)",
+            _ => "",
+        },
+        p.input
+    )
 }
 
 /// One line for the run report (a second with the on-demand failures, when there are any).
