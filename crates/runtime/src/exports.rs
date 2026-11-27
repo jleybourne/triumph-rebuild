@@ -448,7 +448,13 @@ unsafe extern "system" fn serialize_versioned_root_signature(desc: *const u8, bl
 /// The console-only DLLs we serve: `LoadLibrary` of these never reaches the host, even where the host
 /// has a DLL of the same name (the PC's own `xgameruntime.dll` would take console GUIDs).
 pub const CONSOLE_DLLS: &[&str] =
-    &["d3d12_xs.dll", "xmem.dll", "acphal.dll", "xapu.dll", "chad.dll", "xcrdapi.dll", "xg_xs.dll", "xgameruntime.dll"];
+    &["d3d12_xs.dll", "xmem.dll", "acphal.dll", "xapu.dll", "chad.dll", "xcrdapi.dll", "xg_xs.dll", "xgameruntime.dll", "amd_fidelityfx_loader_xbox.dll", "amd_fidelityfx_upscaler_xbox.dll"];
+
+/// Title DLLs served from here instead of mapped (lane `ffx`): AMD's FidelityFX loader and upscaler for
+/// Xbox, whose upscale is console code. `REBUILD_FFX=title` maps the title's own again.
+pub fn replaces_title_dll(dll: &str) -> bool {
+    rebuild_ffx::enabled() && rebuild_ffx::DLLS.iter().any(|d| d.eq_ignore_ascii_case(dll))
+}
 
 pub fn is_console_dll(dll: &str) -> bool {
     CONSOLE_DLLS.iter().any(|d| d.eq_ignore_ascii_case(dll))
@@ -478,6 +484,7 @@ pub fn console_export(dll: &str, name: &str) -> Option<u64> {
         }
         "xg_xs.dll" => return crate::xg::export(name),
         "xgameruntime.dll" => return rebuild_gdk::runtime::get_proc(name).map(|f| f as usize as u64),
+        "amd_fidelityfx_loader_xbox.dll" | "amd_fidelityfx_upscaler_xbox.dll" => return rebuild_ffx::export(name),
         _ => return None,
     }
     let f: usize = match name {
@@ -578,6 +585,18 @@ mod tests {
             assert!(crate::modules::override_export(f).is_some(), "{f}");
             assert_eq!(crate::modules::override_export(f), rebuild_winfiles::override_export(f), "{f}");
         }
+    }
+
+    #[test]
+    fn the_fidelityfx_dlls_are_ours() {
+        for dll in ["amd_fidelityfx_loader_xbox.dll", "AMD_FidelityFX_Upscaler_Xbox.dll"] {
+            assert!(is_console_dll(dll));
+            for n in ["ffxCreateContext", "ffxDestroyContext", "ffxDispatch", "ffxQuery", "ffxConfigure"] {
+                assert_eq!(console_export(dll, n), rebuild_ffx::export(n), "{dll}!{n}");
+            }
+        }
+        assert_eq!(replaces_title_dll("amd_fidelityfx_loader_xbox.dll"), rebuild_ffx::enabled());
+        assert!(!replaces_title_dll("bink2scarlett.dll"));
     }
 
     #[test]

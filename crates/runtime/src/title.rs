@@ -152,7 +152,11 @@ pub fn load_title(dir: &Path, cache: &Path) -> Result<LoadedTitle, String> {
             continue;
         };
         let name = f.file_name().unwrap().to_string_lossy().to_ascii_lowercase();
-        let (bytes, _) = rebuild_loader::prepare::prepare(&data, &img)?;
+        if crate::exports::replaces_title_dll(&name) {
+            eprintln!("not mapped: {name} (served by rebuild-ffx)");
+            continue;
+        }
+        let (bytes, _) =rebuild_loader::prepare::prepare(&data, &img)?;
         let path = cache.join(format!("{}-{}.dll", name.trim_end_matches(".exe").trim_end_matches(".dll"), hash16(&data)));
         if !path.exists() {
             std::fs::write(&path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;

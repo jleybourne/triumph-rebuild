@@ -80,6 +80,25 @@ pub fn file_version(path: &std::path::Path) -> Option<String> {
     }
 }
 
+/// The typed format to view a resource as when its own format is typeless. The title's textures
+/// arrive typeless on the host (`rebuild-d3d12x` keeps the typed view format apart), and both SDKs
+/// build views from the format they are given, so the backends name the typed one.
+#[cfg(windows)]
+pub fn typed(f: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT) -> windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT {
+    use windows::Win32::Graphics::Dxgi::Common::*;
+    match f {
+        DXGI_FORMAT_R32G32B32A32_TYPELESS => DXGI_FORMAT_R32G32B32A32_FLOAT,
+        DXGI_FORMAT_R16G16B16A16_TYPELESS => DXGI_FORMAT_R16G16B16A16_FLOAT,
+        DXGI_FORMAT_R16G16_TYPELESS => DXGI_FORMAT_R16G16_FLOAT,
+        DXGI_FORMAT_R32_TYPELESS | DXGI_FORMAT_D32_FLOAT => DXGI_FORMAT_R32_FLOAT,
+        DXGI_FORMAT_R10G10B10A2_TYPELESS => DXGI_FORMAT_R10G10B10A2_UNORM,
+        DXGI_FORMAT_R8G8B8A8_TYPELESS => DXGI_FORMAT_R8G8B8A8_UNORM,
+        DXGI_FORMAT_B8G8R8A8_TYPELESS => DXGI_FORMAT_B8G8R8A8_UNORM,
+        DXGI_FORMAT_R16_TYPELESS => DXGI_FORMAT_R16_FLOAT,
+        other => other,
+    }
+}
+
 /// A width and height in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Size {

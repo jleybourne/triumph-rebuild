@@ -2129,6 +2129,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rebuild-ffx"
+version = "0.1.0"
+dependencies = [
+ "rebuild-d3d12x",
+ "rebuild-pipelines",
+ "rebuild-upscale",
+ "rebuild-xlist",
+ "windows",
+]
+
+[[package]]
 name = "rebuild-gdk"
 version = "0.1.0"
 
@@ -2178,6 +2189,7 @@ dependencies = [
  "rebuild-audio",
  "rebuild-d3d12x",
  "rebuild-dstorage",
+ "rebuild-ffx",
  "rebuild-gdk",
  "rebuild-loader",
  "rebuild-pipelines",
