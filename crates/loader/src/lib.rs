@@ -13,6 +13,7 @@
 
 pub mod map;
 pub mod pe;
+pub mod prepare;
 #[cfg(windows)]
 pub mod region;
 

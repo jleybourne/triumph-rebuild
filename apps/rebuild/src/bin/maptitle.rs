@@ -155,6 +155,8 @@ fn main() {
         res.from_title,
         res.from_host_or_ours
     );
+    let tls: Vec<String> = parsed.iter().filter(|(_, _, i)| i.tls.is_some()).map(|(n, _, i)| format!("{n} ({} callbacks)", i.tls.as_ref().map(|t| t.callbacks.len()).unwrap_or(0))).collect();
+    println!("tls       {} images with static TLS: {}", tls.len(), tls.join(", "));
     println!("missing   {missing_total} (the discovery list; each is a function still to build):");
     for (tier, dlls) in &by_tier {
         let n: usize = dlls.values().sum();

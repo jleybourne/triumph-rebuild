@@ -246,9 +246,9 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, after mapping the title: 97.5 % of its imports bind
+updated   2026-11-27, after prepared images (static TLS through the Windows loader); see also claude-max-handoff.md for the lead's in-flight state
 progress  42 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
-tests     120 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 13, input 16, vfs 18, runtime 14, upscale 11)
+tests     121 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 14, input 16, vfs 18, runtime 14, upscale 11)
 ```
 
 | build | state | where | proof |
@@ -269,7 +269,7 @@ tests     120 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlis
 
 ## 9. Taking over as lead
 
-If the owner hands you the whole job, you are the lead. Read `README.md`, `plan.md`, `tasks.md`,
+If the owner hands you the whole job, you are the lead. **Start with [`claude-max-handoff.md`](claude-max-handoff.md)** (the in-flight step and its next actions). Then read `README.md`, `plan.md`, `tasks.md`,
 `progress.md` (top block and the latest three entries), `docs/design/shader-ir.md`, this file, and
 `agents/secondary-agents-updates.md` (what the helper lanes have done and flagged). Run
 `cargo test --release` (must be green) and `cargo run --release --bin gputest -- --bare` (the control).

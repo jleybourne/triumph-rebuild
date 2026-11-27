@@ -83,6 +83,26 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
 
+### 2026-11-27 — Prepared images: Windows maps the title's images with static TLS and runs nothing; handoff file
+
+```
+[████████░░░░░░░░░░░░]  42 %   (unchanged: a step inside Build 3's startup task)
+runtime     32 / 73 of our functions built
+shaders     0 / 25,694
+measured fps   none yet
+```
+
+- **Found:** 4 title images use static TLS, the exe among them with 2 callbacks. Code mapped by hand cannot have
+  static TLS on every thread; the Windows loader can.
+- **Built** `crates/loader/src/prepare.rs` (the fork's idea, our code): a patched copy (DLL flag, no entry point,
+  the import directory at its terminator, TLS callbacks cleared and their relocation neutralised) that Windows
+  maps, relocates, gives static TLS and unwind tables, while running none of its code. A test prepares and
+  loads the test binary itself: Windows assigns a static TLS index and this thread has a block.
+- **Added** `claude-max-handoff.md`: the lead's in-flight state and exact next actions, so a Claude Max session
+  can take over mid-step. It is updated every step.
+- **Next:** bind the IATs of the loaded images, trap thunks for misses, then run the title's startup to its
+  first render call.
+
 ### 2026-11-27 — Build 3: the title's images mapped and bound — 97.5 % of its imports
 
 ```
