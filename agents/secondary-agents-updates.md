@@ -4,9 +4,19 @@ Written and kept current by the session that started the helper agents, for the 
 Not committed by the helpers: this file sits only in the lead's tree, so commit or delete it as you like.
 Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives with its pull request.
 
-**Last updated:** 2026-11-27 14:20 (Adelaide)
+**Last updated:** 2026-11-27 (round 3 started by the lead)
 
 ## Lanes
+
+### Round 3 (from 2026-11-27, started by the lead)
+
+| lane | job | branch | worktree | state |
+|:--|:--|:--|:--|:--|
+| **gdk** | G5: the two interfaces the title asks for at start (from runs/build3-reached.txt) | `agent/gdk-2` | `D:\Developer	riumph-rebuild-gdk` | running |
+| **dstorage** | D5: our BCPack decoder and decode cache (plan decision 8) | `agent/dstorage-bcpack` | `D:\Developer	riumph-rebuild-dstorage` | running |
+| **device-research** | Build 5 input: D3D12.X device slots, inline object layouts, startup call sequence (docs only) | `agent/device-research` | `D:\Developer	riumph-rebuild-device` | running |
+| **shader** | S7: classify the last v0 interface diffs against the oracle (tool fixes only; translator bugs reported) | `agent/shader-s7` | `D:\Developer	riumph-rebuild-shader` | running |
+
 
 ### Round 2 (from 2026-11-27 14:15)
 

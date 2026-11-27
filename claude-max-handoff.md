@@ -19,7 +19,7 @@ built       Builds 0 (a, b), 1, 2 closed; Build 3 ~88 %; Build 4 core proven; Bu
 title       REACHES D3D12XboxCreateDevice in 1.4 s (runs/build3-reached.md): Build 3 closed. Title runs are OK
             with the owner (guarded: job, 12 GiB budget, watchdog); TLS slot 0 is the title's (runtime/src/tls.rs)
 runtime     GDK runtime (xgameruntime.dll) ours via LoadLibraryExA override; files 32 + CRT 13 bound
-lanes       round 1 and round 2 all merged (#1-#18); no lane running
+lanes       round 1 and 2 merged (#1-#18); round 3 running: gdk G5, dstorage D5, device-research, shader S7 (agents/secondary-agents-updates.md)
 tests       311 green (one files F5 host-comparison test 46 vs 45 since the reboot: for the files lane)
 translate   `translate ps` over D:\victory-data\shaders.rpf: v0 set 2,834 / 2,881 compile (PS 1,791, VS 926, CS 117);
             immediate samplers decode to static samplers (sir::sampler, space100: Build 5 must add them to
