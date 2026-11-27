@@ -214,3 +214,4 @@ ebuild-oracle (backup in oracle-swapped-backup); `apps/rebuild/src/bin/oracle.rs
 - Tests 445 green. Progress 57 %.
 
 - Round 5 helpers launched: lane `ondemand` (on-demand translation of programs missing from the library; status agents/ondemand.md) and lane `streampso` (0x2b0/0x50 graphics pipelines; agents/streampso.md). Lead: the null lookup at exe+0xb5a5f8, then Execute/PresentX.
+- Round 5 adds lanes `present` (queue Execute 0x050/0x118, PresentX 0x100, PNG capture, frame line + summary.toml; agents/present.md) and `shaderexec` (execution check vs the oracle; agents/shaderexec.md).
