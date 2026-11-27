@@ -520,7 +520,14 @@ fn f5_copies_links_handle_changes_and_directory_attributes_match_the_host() {
     install(Files::new(vfs, r"G:\"));
 
     let (ours, skipped) = unsafe { f5_script(&Side { ours: true, root: "G:".into() }) };
-    let (theirs, _) = unsafe { f5_script(&Side { ours: false, root: host_root.to_string_lossy().into_owned() }) };
+    let (theirs, host_skipped) = unsafe { f5_script(&Side { ours: false, root: host_root.to_string_lossy().into_owned() }) };
+    // a host that lets this user create symbolic links (Developer Mode) has no refusal to compare: leave the
+    // line out of ours too (our refusal is checked on its own below)
+    let (ours, skipped) = if host_skipped > 0 {
+        (ours.into_iter().filter(|l| !l.starts_with("CreateSymbolicLinkW")).collect::<Vec<_>>(), skipped + host_skipped)
+    } else {
+        (ours, skipped)
+    };
     let after = hash_tree(&base);
     clear_readonly(&s.0);
     assert_eq!(after, before, "the base folder is unchanged");
