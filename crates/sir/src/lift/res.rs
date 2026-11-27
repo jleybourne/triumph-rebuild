@@ -385,14 +385,20 @@ impl Lifter<'_> {
         let uav = store || self.desc_is_uav(rsrc);
         self.use_desc(rsrc, if uav { View::RwTyped } else { View::Typed }, 0);
         let ch = ["x", "y", "z", "w"];
+        // d16: the data are halves, two to a register (component k in register k / 2, half k % 2); the host view
+        // converts the format to and from float, and the halves are that float's f16 bits
+        let d16 = name.contains("_d16_");
         if store {
             let vals: Vec<String> = (0..4u16)
                 .map(|k| {
-                    if k < n {
+                    if k >= n {
+                        "0.0f".into()
+                    } else if d16 {
+                        self.out.vgprs.insert(vdata + k / 2);
+                        format!("f16tof32(v{} >> {}u)", vdata + k / 2, 16 * (k % 2))
+                    } else {
                         self.out.vgprs.insert(vdata + k);
                         format!("asfloat(v{})", vdata + k)
-                    } else {
-                        "0.0f".into()
                     }
                 })
                 .collect();
@@ -408,8 +414,22 @@ impl Lifter<'_> {
         }
         let rw = if uav { "RW" } else { "" };
         let _ = writeln!(self.out.body, "    {{ {rw}Buffer<float4> b = ResourceDescriptorHeap[s{rsrc}]; float4 r = b[v{vaddr}];");
-        for k in 0..n {
-            self.vwrite_raw(vdata + k, format!("asuint(r.{})", ch[k as usize]));
+        if d16 {
+            // a register with one half loaded keeps its other half (as the console's d16 loads do)
+            for r in 0..n.div_ceil(2) {
+                let lo = format!("f32tof16(r.{})", ch[2 * r as usize]);
+                let e = if 2 * r + 1 < n {
+                    format!("{lo} | (f32tof16(r.{}) << 16)", ch[2 * r as usize + 1])
+                } else {
+                    self.out.vgprs.insert(vdata + r);
+                    format!("(v{} & 0xffff0000u) | {lo}", vdata + r)
+                };
+                self.vwrite_raw(vdata + r, e);
+            }
+        } else {
+            for k in 0..n {
+                self.vwrite_raw(vdata + k, format!("asuint(r.{})", ch[k as usize]));
+            }
         }
         self.out.body.push_str("    }\n");
         Some(())
