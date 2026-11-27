@@ -23,6 +23,7 @@
 //! without one (no tables) such requests fail with `E_NOTIMPL` and are counted.
 
 pub mod bcpack;
+pub mod capture;
 pub mod cache;
 pub mod com;
 pub mod engine;
@@ -34,6 +35,7 @@ mod tests;
 use std::ffi::{c_char, c_void};
 
 pub use bcpack::Decoder;
+pub use capture::Capture;
 pub use cache::Cache;
 pub use com::{install, DStorageGetFactory, OwnedFactory};
 pub use engine::{BcPack, Config, Engine, Pages, Stats, StatusArray};

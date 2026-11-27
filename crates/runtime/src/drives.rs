@@ -56,7 +56,11 @@ pub fn install(d: &Drives) -> Result<Arc<Vfs>, String> {
     };
     rebuild_gdk::profile::configure(profile)?;
     rebuild_winfiles::install(rebuild_winfiles::Files::new(vfs.clone(), r"G:\"));
-    let config = rebuild_dstorage::Config { pages: Some(Arc::new(PhysicalPages)), ..Default::default() };
+    // BCPack: our decoder (tables from the setting / REBUILD_BCPACK_TABLES, outside git), with the title's own
+    // requests captured when REBUILD_BCPACK_CAPTURE names a folder (D5b: checking the decoder on real data)
+    let bcpack = rebuild_dstorage::Decoder::from_config(None)
+        .map(|d| rebuild_dstorage::Capture::from_env(d as Arc<dyn rebuild_dstorage::BcPack>));
+    let config = rebuild_dstorage::Config { pages: Some(Arc::new(PhysicalPages)), bcpack, ..Default::default() };
     // a second install in one process keeps the first engine (tests install more than once)
     let _ = rebuild_dstorage::install(rebuild_dstorage::Engine::new(vfs.clone(), config));
     Ok(vfs)

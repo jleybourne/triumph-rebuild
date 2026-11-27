@@ -213,3 +213,15 @@ pool size), maybe GPU time. Settings in `crates/config` and the launcher; applie
 - [ ] VRAM: our GPU heaps refuse past the limit (Build 5)
 - [ ] worker pools (upload workers, DirectStorage threads) sized to the core limit
 - [ ] proof: a capped run shows the limits in force (needs the owner's OK to run the title)
+
+## D5b — BCPack against the title's real data (owner: "do whatever the best approach is", 2026-11-27)
+
+Decided (lead): **capture the title's own requests while it runs**, never a helper reading the game folder. The
+runtime now binds our decoder (tables default to `%LOCALAPPDATA%\triumph-rebuild\bcpack-tables.bin`, outside git) and
+wraps it in `rebuild_dstorage::Capture` when `REBUILD_BCPACK_CAPTURE=<folder outside git>` is set (cap
+`REBUILD_BCPACK_CAPTURE_MB`, default 512). Each request's packed input is saved as `<n>-bc<bc>-<out bytes>.bcp`.
+
+- [x] capture wrapper + test; decoder bound in `crates/runtime/src/drives.rs`
+- [x] first run with capture: 0 BCPack requests before `D3D12XboxCreateDevice` (streaming starts later)
+- [ ] once Build 5 runs the title further: a capture run, then the comparison harness (lane dstorage) over the
+      captures: ours vs the fork's decoder, 0 differences, and any red-block suspects named
