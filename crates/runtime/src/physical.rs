@@ -17,6 +17,15 @@ use windows::Win32::System::Threading::GetCurrentProcess;
 
 pub const FRAME: usize = 64 << 10;
 
+/// The first frame number handed to the title. Page numbers are opaque to titles, but 0 reads as "no page":
+/// handing out frame 0 let the title treat a live page as free and map it a second time, so its shader arena's
+/// first allocation was overwritten (the null-program crash on frame 2). The fork numbers from here too.
+pub const FIRST_PAGE: usize = 0x10_0000;
+
+fn index(frame: usize) -> Option<usize> {
+    frame.checked_sub(FIRST_PAGE)
+}
+
 struct Section {
     handle: HANDLE,
     frames: usize,
@@ -88,7 +97,7 @@ impl Physical {
         self.sections.push(Section { handle, frames: n, live: n, view: 0 });
         let first = self.frames.len();
         self.frames.extend((0..n).map(|k| Some((si, k))));
-        Some((first..first + n).collect())
+        Some((first + FIRST_PAGE..first + n + FIRST_PAGE).collect())
     }
 
     /// Free frames (their mappings must be gone first).
@@ -96,11 +105,11 @@ impl Physical {
         if frames.iter().any(|f| self.mapped.values().any(|m| m == f)) {
             return false;
         }
-        if frames.iter().any(|&f| !matches!(self.frames.get(f), Some(Some(_)))) {
+        if frames.iter().any(|&f| !matches!(index(f).and_then(|i| self.frames.get(i)), Some(Some(_)))) {
             return false;
         }
         for &f in frames {
-            let Some((si, _)) = self.frames[f].take() else { continue };
+            let Some((si, _)) = self.frames[f - FIRST_PAGE].take() else { continue };
             let s = &mut self.sections[si];
             s.live -= 1;
             if s.live == 0 {
@@ -122,7 +131,7 @@ impl Physical {
     /// Map frame `frame` at `addr` (64 KiB aligned, inside a placeholder reservation). Whatever was
     /// mapped there is unmapped first.
     pub fn map(&mut self, addr: u64, frame: usize) -> bool {
-        let Some(Some((si, k))) = self.frames.get(frame).copied() else { return false };
+        let Some(Some((si, k))) = index(frame).and_then(|i| self.frames.get(i)).copied() else { return false };
         if addr % FRAME as u64 != 0 || k >= self.sections[si].frames {
             return false;
         }
@@ -164,7 +173,7 @@ impl Physical {
     /// The 64 KiB of a live frame, wherever (or whether) it is mapped. The pointer stays valid while
     /// this `Physical` lives: sections are only closed when it drops.
     pub fn frame_ptr(&mut self, frame: usize) -> Option<*mut u8> {
-        let (si, k) = (*self.frames.get(frame)?)?;
+        let (si, k) = (*self.frames.get(index(frame)?)?)?;
         let s = &mut self.sections[si];
         if s.view == 0 {
             let v = unsafe { MapViewOfFile(s.handle, FILE_MAP_ALL_ACCESS, 0, 0, s.frames * FRAME) };
@@ -174,6 +183,11 @@ impl Physical {
             s.view = v.Value as usize;
         }
         Some((s.view + k * FRAME) as *mut u8)
+    }
+
+    /// Every address frame `frame` is mapped at now (a diagnostic scan).
+    pub fn mapped_at(&self, frame: usize) -> Vec<u64> {
+        self.mapped.iter().filter(|(_, &f)| f == frame).map(|(&a, _)| a).collect()
     }
 
     pub fn frame_at(&self, addr: u64) -> Option<usize> {

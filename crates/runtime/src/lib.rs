@@ -30,6 +30,7 @@ pub mod exports;
 #[cfg(windows)]
 pub mod modules;
 pub mod physical;
+pub mod overlap;
 pub mod pipeline;
 pub mod registry;
 pub mod present;

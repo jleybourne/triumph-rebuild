@@ -950,9 +950,10 @@ unsafe extern "system" fn TracedReadFile(h: HANDLE, buf: *mut c_void, len: u32, 
         let first = if ok != 0 && got >= 4 { unsafe { std::ptr::read_unaligned(buf as *const u32) } } else { 0 };
         let drift = if ov.is_null() && ok != 0 && after - before != got as i64 { "  <-- DRIFT" } else { "" };
         eprintln!(
-            "reads     h {:#x} thread {} ReadFile {len:#x} got {got:#x} ok {ok} pos {before:#x} -> {after:#x} ov {ov_offset:x?} first {first:08x}{drift}",
+            "reads     h {:#x} thread {} ReadFile {len:#x} into {:#x} got {got:#x} ok {ok} pos {before:#x} -> {after:#x} ov {ov_offset:x?} first {first:08x}{drift}",
             h as usize,
-            unsafe { host::GetCurrentThreadId() }
+            unsafe { host::GetCurrentThreadId() },
+            buf as usize
         );
     }
     set_last_error(code);

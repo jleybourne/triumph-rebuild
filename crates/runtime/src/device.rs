@@ -203,7 +203,7 @@ unsafe extern "system" fn console_pipeline<const SLOT: usize>(_this: *mut c_void
 }
 
 /// `module+offset` for a code address (the title's images are loaded by the Windows loader, so they are modules).
-fn module_offset(addr: usize) -> String {
+pub(crate) fn module_offset(addr: usize) -> String {
     use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT};
     let mut m = windows::Win32::Foundation::HMODULE::default();
     let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
