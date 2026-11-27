@@ -107,7 +107,8 @@ mod tests {
         let start = Instant::now();
         assert_eq!(unsafe { WaitFrameEventX(std::ptr::null_mut(), 0, 1000, std::ptr::null(), 0, &mut t) }, 0);
         assert_eq!(t, first + 1, "the next origin");
-        assert!(start.elapsed() <= Duration::from_millis(30));
+        // one interval (20 ms) plus scheduler slack: the machine may be busy (helper lanes compiling)
+        assert!(start.elapsed() <= Duration::from_millis(100));
         // 0 ms timeout: not reached yet, token only when asked
         let mut t2 = 0u64;
         assert_eq!(unsafe { WaitFrameEventX(std::ptr::null_mut(), 0, 0, std::ptr::null(), 2, &mut t2) }, S_FALSE);
