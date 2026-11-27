@@ -4,20 +4,26 @@ Updated by the lead every step. Second lead session (2026-11-27), on the owner's
 Read this first, then `secondary-agent.md` §8-10 (project state, the owner's rules and step order, answers to
 helpers).
 
+## SAFETY FIRST (2026-11-27)
+
+`runtitle --run` took the owner's PC down three times (reboots). Root causes found and fixed (commits df6d3a9,
+2a2af01; progress.md): uncapped physical-page commit, and `VirtualAlloc2` address requirements + write-watch
+spinning in the kernel on a full 4 GiB window (unkillable process). **Never run the title without the owner's
+explicit OK for that run.** Test memory patterns with `exitprobe` (no title, capped children) instead.
+
 ## Where things stand (one screen)
 
 ```
-progress    47 % toward 30 fps (progress.md)       measured fps: none yet (no title frame)
-built       Builds 0 (a, b), 1, 2 closed; Build 3 ~70 %; Build 4 core proven; Build 7 DLSS standalone
-title       its 17 images load through the Windows loader; 16/16 DLL entry points run; its exe's entry
-            point RUNS for 60 s without a crash, but waits before its first render call
-runtime     32 / 73 of our functions built; 624 more bind straight to the host
-shaders     core proven on the card; lane shader merged: 25,694 programs decode byte-exact, oracle set
-            complete; 0 / 25,694 translated yet
-lanes       round 1 all merged (#1-#13); round 2 handed out: gdk G1-G4, audio A5, files F4-F5, shader S6, launcher U6
-tests       250 green, 4 ignored, 0 warnings (cargo test --release)
-translate   `translate coverage|lift|ps` over D:\victory-data\shaders.rpf; 427 / 1,798 v0 pixel shaders compile;
-            next: resource tracing (s_load_dwordx4/x8 from root parameters), see runs/build4-ps.md
+progress    48 % toward 30 fps (progress.md)       measured fps: none yet (no title frame)
+built       Builds 0 (a, b), 1, 2 closed; Build 3 ~88 %; Build 4 core proven; Build 7 DLSS + FSR standalone
+title       loads and runs its entry; the startup "wait" was likely our graphics placement spinning in the
+            kernel (fixed in 2a2af01); not re-run yet (needs the owner's OK)
+runtime     GDK runtime (xgameruntime.dll) ours via LoadLibraryExA override; files 32 + CRT 13 bound
+lanes       round 1 and round 2 all merged (#1-#18); no lane running
+tests       311 green (one files F5 host-comparison test 46 vs 45 since the reboot: for the files lane)
+translate   `translate ps` over D:\victory-data\shaders.rpf: 1,468 / 1,798 v0 pixel shaders compile (81.6 %);
+            next: immediate samplers (158 programs: sampler dwords baked as s_mov constants, root layout
+            ImmediateSampler) -> decode to static samplers in our root signature
 ```
 
 ## Who you are and how the owner works
