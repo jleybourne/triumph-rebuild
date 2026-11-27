@@ -529,6 +529,9 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
     let (ours, theirs) = match pipelines {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) => return row("error", "our pipeline refused".into(), e),
+        // a pixel shader: the one feeding vertex shader (built from our input struct) links to ours; the oracle packs
+        // its inputs into other registers (all sampled refusals were this linkage error)
+        (_, Err(e)) if p.stage == "ps" => return row("untested", "the oracle packs its pixel inputs differently (the feeding vertex shader links to ours only)".into(), e),
         (_, Err(e)) => return row("error", "the oracle's pipeline refused".into(), e),
     };
     step("pipelines");

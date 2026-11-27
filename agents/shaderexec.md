@@ -3,6 +3,13 @@
 Status: **built and run** (2026-11-28). Results: [`runs/build4-exec.md`](../runs/build4-exec.md), per program
 [`runs/build4-exec.csv`](../runs/build4-exec.csv).
 
+```
+measured   shaders counted (bit-exact, every input set, WARP)   5,195 / 25,694   cs 252 · ps 3,980 · vs 963
+           + within a few ulp, bit-exact under -Gis (named)       +28 → 5,223
+           v0 set                                                 2,762 / 2,881    cs 110 · ps 1,733 · vs 919
+           tested: every agnostic program (9,128); 1,726 are not translated yet (opcode coverage)
+```
+
 ## Rules from the lead (2026-11-27, 21:23 and later)
 
 1. **GPU incident, answered.** Yes: this lane ran on the RTX between 21:13 and 21:23. 21:13 a 10-program trial of
@@ -46,7 +53,7 @@ Status: **built and run** (2026-11-28). Results: [`runs/build4-exec.md`](../runs
 | a buffer read through a table is a constant buffer only when its own range is one | `3fe821a8916a4564` (an SRV range beside a CBV range) | |
 | d16 typed buffer loads and stores carry halves | `e4d850a7baf18270` | |
 | med3 of a value and two constants is a clamp, max then min (NaN goes to the low bound as on the console); general med3 checks NaN; `0 - x` stays a subtraction (`precise`: DXC folded it to `-x`, +0 became -0) | `9034c0d9d567c3e5`, `565cc0b38920b229` | 13 of 38 differing compute programs match |
-| buffer loads through a CBV descriptor read the host's CBV (an SRV type over a CBV descriptor lost the WARP device; GPU-based validation named it) | `001a8d494b5f60b3` | the 16 vertex programs that lost the device now run |
+| buffer loads through a CBV descriptor read the host's CBV (an SRV type over a CBV descriptor lost the WARP device; GPU-based validation named it) | `001a8d494b5f60b3` | vertex programs that lost the device: 16 → 0 |
 
 ## Next
 
