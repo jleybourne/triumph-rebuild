@@ -9,3 +9,4 @@ toml = "0.8"
 
 [dev-dependencies]
 rebuild-upscale = { path = "../upscale" }
+rebuild-input = { path = "../input" }

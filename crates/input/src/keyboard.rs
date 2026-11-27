@@ -17,7 +17,11 @@ pub mod vk {
     pub const UP: u8 = 0x26;
     pub const RIGHT: u8 = 0x27;
     pub const DOWN: u8 = 0x28;
+    pub const HOME: u8 = 0x24;
+    pub const INSERT: u8 = 0x2D;
     pub const F10: u8 = 0x79;
+    pub const F11: u8 = 0x7A;
+    pub const F12: u8 = 0x7B;
 }
 
 /// Key → button.
@@ -123,6 +127,8 @@ mod tests {
             assert!(!all[i + 1..].contains(k), "key {k:#x} mapped twice");
         }
         assert_eq!(all.len(), 24);
-        assert!(!all.contains(&vk::F10));
+        for (name, k) in crate::menu::MENU_KEYS {
+            assert!(!all.contains(&k), "menu key {name} is mapped");
+        }
     }
 }

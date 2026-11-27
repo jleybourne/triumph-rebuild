@@ -2113,6 +2113,7 @@ version = "0.1.0"
 name = "rebuild-config"
 version = "0.1.0"
 dependencies = [
+ "rebuild-input",
  "rebuild-upscale",
  "toml 0.8.23",
 ]

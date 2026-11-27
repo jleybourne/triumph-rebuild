@@ -8,23 +8,25 @@
 //! the watcher's latency matters.)
 //!
 //! The title's pointer leads to our [`Fence`] without a lock (+0x38 of the object, after the method table checks
-//! out), and a list's memory wait on a fence's value cell is found by [`by_cell`] (a scan of a fixed table, no lock),
-//! so submission can make it a host queue wait on the host fence.
+//! out), and a list's memory wait on a fence's value cell is found by [`by_cell`] (arithmetic on the arena that
+//! holds every fence object, no lock, no scan), so submission can make it a host queue wait on the host fence.
 
 #![cfg(windows)]
 #![allow(non_snake_case)]
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Graphics::Direct3D12::{ID3D12Fence, D3D12_FENCE_FLAG_NONE};
+use windows::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
 
 pub const SLOTS: usize = 24;
 const OBJECT_SIZE: usize = 0x40;
 const E_NOTIMPL: u64 = 0x8000_4001;
+const E_OUTOFMEMORY: i32 = 0x8007_000Eu32 as i32;
 
 pub struct Fence {
     pub host: ID3D12Fence,
@@ -64,12 +66,57 @@ impl Fence {
 
 /// Where the console object keeps its [`Fence`].
 const OURS: usize = 0x38;
-/// Every fence made, by console object, for [`by_cell`] (append-only; more than this are still served, only not
-/// found by their cell).
-const MAX_FENCES: usize = 4096;
-static ALL: [std::sync::atomic::AtomicUsize; MAX_FENCES] = [const { std::sync::atomic::AtomicUsize::new(0) }; MAX_FENCES];
-static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Fences the arena holds. Each fence has a watcher thread, so a run cannot come near this; past it `CreateFence`
+/// fails (E_OUTOFMEMORY) rather than hand out a fence whose cell [`by_cell`] cannot find.
+const MAX_FENCES: usize = 1 << 20;
 static CALLS: [AtomicU32; SLOTS] = [const { AtomicU32::new(0) }; SLOTS];
+
+/// Every fence's console object, back to back in one reserved range (64 MiB of addresses at most, committed a page
+/// at a time as fences are made). An object is published by the count's release store after it is written, so
+/// [`Arena::object`] is a subtraction, two compares and one acquire load: no lock and no scan on the submit path.
+struct Arena {
+    base: usize,
+    capacity: usize,
+    count: AtomicUsize,
+    adding: Mutex<()>,
+}
+
+impl Arena {
+    fn reserve(capacity: usize) -> Option<Arena> {
+        let base = unsafe { VirtualAlloc(None, capacity * OBJECT_SIZE, MEM_RESERVE, PAGE_READWRITE) } as usize;
+        (base != 0).then(|| Arena { base, capacity, count: AtomicUsize::new(0), adding: Mutex::new(()) })
+    }
+
+    /// A new zeroed object, written by `init` before any lookup can find it; `None` when the arena is full.
+    fn add(&self, init: impl FnOnce(usize)) -> Option<usize> {
+        let _one = self.adding.lock().unwrap_or_else(|e| e.into_inner());
+        let i = self.count.load(Ordering::Relaxed);
+        if i >= self.capacity {
+            return None;
+        }
+        let object = self.base + i * OBJECT_SIZE;
+        // committing a page twice is allowed; fresh pages read as zero
+        if unsafe { VirtualAlloc(Some(object as *const c_void), OBJECT_SIZE, MEM_COMMIT, PAGE_READWRITE) }.is_null() {
+            return None;
+        }
+        init(object);
+        self.count.store(i + 1, Ordering::Release);
+        Some(object)
+    }
+
+    /// `object`, if it is a published object of this arena.
+    #[inline]
+    fn object(&self, object: usize) -> Option<usize> {
+        let off = object.checked_sub(self.base)?;
+        (off % OBJECT_SIZE == 0 && off / OBJECT_SIZE < self.count.load(Ordering::Acquire)).then_some(object)
+    }
+}
+
+static ARENA: OnceLock<Option<Arena>> = OnceLock::new();
+
+fn arena() -> Option<&'static Arena> {
+    ARENA.get_or_init(|| Arena::reserve(MAX_FENCES)).as_ref()
+}
 
 /// The fence behind a title fence pointer: read from the object, no lock.
 #[inline]
@@ -88,10 +135,10 @@ pub fn find(object: usize) -> Option<&'static Fence> {
 }
 
 /// The fence whose value cell (the address `GetGpuAddress` handed out) is `address`.
+#[inline]
 pub fn by_cell(address: u64) -> Option<&'static Fence> {
     let object = (address as usize).checked_sub(0x10)?;
-    let n = COUNT.load(Ordering::Acquire).min(MAX_FENCES);
-    ALL[..n].iter().any(|o| o.load(Ordering::Relaxed) == object).then(|| find(object)).flatten()
+    find(ARENA.get()?.as_ref()?.object(object)?)
 }
 
 impl Fence {
@@ -273,18 +320,62 @@ fn watch(f: &'static Fence) {
 pub fn create(initial: u64) -> Result<usize, i32> {
     let dev = crate::device::get().ok_or(0x8000_4005u32 as i32)?;
     let host: ID3D12Fence = unsafe { dev.host.CreateFence(initial, D3D12_FENCE_FLAG_NONE) }.map_err(|e| e.code().0)?;
-    let object = Box::leak(Box::new([0u64; OBJECT_SIZE / 8]));
-    let base = object.as_mut_ptr() as usize;
-    unsafe {
-        (base as *mut usize).write(vtable().as_ptr() as usize);
-        ((base + 0x10) as *mut u64).write(initial);
-    }
-    let f: &'static Fence = Box::leak(Box::new(Fence { host, cell: base + 0x10, pending: Mutex::new(initial), wake: Condvar::new() }));
-    unsafe { ((base + OURS) as *mut *const Fence).write(f) };
-    let i = COUNT.fetch_add(1, Ordering::AcqRel);
-    if i < MAX_FENCES {
-        ALL[i].store(base, Ordering::Release);
-    }
+    let mut made = None;
+    let base = arena()
+        .and_then(|a| {
+            a.add(|base| {
+                let f: &'static Fence = Box::leak(Box::new(Fence { host, cell: base + 0x10, pending: Mutex::new(initial), wake: Condvar::new() }));
+                unsafe {
+                    (base as *mut usize).write(vtable().as_ptr() as usize);
+                    ((base + 0x10) as *mut u64).write(initial);
+                    ((base + OURS) as *mut *const Fence).write(f);
+                }
+                made = Some(f);
+            })
+        })
+        .ok_or(E_OUTOFMEMORY)?;
+    let f = made.ok_or(E_OUTOFMEMORY)?;
     std::thread::Builder::new().name("fence-watch".into()).stack_size(64 << 10).spawn(move || watch(f)).map_err(|_| 0x8000_4005u32 as i32)?;
     Ok(base)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_object_is_found_by_arithmetic_past_the_old_4096() {
+        let a = Arena::reserve(5000).expect("reserve");
+        let mut made = Vec::new();
+        for i in 0..5000u64 {
+            made.push(a.add(|o| unsafe { ((o + 0x10) as *mut u64).write(i) }).expect("room"));
+        }
+        assert!(a.add(|_| panic!("written past the end")).is_none(), "a full arena refuses");
+        for (i, &o) in made.iter().enumerate() {
+            assert_eq!(a.object(o), Some(o));
+            assert_eq!(unsafe { ((o + 0x10) as *const u64).read() }, i as u64);
+            assert_eq!(a.object(o + 8), None, "inside an object");
+        }
+        assert_eq!(a.object(a.base - OBJECT_SIZE), None);
+        assert_eq!(a.object(a.base + 5000 * OBJECT_SIZE), None);
+    }
+
+    #[test]
+    fn an_object_not_yet_made_is_not_found() {
+        let a = Arena::reserve(8).expect("reserve");
+        assert_eq!(a.object(a.base), None, "nothing published yet (and the page is not committed)");
+        let o = a.add(|_| {}).unwrap();
+        assert_eq!(o, a.base);
+        assert_eq!(a.object(a.base + OBJECT_SIZE), None);
+        // fresh objects read as zero
+        assert!((0..OBJECT_SIZE).step_by(8).all(|k| unsafe { ((o + k) as *const u64).read() } == 0));
+    }
+
+    #[test]
+    fn a_cell_outside_every_fence_is_not_found() {
+        assert!(by_cell(0).is_none());
+        assert!(by_cell(0x10).is_none());
+        let local = 0u64;
+        assert!(by_cell(&local as *const u64 as u64).is_none());
+    }
 }

@@ -100,6 +100,22 @@ pub fn diff_hash(page: &[u8], sent: &mut [u64], offset: usize, out: &mut Vec<Run
     }
 }
 
+/// Compare one written page against the hashes of what was sent, leaving them alone: append changed runs, and
+/// for each changed chunk, in run order, its hash index (`first` + chunk in page) and new hash to `pending`.
+/// The caller commits a pending hash only once the bytes it stands for are on their way to the GPU, so a send
+/// that does not happen leaves the chunk to be found changed again.
+pub fn diff_hash_pending(page: &[u8], sent: &[u64], offset: usize, first: usize, out: &mut Vec<Run>, pending: &mut Vec<(usize, u64)>) {
+    debug_assert_eq!(page.len(), OS_PAGE);
+    debug_assert_eq!(sent.len(), CHUNKS_PER_PAGE);
+    for (k, c) in page.chunks_exact(CHUNK).enumerate() {
+        let h = chunk_hash(c);
+        if h != sent[k] {
+            pending.push((first + k, h));
+            push(out, offset + k * CHUNK, CHUNK);
+        }
+    }
+}
+
 std::thread_local! {
     static SUBMIT_THREAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -217,6 +233,32 @@ mod tests {
         diff_shadow(&p, &mut shadow, 0, &mut out);
         diff_hash(&p, &mut sent, 0, &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_pending_diff_changes_no_hash_and_names_each_chunk_in_run_order() {
+        let mut p = page();
+        p[0] = 1;
+        p[64] = 1;
+        p[300] = 1;
+        let sent = vec![zero_hash(); CHUNKS_PER_PAGE];
+        let (mut out, mut pending) = (Vec::new(), Vec::new());
+        diff_hash_pending(&p, &sent, 4096, 64, &mut out, &mut pending);
+        assert_eq!(out, vec![Run { offset: 4096, len: 128 }, Run { offset: 4096 + 256, len: 64 }]);
+        assert_eq!(pending.iter().map(|&(i, _)| i).collect::<Vec<_>>(), vec![64, 65, 68]);
+        assert!(sent.iter().all(|&h| h == zero_hash()), "nothing counts as sent yet");
+        // not committed: the same chunks are found again
+        let (mut again, mut pending2) = (Vec::new(), Vec::new());
+        diff_hash_pending(&p, &sent, 4096, 64, &mut again, &mut pending2);
+        assert_eq!(again, out);
+        // committed: nothing is found
+        let mut sent = sent;
+        for &(i, h) in &pending {
+            sent[i - 64] = h;
+        }
+        let (mut none, mut pending3) = (Vec::new(), Vec::new());
+        diff_hash_pending(&p, &sent, 4096, 64, &mut none, &mut pending3);
+        assert!(none.is_empty() && pending3.is_empty());
     }
 
     #[test]

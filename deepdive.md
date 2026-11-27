@@ -602,12 +602,13 @@ Measured: against the fork, 174 cases, 43,446,949 bytes, 0 differ; detile 10-11 
 - `pad.rs`: `PadState` (28 bytes), laid out like the console.
 - `keyboard.rs`: the stand-in pad mapping (WASD / IJKL, …).
 - `menu.rs`: menu isolation. While the menu is open or draining the title sees a neutral pad and its rumble
-  is dropped. `MENU_KEY = F10` is hard-coded (`:13`).
+  is dropped. The menu key is `MENU_KEY` (F10) unless `Input::with_menu_key` is given another;
+  `menu_key_named` maps each `menu.key` choice (F10 / F11 / F12 / Insert / Home) to its key.
 - `gameinput.rs`: the one GameInput import, `GameInputCreate`.
 - `host.rs`: XInput slots 0-3 plus `GetAsyncKeyState`.
 
 **Nothing depends on this crate.** The GameInput COM object and the in-game menu (L5) are not built. A focused
-poll costs about 170 µs, so the plan polls on its own thread (`tasks.md:183`). Tests: 17, 1 ignored.
+poll costs about 170 µs, so the plan polls on its own thread (`tasks.md:183`). Tests: 18, 1 ignored.
 
 ### 2.16 `crates/upscale` — DLSS and FSR, standalone
 
@@ -775,10 +776,12 @@ title memory is copied on the submit thread, in every build (`chunks.rs:109-120`
 - The coordinator (`:294-439`), per flush:
   1. waits for its slot;
   2. reads write-watch with reset;
-  3. hash-diffs on the pool;
-  4. gathers with window-relative chunk indices;
-  5. records **one scatter dispatch per window** (each binds the window's VA as a root UAV);
-  6. signals.
+  3. hash-diffs on the pool, leaving the sent hashes alone (the new ones are pending);
+  4. keeps a slot's worth of runs in console order and carries the pages holding the rest to the next flush;
+  5. gathers with window-relative chunk indices;
+  6. records **one scatter dispatch per window** (each binds the window's VA as a root UAV);
+  7. signals, then commits the pending hashes of what it sent (the scatter is queued ahead of the Signal
+     every user waits for). A failed flush commits nothing and carries every page it read.
 
 Measured (Build 2, `runs/build2-ring.md`): `flush()` plus queuing the GPU wait takes 32.5 µs median and
 72.5 µs at worst. 34.2 MB in 341,775 runs lands in 19.4 ms on 4 workers, byte-exact after 60 frames.

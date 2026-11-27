@@ -3,14 +3,23 @@
 //! While the in-game menu is open the title sees every connected pad neutral (connected, nothing
 //! pressed) and no keys; the menu reads the real input. On close the title stays neutral until every key
 //! and button is up, so the key that closed the menu never reaches the title. Rumble is stopped on open,
-//! and the title's rumble requests are dropped until the title sees input again. The menu key (F10) is
-//! outside every title mapping and is never delivered to the title.
+//! and the title's rumble requests are dropped until the title sees input again. The menu key (`menu.key`
+//! in `rebuild.toml`: F10 by default, or F11, F12, Insert, Home) is outside every title mapping and is never
+//! delivered to the title.
 
 use crate::keyboard::vk;
 use crate::source::{Frame, Source, PADS};
 
-/// Opens and closes the menu. Not in the stand-in pad's table (a test checks).
+/// Opens and closes the menu unless another is chosen. Not in the stand-in pad's table (a test checks).
 pub const MENU_KEY: u8 = vk::F10;
+
+/// The keys `menu.key` may name, by the setting's spelling. None is in the stand-in pad's table (a test checks).
+pub const MENU_KEYS: [(&str, u8); 5] = [("F10", vk::F10), ("F11", vk::F11), ("F12", vk::F12), ("Insert", vk::INSERT), ("Home", vk::HOME)];
+
+/// The virtual key a `menu.key` choice names (`F10`, `F11`, `F12`, `Insert`, `Home`; letter case ignored).
+pub fn menu_key_named(name: &str) -> Option<u8> {
+    MENU_KEYS.iter().find(|(n, _)| n.eq_ignore_ascii_case(name.trim())).map(|&(_, k)| k)
+}
 
 /// Where the gate is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,12 +56,23 @@ pub struct Polled {
 pub struct Input<S: Source> {
     source: S,
     phase: Phase,
+    menu_key: u8,
     menu_key_was_down: bool,
 }
 
 impl<S: Source> Input<S> {
+    /// With the default menu key, [`MENU_KEY`].
     pub fn new(source: S) -> Self {
-        Input { source, phase: Phase::Closed, menu_key_was_down: false }
+        Self::with_menu_key(source, MENU_KEY)
+    }
+
+    /// With the menu key `menu.key` chose ([`menu_key_named`]).
+    pub fn with_menu_key(source: S, menu_key: u8) -> Self {
+        Input { source, phase: Phase::Closed, menu_key, menu_key_was_down: false }
+    }
+
+    pub fn menu_key(&self) -> u8 {
+        self.menu_key
     }
 
     pub fn phase(&self) -> Phase {
@@ -92,7 +112,7 @@ impl<S: Source> Input<S> {
     /// Poll every device once and split the result.
     pub fn poll(&mut self) -> Polled {
         let raw = Frame::read(&mut self.source);
-        let down = raw.key(MENU_KEY);
+        let down = raw.key(self.menu_key);
         let pressed = down && !self.menu_key_was_down;
         self.menu_key_was_down = down;
 
@@ -114,7 +134,7 @@ impl<S: Source> Input<S> {
         match self.phase {
             Phase::Closed => {
                 let mut title = raw;
-                title.keys.retain(|k| k.virtual_key != MENU_KEY);
+                title.keys.retain(|k| k.virtual_key != self.menu_key);
                 Polled { title, menu: None, change }
             }
             Phase::Open => Polled { title: raw.neutral(), menu: Some(raw), change },
@@ -256,6 +276,35 @@ mod tests {
             assert_eq!(i.poll().change, Change::None);
             assert_eq!(i.phase(), Phase::Open);
         }
+    }
+
+    #[test]
+    fn the_chosen_menu_key_toggles_and_f10_is_the_titles() {
+        assert_eq!(menu_key_named("F10"), Some(MENU_KEY));
+        assert_eq!(menu_key_named("insert"), Some(vk::INSERT));
+        assert_eq!(menu_key_named("F9"), None);
+        let mut i = Input::with_menu_key(Fake::default(), menu_key_named("Home").unwrap());
+        assert_eq!(i.menu_key(), vk::HOME);
+        // F10 is an ordinary key now: it reaches the title and opens nothing.
+        i.source_mut().press(vk::F10);
+        let p = i.poll();
+        assert_eq!(p.change, Change::None);
+        assert!(p.title.key(vk::F10));
+        i.source_mut().release(vk::F10);
+        i.poll();
+        // Home opens and closes the menu and never reaches the title.
+        i.source_mut().press(vk::HOME);
+        let p = i.poll();
+        assert_eq!(p.change, Change::Opened);
+        assert!(!p.title.key(vk::HOME));
+        i.source_mut().release(vk::HOME);
+        i.poll();
+        i.source_mut().press(vk::HOME);
+        assert_eq!(i.poll().change, Change::Closed);
+        i.source_mut().release(vk::HOME);
+        let p = i.poll();
+        assert_eq!(p.change, Change::Released);
+        assert!(p.title.keys.is_empty());
     }
 
     #[test]
