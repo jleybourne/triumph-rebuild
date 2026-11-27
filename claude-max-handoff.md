@@ -215,3 +215,5 @@ ebuild-oracle (backup in oracle-swapped-backup); `apps/rebuild/src/bin/oracle.rs
 
 - Round 5 helpers launched: lane `ondemand` (on-demand translation of programs missing from the library; status agents/ondemand.md) and lane `streampso` (0x2b0/0x50 graphics pipelines; agents/streampso.md). Lead: the null lookup at exe+0xb5a5f8, then Execute/PresentX.
 - Round 5 adds lanes `present` (queue Execute 0x050/0x118, PresentX 0x100, PNG capture, frame line + summary.toml; agents/present.md) and `shaderexec` (execution check vs the oracle; agents/shaderexec.md).
+
+- PR #30 (streampso) merged: 0x50/0x2b0 served, 14 graphics pipelines, 0 refused. clzero: 5 sites detoured (relocation path), 0 emulated. The title calls ExecuteCommandListsX x2 + PresentX x1 at ~1.44 s (both trap: lane `present`), then the null program binding at exe+0xb5a5f8 (engine set-program 0x140122BD6 stores [ctx+0x12328]=null). Intermittent hang inside D3D12XboxCreateDevice seen twice (maybe helper GPU load): runtitle now dumps all threads at TIMEOUT. Tests 460. Progress 58 %.

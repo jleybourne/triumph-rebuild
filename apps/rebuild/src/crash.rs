@@ -372,7 +372,7 @@ pub fn install(images: Vec<(String, u64, u64)>) {
 /// REBUILD_THREADS: at the first fatal exception, where every other thread of the process stands (suspended,
 /// unwound to 12 frames; threads with no title frame are counted, not printed). Diagnostic only: a thread
 /// suspended inside the unwinder's lock could stall this, which the run's watchdog ends.
-fn other_threads() {
+pub fn other_threads() {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::Debug::{
         GetThreadContext, RtlLookupFunctionEntry, RtlVirtualUnwind, CONTEXT, CONTEXT_FLAGS, UNW_FLAG_NHANDLER,
