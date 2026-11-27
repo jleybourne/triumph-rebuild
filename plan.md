@@ -116,8 +116,10 @@ translated, validated, built as a pipeline, wave32, and matches the oracle.
 
 ### 5. One upscaler interface, two backends (corrected: the title's FSR is found, not called)
 
-The previous premise was wrong. Console method 0x218 creates pipelines; it is not an upscale call. Run as
-a Series X, the title never loads the FidelityFX loader. Its FSR is ordinary compute dispatches (fork
+The previous premise was wrong. Console method 0x218 creates pipelines; it is not an upscale call. The title's exe
+imports `amd_fidelityfx_loader_xbox.dll` statically (4 functions; lane `loader`'s census), so it is mapped at
+start. But run as a Series X, the title never calls into it to upscale, and nothing imports the upscaler DLL.
+Its FSR is ordinary compute dispatches (fork
 commit `ee0b94a3`, local branch `dlss-hook`, not pushed). So the layer **recognises the title's temporal upscale pass by its bindings**: the
 dispatch that writes a colour target at an upscale ratio of the render-size textures it reads. Its inputs
 are what the passes before it read: colour, depth (2560x1440), motion vectors (2560x1440

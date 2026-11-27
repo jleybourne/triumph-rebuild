@@ -557,7 +557,6 @@ impl Gpu {
 
 struct Region {
     base: *mut u8,
-    len: usize,
 }
 
 impl Region {
@@ -566,7 +565,7 @@ impl Region {
         if base.is_null() {
             return Err(format!("VirtualAlloc with write-watch ({} MiB) failed", len >> 20));
         }
-        Ok(Region { base: base as *mut u8, len })
+        Ok(Region { base: base as *mut u8 })
     }
 }
 

@@ -66,7 +66,7 @@ pub fn program_with(rng: &mut Rng, len: usize, wave_ops: bool, branches: bool) -
                 p.push(Op::EndIf);
                 let f = frames.pop().unwrap();
                 let parent = visible(&outer, &frames);
-                let mut from = |vals: &Vec<V>, rng: &mut Rng| {
+                let from = |vals: &Vec<V>, rng: &mut Rng| {
                     if vals.is_empty() { parent[rng.below(parent.len() as u64) as usize] } else { vals[rng.below(vals.len() as u64) as usize] }
                 };
                 let a = from(&f.then_vals, rng);

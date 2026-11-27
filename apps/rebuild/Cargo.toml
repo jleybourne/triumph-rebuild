@@ -7,6 +7,7 @@ version.workspace = true
 [dependencies]
 rebuild-uma = { path = "../../crates/uma" }
 rebuild-xlist = { path = "../../crates/xlist" }
+rebuild-loader = { path = "../../crates/loader" }
 rebuild-sir = { path = "../../crates/sir" }
 
 [target.'cfg(windows)'.dependencies]

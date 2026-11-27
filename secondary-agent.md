@@ -115,7 +115,7 @@ telemetry, no browser engine.
 | U2 | first-run setup and system check: game folder, GPU and driver, tiled resources tier ≥ 2, shader model 6.6, DXC present, VRAM, ReBAR, each with a one-line fix. Querying the adapter through DXGI is fine; **creating a D3D12 device needs the measurement lock to be absent** | each check reports pass/fail; checks are unit-tested with fakes |
 | U3 | title settings: show `title.*` registry entries; on launch, write them into a **copy** of the title's `settings.xml` under the launcher's own overlay folder (never the game folder or the title's storage) | the original file's hash is unchanged (test) |
 | U4 | mods tab: list `mods/<name>/` folders, enable/disable, reorder, and show conflicts (two enabled mods with the same relative path: the later wins) | conflict detection unit-tested |
-| U5 | Play: [Launch] starts `rebuild.exe` with `--config <path>`; shows the frame-line log file (`diagnostics.frame_log`) as it grows. Until the layer runs the title, launch the proofs (`gputest --bare`) to show the path works | launch and log tail work with the proof binaries |
+| U5 | Play: [Launch] starts `rebuild.exe` with `--config <path>`; shows the frame-line log file (`diagnostics.frame_log`) as it grows. Test the launch path against a **fake child process**; helpers never run `gputest` (the lead checks the real launch) | launch and log tail work against the fake child, in tests |
 
 Launch-time integration with the real layer (C2) and the in-game menu (L5) are the lead's. The mods tab
 uses lane `vfs`'s crate once it merges; until then, detect conflicts by walking the folders itself.
@@ -175,9 +175,9 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, after live masks in the shader core (section 9 step 1 done)
-progress  29 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
-tests     46 green: cargo test --release  (uma 24, xlist 5, sir 11, config 6)
+updated   2026-11-27, after merging lane loader (PR #1) and answering the coordinator's items
+progress  33 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
+tests     59 green, 0 warnings: cargo test --release  (uma 24, xlist 5, sir 11, config 6, loader 13)
 ```
 
 | build | state | where | proof |
@@ -187,7 +187,7 @@ tests     46 green: cargo test --release  (uma 24, xlist 5, sir 11, config 6)
 | 0 (c) title GPU time | ⏸️ needs a frame (Build 5) | — | — |
 | 1 tiles at console addresses | ✅ | `crates/uma/src/{lib,tiles,arena}.rs`, `gputest --tiled/--arena/--scale` | [runs/build1-tiles.md](runs/build1-tiles.md) |
 | 2 upload ring + labels | ✅ | `crates/uma/src/{ring,labels}.rs`, `gputest --ring/--labels` | [ring](runs/build2-ring.md) · [labels](runs/build2-labels.md) |
-| 3 loader + runtime | ⏳ first half in lane `loader` | — | — |
+| 3 loader + runtime | 🔄 loader ✅ (lane `loader`, PR #1 merged); runtime ⏳ | `crates/loader`, `imports` | `agents/loader.md`, `agents/loader-imports.csv` |
 | 4 shaders | 🔄 core: design, lane model, HLSL emission proven on the card; front end in lane `shader` | `crates/sir`, `sirtest`, [design](docs/design/shader-ir.md) | [runs/build4-sirtest.md](runs/build4-sirtest.md) |
 | 5 device, lists, present | ⏳ (translator core done in `crates/xlist`) | — | — |
 | 6 list translation | 🔄 core built | `crates/xlist` | Build 0 (b) |
@@ -234,7 +234,7 @@ If the owner hands you the whole job, you are the lead. Read `README.md`, `plan.
 | 2 | `sir`: memory lowering to window descriptors (`ResourceDescriptorHeap[windows + (addr >> 32)]`, 32-bit offset, uniform window via `WaveReadLaneFirst`), native 16-bit, quad ops | `sirtest` extended with loads/stores into a tiled window |
 | 3 | merge lane `shader` (S1-S4), then GFX10 → `sir`: CFG, SSA, structurize; agnostic programs first | census column "emitted"; the shader bar in `progress.md` starts moving |
 | 4 | oracle diff harness against the fork's translations, per hash | programs count toward 25,694 only when they match |
-| 5 | merge lane `loader` (L1-L4), then Build 3's second half: kernel (threads, events, waits, timers, TLS), files with a write overlay, the GDK discovery loop from `agents/loader-imports.csv` | the title's startup path runs to its first render call |
+| 5 | ✅ lane `loader` merged. Build 3's second half: kernel (threads, events, waits, timers, TLS), files with a write overlay, the GDK discovery loop from `agents/loader-imports.csv` **plus every `GetProcAddress` miss** | the title's startup path runs to its first render call |
 | 6 | Build 5: D3D12.X device, lists via `crates/xlist`, descriptor heaps with a dirty list, present, **the frame line**; then Build 0 (c) (per-list timestamps, RT on and off) and direct read vs ring per resource | a non-black frame; the first measured fps |
 | 7 | Build 7: find the title's upscale pass by bindings; lower the internal resolution through tiles; DLSS (Streamline) and FSR (FidelityFX SDK) | correct picture at a lower internal resolution |
 | 8 | Build 8 pacing → **30 fps on NVIDIA**; Build 9 AMD testers | the frame line |
@@ -245,3 +245,22 @@ If the owner hands you the whole job, you are the lead. Read `README.md`, `plan.
 - AMD testers for Build 9.
 - Anything published outside this repository and the owner's own GitHub.
 - Whether to push the fork's local `dlss-hook` branch (commit `ee0b94a3`) so the docs can link to it.
+
+## 10. The lead's answers to "For the lead" (newest first)
+
+**2026-11-27, to the coordinator's items 1-8** (`agents/secondary-agents-updates.md`, 13:05):
+
+1. **FidelityFX loader:** right. `plan.md` decision 5 now says the exe imports the loader statically (mapped at
+   start), but as a Series X the title never calls into it to upscale, and nothing imports the upscaler DLL.
+2. **`GetProcAddress`:** right. Build 3's discovery loop logs every `GetProcAddress` miss as well as import
+   misses (`tasks.md`, section 9 step 5).
+3. **Test count:** README updated: 59 with `loader` merged.
+4. **Build warnings:** fixed (`tileproof.rs`, `upload.rs`, and one in `sir/gen.rs`). 0 warnings.
+5. **Shared-file edits:** merged; both `Cargo.toml` conflicts resolved.
+6. **Lane `launcher` U5:** the coordinator's reading is right. Helpers never run `gputest`; test the launch path
+   against a fake child process. U5's text is corrected.
+7. **Lane `upscale`, FidelityFX SDK:** download approved. Use AMD's official FidelityFX SDK release from GPUOpen's
+   GitHub (MIT), pin the exact version in `agents/upscale.md`, extract to `D:\tools\fidelityfx\<version>`
+   (outside git), and record its SHA-256. The DLSS setup as pointed out (Streamline from
+   `D:\tools\dlss\download`, the user-supplied `nvngx_dlss.dll`) is right; neither is ever committed.
+8. **Lane `input` I3:** PR #1 is merged, so `agents/loader-imports.csv` is on `master`; rebase onto it.

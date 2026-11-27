@@ -569,7 +569,7 @@ pub fn prove_labels(iterations: usize) -> Result<Vec<String>, String> {
     use windows::Win32::System::Memory::*;
 
     let mut lines = Vec::new();
-    let mut gpu = Gpu::new()?;
+    let gpu = Gpu::new()?;
 
     // 1. which title memory can be opened for the GPU to write
     let kinds: [(&str, VIRTUAL_ALLOCATION_TYPE, usize); 3] = [

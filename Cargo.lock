@@ -52,6 +52,7 @@ dependencies = [
 name = "rebuild"
 version = "0.1.0"
 dependencies = [
+ "rebuild-loader",
  "rebuild-sir",
  "rebuild-uma",
  "rebuild-xlist",
@@ -64,6 +65,10 @@ version = "0.1.0"
 dependencies = [
  "toml",
 ]
+
+[[package]]
+name = "rebuild-loader"
+version = "0.1.0"
 
 [[package]]
 name = "rebuild-sir"
