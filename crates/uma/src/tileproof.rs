@@ -595,6 +595,30 @@ pub fn prove_labels(iterations: usize) -> Result<Vec<String>, String> {
             }
         }
     }
+    // the console's physical pages are frames mapped (and re-mapped, even twice) into the title's
+    // addresses: on the host that is a pagefile section and views of it. Can the GPU open a view?
+    {
+        use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
+        let len = 4usize << 20;
+        let section = unsafe { CreateFileMappingW(INVALID_HANDLE_VALUE, None, PAGE_READWRITE, 0, len as u32, None) };
+        match section {
+            Ok(h) => {
+                let v1 = unsafe { MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, len) };
+                let v2 = unsafe { MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, len) };
+                for (name, v) in [("a view of a pagefile section (physical pages)", v1), ("a second view of the same section (an alias)", v2)] {
+                    match LabelMemory::open(&gpu.device, v.Value as *mut u8, len) {
+                        Ok(m) => {
+                            // the GPU writes through this view; the CPU reads it through the other view
+                            lines.push(format!("opens     {name}"));
+                            let _ = m;
+                        }
+                        Err(e) => lines.push(format!("REFUSED   {name}: {e}")),
+                    }
+                }
+            }
+            Err(e) => lines.push(format!("REFUSED   pagefile section: {e}")),
+        }
+    }
     let _ = Watched::alloc; // the ring's regions are write-watched; see the third line above
     let (label_base, label) = opened.ok_or("no title memory could be opened for GPU writes")?;
 

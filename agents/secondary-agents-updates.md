@@ -13,9 +13,9 @@ Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives w
 | **loader** | Build 3, first half (L1–L4) | `agent/loader` | `D:\Developer\triumph-rebuild-loader` | ✅ **merged** by the lead ([#1](https://github.com/jleybourne/triumph-rebuild/pull/1), master 7cc1230) | lane finished |
 | **shader** | Build 4 front end (S1–S5) | `agent/shader` | `D:\Developer\triumph-rebuild-shader` | 🔄 S1–S4 committed on its branch (1 commit, "25,694 programs"), working on S5; no PR yet | 13:02 (S1–S4 commit: 25,694 programs, 43.95M instructions) |
 | **launcher** | the desktop launcher (U1–U5) | `agent/launcher` | `D:\Developer\triumph-rebuild-launcher` | 🔄 U1–U5 logic and a first shell committed (22 tests); premium design passes in progress | 13:02 |
-| **vfs** | overlay file system (V1–V4) | `agent/vfs` | `D:\Developer\triumph-rebuild-vfs` | ✅ **V1–V4 closed, PR open** | [#3](https://github.com/jleybourne/triumph-rebuild/pull/3) (2 commits) |
+| **vfs** | overlay file system (V1–V4) | `agent/vfs` | `D:\Developer\triumph-rebuild-vfs` | ✅ **merged** by the lead | [#3](https://github.com/jleybourne/triumph-rebuild/pull/3) (2 commits) |
 | **upscale** | DLSS and FSR backends, standalone (P1–P5) | `agent/upscale` | `D:\Developer\triumph-rebuild-upscale` | ⚠️ **P1, P2, P4, P5 closed; P3 (FSR) blocked on the FidelityFX SDK download.** PR open | [#4](https://github.com/jleybourne/triumph-rebuild/pull/4) (3 commits) |
-| **input** | controller and keyboard (I1–I3) | `agent/input` | `D:\Developer\triumph-rebuild-input` | ✅ **I1–I3 closed, PR open** | [#2](https://github.com/jleybourne/triumph-rebuild/pull/2) (2 commits) |
+| **input** | controller and keyboard (I1–I3) | `agent/input` | `D:\Developer\triumph-rebuild-input` | ✅ **merged** by the lead | [#2](https://github.com/jleybourne/triumph-rebuild/pull/2) (2 commits) |
 
 No lane merges; each opens a PR to `master` titled `agent/<lane>: <what closed>`.
 
@@ -70,6 +70,10 @@ From **upscale** (details in `agents/upscale.md` on `agent/upscale`, PR #4):
 21. **The NVIDIA driver starts its own `nvngx_update.exe` during NGX init, even with over-the-air updates off** (downloaded plugins are not loaded). This touches the launcher's no-telemetry line.
 22. NGX reports DLSS version 0.0.0; read the DLL's file version for the frame line.
 
+23. **Owner: the launcher's user-facing name is "Triumph Launcher"** (brand, window title, About, exe display name). The lane keeps the package name `rebuild-launcher` unless the lead says otherwise.
+
+24. **Owner: Triumph Launcher must support several games** (add and remove, one day other titles). The lane is building a library with per-game folder, config, settings copy, mods, logs and profile, and title detection from the game's own files through a detector trait. Remove never touches the game folder. **The lead may need a per-game config layout in `crates/config`;** the lane will propose it in `agents/launcher.md`.
+
 From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f):
 6. Lane `launcher` U5 says "launch the proofs (`gputest --bare`)", but section 2 says helpers never run `gputest`. The launcher lane was told to build U5's launch path against a fake child process in tests, and to run no `gputest` itself. Please say which you meant.
 7. Lane `upscale` P3 needs AMD's FidelityFX SDK. If it isn't already on disk, getting it is a download. The lane was told not to download without your say, and to do P1, P2, P4 and P5 first. For DLSS it was pointed at the Streamline SDK zip already in `D:\tools\dlss\download` (production `bin/x64`, extracted outside git) and the user-supplied `nvngx_dlss.dll` in `D:\tools\dlss`.
@@ -88,6 +92,9 @@ From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f)
 
 | time | event |
 |:--|:--|
+| 13:20 | Owner asked for multi-game support in the launcher (add/remove games); sent to the lane. |
+| 13:18 | Launcher pass 1 reviewed (grain far too strong, right-edge overflow, hero text over the key art, low contrast, demo data, name hygiene); renamed "Triumph Launcher" at the owner's request. |
+| 13:12 | Lead merged PR #2 (input) and PR #3 (vfs). Open: #4 (upscale). Running: shader (S5), launcher (design pass 1). |
 | 13:10 | **upscale**: P1, P2, P4, P5 closed; P3 blocked on the FidelityFX SDK download; PR #4 open (not merged). |
 | 13:05 | **vfs done**: V1–V4 closed, PR #3 open (not merged). |
 | 13:00 | Launcher lane given the owner's premium-design brief. |

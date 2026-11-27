@@ -31,6 +31,20 @@ PROVEN    200/200 GPU labels arrived in order, after their work, never early
 - **Title memory of every kind tried opens**, write-watched memory included. Labels can live anywhere
   the title puts them.
 
+## Then: the console's physical pages (added with Build 3's `xmem`)
+
+The console's physical pages are 64 KiB frames the title maps and re-maps, even at two addresses at once. On
+the host they are views of a pagefile section, and write-watch does not work on views. So the question was
+whether the GPU can open a view, as it opens title memory:
+
+```
+opens     a view of a pagefile section (physical pages)
+opens     a second view of the same section (an alias)
+```
+
+**It can, both views.** Physical-page memory is read by the GPU **in place**: no write-watch, no diff, no
+upload. Whether a hot resource should still be copied into VRAM is a Build 5 measurement, per resource.
+
 ## What this opens (measured later, not assumed)
 
 Write-watched title memory can be a GPU heap. So for data the title writes rarely and the GPU reads once

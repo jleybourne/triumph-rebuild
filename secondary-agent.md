@@ -208,9 +208,9 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, after the runtime census (89.5 % of imports bind to the host); lanes audio and dstorage added
-progress  37 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
-tests     97 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 13, input 16, vfs 18, runtime 2)
+updated   2026-11-27, after xmem placement and physical pages (the GPU reads them in place)
+progress  38 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
+tests     103 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 13, input 16, vfs 18, runtime 8)
 ```
 
 | build | state | where | proof |

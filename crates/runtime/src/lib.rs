@@ -13,6 +13,9 @@
 //! host        everything else, bound to the host directly
 //! ```
 
+pub mod physical;
+pub mod xmem;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tier {
     /// we implement it, although the host has it
