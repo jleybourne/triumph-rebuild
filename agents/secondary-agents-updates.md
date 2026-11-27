@@ -14,8 +14,10 @@ Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives w
 | **shader** | Build 4 front end (S1–S5) | `agent/shader` | `D:\Developer\triumph-rebuild-shader` | 🔄 S1–S4 committed on its branch (1 commit, "25,694 programs"), working on S5; no PR yet | 13:02 (S1–S4 commit: 25,694 programs, 43.95M instructions) |
 | **launcher** | the desktop launcher (U1–U5) | `agent/launcher` | `D:\Developer\triumph-rebuild-launcher` | 🔄 U1–U5 logic and a first shell committed (22 tests); premium design passes in progress | 13:02 |
 | **vfs** | overlay file system (V1–V4) | `agent/vfs` | `D:\Developer\triumph-rebuild-vfs` | ✅ **merged** by the lead | [#3](https://github.com/jleybourne/triumph-rebuild/pull/3) (2 commits) |
-| **upscale** | DLSS and FSR backends, standalone (P1–P5) | `agent/upscale` | `D:\Developer\triumph-rebuild-upscale` | ⚠️ **P1, P2, P4, P5 closed; P3 (FSR) blocked on the FidelityFX SDK download.** PR open | [#4](https://github.com/jleybourne/triumph-rebuild/pull/4) (3 commits) |
+| **upscale** | DLSS and FSR backends, standalone (P1–P5) | `agent/upscale` | `D:\Developer\triumph-rebuild-upscale` | ⚠️ **P1, P2, P4, P5 closed; P3 (FSR) unblocked: the lead approved the download.** PR #4 being merged by the lead; FSR goes on a new branch `agent/upscale-fsr` | [#4](https://github.com/jleybourne/triumph-rebuild/pull/4) (3 commits) |
 | **input** | controller and keyboard (I1–I3) | `agent/input` | `D:\Developer\triumph-rebuild-input` | ✅ **merged** by the lead | [#2](https://github.com/jleybourne/triumph-rebuild/pull/2) (2 commits) |
+| **audio** | console audio hardware (A1–A4) | `agent/audio` | `D:\Developer\triumph-rebuild-audio` | 🔄 started 13:25 | — |
+| **dstorage** | DirectStorage (D1–D4) | `agent/dstorage` | `D:\Developer\triumph-rebuild-dstorage` | 🔄 started 13:25 | — |
 
 No lane merges; each opens a PR to `master` titled `agent/<lane>: <what closed>`.
 
@@ -94,6 +96,8 @@ From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f)
 
 | time | event |
 |:--|:--|
+| 13:30 | Owner approved the FidelityFX download in chat: **only the needed files** (~58 MB at tag v2.4.0: loader and upscaler DLLs, FSR 3.1 and API headers, licence) to `D:/tools/fidelityfx/v2.4.0`, outside git. The upscale lane fetches them, records SHA-256s, and reads the licence before any code (it stops if the licence is not GPL-3.0-compatible). |
+| 13:25 | Read the lead's answers (section 10). Upscale told the FidelityFX download is approved (pinned version, `D:\tools\fidelityfx\<version>`, SHA-256). Launcher told U5 uses a fake child, `fs::metadata` for hash checks, rebase, and use `rebuild_vfs::ModSet`. New lanes **audio** and **dstorage** started. The lead is mid-merge of PR #4 in its tree; the coordinator touched nothing there but this file. |
 | 13:22 | Owner: per-game settings must persist and never be replaced; sent to the launcher lane. |
 | 13:20 | Owner asked for multi-game support in the launcher (add/remove games); sent to the lane. |
 | 13:18 | Launcher pass 1 reviewed (grain far too strong, right-edge overflow, hero text over the key art, low contrast, demo data, name hygiene); renamed "Triumph Launcher" at the owner's request. |

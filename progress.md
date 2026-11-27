@@ -1,8 +1,9 @@
 # Progress
 
 ```
-work toward 30 fps   [████████░░░░░░░░░░░░]  40 %
+work toward 30 fps   [████████░░░░░░░░░░░░]  41 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (fork reference: 25,694 translated, 7 pipelines refused)
+runtime functions    [████░░░░░░░░░░░░░░░░]  13 / 73 ours built (xmem); 624 more bind to the host directly
 launcher track       [███░░░░░░░░░░░░░░░░░]  1 / 7 steps (C1 settings registry; the mods tab's file system is merged); does not count toward the fps %
 measured fps         none yet — the title has not rendered a frame on this code
 baseline to beat     7.6 fps · 131.3 ms · ~4,500 draws · 356 dropped   (the layer being replaced)
@@ -21,14 +22,14 @@ second row and is the number that counts.
 | 0 | three answers before more code | 10 | 70 % | 7.0 | (a) upload **done**; (b) translation **done**: 0.43 µs a draw; (c) blocked until the title renders (moved to Build 5) |
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
-| 3 | PE loader + console runtime | 15 | 55 % | 8.25 | loader (PR #1), files (PR #3), input (PR #2) merged; runtime census (89.5 % host); `xmem` placement and physical pages built |
+| 3 | PE loader + console runtime | 15 | 60 % | 9.0 | loader (PR #1), files (PR #3), input (PR #2) merged; runtime census (89.5 % host); `xmem` complete: placement, physical pages, the 13 exports bound |
 | 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 25 % | 3.75 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; decoder in lane `shader` |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 20 % | 2.0 | DLSS standalone through Streamline on a synthetic scene (PR #4); FSR waits for the SDK; wiring to the title's pass todo |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **39.8 ≈ 40 %** | |
+| | **total** | **100** | | **40.55 ≈ 41 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -81,6 +82,27 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Build 3: all 13 `xmem` functions built and bound
+
+```
+[████████░░░░░░░░░░░░]  41 %   (was 40 %: +0.75 Build 3 xmem exports)
+runtime     13 / 73 of our functions built (new bar)
+shaders     0 / 25,694
+measured fps   none yet
+```
+
+- **Built** `crates/runtime/src/exports.rs`: the 13 `xmem.dll` functions with the console's exact signatures,
+  bound by the resolver.
+  - `XMemAlloc` does first-fit over write-watched graphics chunks, each inside one window; the title's own
+    allocation hooks take over once installed.
+  - `XMemVirtualAlloc` makes placeholders for physical pages.
+  - `XMemVirtualQuery` reports the real flags.
+  - The physical-page exports map, alias and unmap.
+  - `XMemGetWorkingSetStatistics` is refused until its layout is known, never guessed.
+- **Measured:** 11 runtime tests. `runtimecensus` now counts what is built: **13 of our 73**. A new bar on
+  this page tracks it.
+- **Next:** the 16 module overrides (`GetProcAddress` and friends, with discovery logging). Files are lane `files`.
 
 ### 2026-11-27 — Lane `upscale` merged: DLSS runs standalone; three more helper lanes
 

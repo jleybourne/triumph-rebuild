@@ -4,6 +4,8 @@ runtimecensus — Build 3: what the title's 697 missing imports bind to (265 mor
   624   89.5 %  host: bound straight to the host's own function, no wrapper
    39    5.6 %  console DLL: the whole DLL is console-only (ours)
 
+ours, built: 13 of 73 (13 console-only functions bound to our implementations)
+
 overrides by reason: files 15 · memory 2 · modules 16 · process 1
 
 console-only DLLs (functions):

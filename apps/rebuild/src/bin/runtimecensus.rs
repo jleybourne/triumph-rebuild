@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use rebuild_runtime::host::Host;
+use rebuild_runtime::exports::console_export;
 use rebuild_runtime::{classify, override_reason, Tier};
 
 fn main() {
@@ -28,6 +29,7 @@ fn main() {
     let mut overrides: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut console_functions = Vec::new();
     let mut title_supplied = 0usize;
+    let mut built = 0usize;
     for line in lines {
         let f: Vec<&str> = line.split(',').collect();
         if f.len() <= cr {
@@ -47,6 +49,9 @@ fn main() {
         let tier = classify(func, has_dll, has_fn);
         *tiers.entry(tier).or_default() += 1;
         *by_dll.entry(dll.to_ascii_lowercase()).or_default().entry(tier).or_default() += 1;
+        if matches!(tier, Tier::ConsoleDll | Tier::ConsoleFunction) && name.and_then(|n| console_export(dll, n)).is_some() {
+            built += 1;
+        }
         if tier == Tier::Override {
             *overrides.entry(override_reason(func).unwrap()).or_default() += 1;
         }
@@ -67,6 +72,9 @@ fn main() {
         };
         println!("{n:>5}  {:>5.1} %  {what}", pct(*n));
     }
+    let ours = total - tiers.get(&Tier::Host).copied().unwrap_or(0);
+    println!();
+    println!("ours, built: {built} of {ours} ({} console-only functions bound to our implementations)", built);
     println!();
     println!("overrides by reason: {}", overrides.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(" · "));
     println!();

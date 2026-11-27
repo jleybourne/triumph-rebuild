@@ -246,9 +246,9 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, after merging lane upscale (PR #4); lanes files, xg and loader L5 added
-progress  40 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
-tests     114 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 13, input 16, vfs 18, runtime 8, upscale 11)
+updated   2026-11-27, after the 13 xmem exports were built and bound (runtime 13 / 73)
+progress  41 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
+tests     117 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 13, input 16, vfs 18, runtime 11, upscale 11)
 ```
 
 | build | state | where | proof |

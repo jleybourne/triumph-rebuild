@@ -13,6 +13,8 @@
 //! host        everything else, bound to the host directly
 //! ```
 
+#[cfg(windows)]
+pub mod exports;
 pub mod physical;
 pub mod xmem;
 
@@ -157,6 +159,11 @@ pub mod host {
             let has_dll = self.host.dll(dll).is_some();
             let f = self.host.function(dll, name, ordinal);
             let tier = super::classify(name.unwrap_or(""), has_dll, f.is_some());
+            if let (super::Tier::ConsoleDll | super::Tier::ConsoleFunction, Some(n)) = (tier, name) {
+                if let Some(ours) = crate::exports::console_export(dll, n) {
+                    return Some(ours);
+                }
+            }
             match tier {
                 super::Tier::Host => f,
                 t => {
