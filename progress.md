@@ -1,7 +1,7 @@
 # Progress
 
 ```
-work toward 30 fps   [██████████░░░░░░░░░░]  51 %
+work toward 30 fps   [███████████░░░░░░░░░]  53 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694 counted (oracle match needed) · v0 set 2,834 / 2,881 translate and compile (pixel 1,791 / 1,798, vertex 926 / 951, compute 117 / 132) · all decode byte-exact
 runtime functions    [███████████████████░]  69 / 73 ours bound (xmem, modules, memory, process, files, audio, DirectStorage, xg); 624 more bind to the host directly
 launcher track       [██████████████░░░░░░]  5 / 7 steps (C1 registry, L1-L4 launcher merged; C2 and L5 left); does not count toward the fps %
@@ -23,13 +23,13 @@ second row and is the number that counts.
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
 | 3 | PE loader + console runtime | 15 | 100 % | 15.0 | loader, vfs, input merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides (32 / 73 ours); the title's code runs; files (22), audio, DirectStorage, xg built in lanes and merged, binding next |
-| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 52 % | 7.8 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; **front end closed**: 25,694 programs decode byte-exact, oracle set complete (PRs #5, #10) |
+| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 65 % | 9.75 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; **front end closed**: 25,694 programs decode byte-exact, oracle set complete (PRs #5, #10) |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 30 % | 3.0 | DLSS (PR #4) and FSR 3.1.6 (PR #8) standalone on a synthetic scene, one conventions table; wiring to the title's pass todo |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **51.6 ≈ 51 %** | |
+| | **total** | **100** | | **53.55 ≈ 53 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -82,6 +82,24 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Control flow: 7,402 of 9,128 agnostic programs translate and compile; round 3-4 lanes merged
+
+```
+[███████████░░░░░░░░░]  53 %   (51.6 → 53.55: Build 4 52 % → 65 %)
+shaders     agnostic set 7,402 / 9,128 compile (v0 2,837 / 2,881; interface diffs vs the oracle on v0: 0)
+measured fps   none yet (Build 5 in progress: device by the lead; list, pipelines, resources by lanes)
+```
+
+- **Built (Build 4, lane shader-cf, PR #26):** branches and loops structurized into HLSL with EXEC as data
+  ([`runs/build4-v1.md`](runs/build4-v1.md)); checked on 17,603 random graphs. Two translator bugs found by lane S7
+  fixed (fp16 components, no-output pixel shaders); v0 now matches the oracle's interfaces exactly.
+- **Merged (round 3):** device research (#19), GDK local storage and HDR (#20), oracle classification and 4 swapped
+  oracle files (#21), the pipeline library (#22: 82/82 root signatures, 1,491 PSOs, 0 refusals), built-in test
+  profiles (#23), our BCPack decoder (#24: bit-exact, 1.7-3x the fork) and the D3D12.X command list (#25: 0.47 µs a
+  draw).
+- **Built (lead):** Build 3 closed (the title reaches `D3D12XboxCreateDevice`); session folders for diagnostics;
+  `D3D12ConfigureVirtualMemoryX` fixed. Tests: 375 green.
 
 ### 2026-11-27 — Build 3 closed: the title reaches its first render call (1.4 s)
 

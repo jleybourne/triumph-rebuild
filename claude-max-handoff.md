@@ -14,7 +14,7 @@ explicit OK for that run.** Test memory patterns with `exitprobe` (no title, cap
 ## Where things stand (one screen)
 
 ```
-progress    51 % toward 30 fps (progress.md)       measured fps: none yet (no title frame)
+progress    53 % toward 30 fps (progress.md)       measured fps: none yet (no title frame)
 built       Builds 0 (a, b), 1, 2 closed; Build 3 ~88 %; Build 4 core proven; Build 7 DLSS + FSR standalone
 title       REACHES D3D12XboxCreateDevice in 1.4 s (runs/build3-reached.md): Build 3 closed. Title runs are OK
             with the owner (guarded: job, 12 GiB budget, watchdog); TLS slot 0 is the title's (runtime/src/tls.rs)
@@ -169,3 +169,6 @@ ebuild-oracle (backup in oracle-swapped-backup); `apps/rebuild/src/bin/oracle.rs
   Submit with segments(l): each segment's waits -> queue Wait on the label fence, then execute. Host resources must
   start in the state the title believes. 0x4a0 memory belongs to the allocator (freed at allocator Reset).
   Still running: shader-cf, launcher L6. Next for the lead: the device object + queue + fence + ListHost impl.
+- #26 shader-cf merged: v1 7,402 / 9,128 agnostic compile (runs/build4-v1.md); crates/sir is the lead's again.
+  Next shader items: VS s_buffer_load from code-built 64-bit descriptors (638, window addressing), then the list in
+  runs/build4-v1.md. Gather4 now guards inactive lanes (lead).

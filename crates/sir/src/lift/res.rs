@@ -520,9 +520,11 @@ impl Lifter<'_> {
                     self.out.body,
                     "    {{ {ty}<float4> t = ResourceDescriptorHeap[s{rsrc}];{decl} float4 r = t.Gather{ch}({s}, {c});"
                 );
+                // only active lanes write their result (inactive lanes keep their registers, as on the console)
+                let guard = if self.out.exec_narrowed { "if (ex) " } else { "" };
                 for k in 0..4u16 {
                     self.out.vgprs.insert(vdata + k);
-                    let _ = writeln!(self.out.body, "      v{} = asuint(r.{});", vdata + k, ["x", "y", "z", "w"][k as usize]);
+                    let _ = writeln!(self.out.body, "      {guard}v{} = asuint(r.{});", vdata + k, ["x", "y", "z", "w"][k as usize]);
                 }
                 self.out.body.push_str("    }\n");
                 return Some(());
