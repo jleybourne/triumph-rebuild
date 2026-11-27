@@ -16,7 +16,9 @@
 //! **The window and the swap chain.** On the first present: a borderless window covering the primary display (its
 //! own thread pumps its messages, so the title's threads never do), and a flip-model swap chain on the host queue
 //! that backs the presenting console queue, at the host display's mode (`dxgi::host_mode`), three buffers, the
-//! frame-latency waitable at 2. Its format follows the back buffer's family (RGBA8, BGRA8, RGB10A2, RGBA16F;
+//! frame-latency waitable at 2, and `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING` when the factory reports tearing support
+//! (`IDXGIFactory5::CheckFeatureSupport`; anything that resizes the buffers must pass the same flags,
+//! the presenter's `flags`; nothing resizes them yet). Its format follows the back buffer's family (RGBA8, BGRA8, RGB10A2, RGBA16F;
 //! anything else RGBA8).
 //!
 //! **Each present** is one small host list, recorded once per (frame slot, swap-chain buffer, source, size) and
@@ -29,8 +31,9 @@
 //!   buffer (linear) into the swap-chain buffer; the sampler converts the format.
 //!
 //! The back buffer is read in the state the title left it in for presenting (`PRESENT` = `COMMON`; the copy or the
-//! shader read promotes it implicitly and it decays back after). Then `Present(1, 0)`: vsync on, nothing else;
-//! Build 8 owns pacing. **The title's thread is never blocked for the display**: if the waitable says the display
+//! shader read promotes it implicitly and it decays back after). Then `Present`, with vsync as set now
+//! ([`crate::frame::vsync`], `REBUILD_VSYNC`): on = `Present(1, 0)`; off = `Present(0, ALLOW_TEARING)` when the
+//! swap chain allows tearing, else `Present(0, 0)`. Pacing is [`crate::frame`]'s. **The title's thread is never blocked for the display**: if the waitable says the display
 //! queue is full, or the slot's last copy has not finished, the frame is not shown and is counted `late`.
 //!
 //! **GPU time.** Each frame slot has two timestamps on the swap chain's queue: one before the first submission of
@@ -88,6 +91,56 @@ static BEGIN: [AtomicUsize; FRAMES] = [const { AtomicUsize::new(0) }; FRAMES];
 /// only go out again once that frame is done (re-executing a list still in flight is invalid; a card can hang on it).
 static FENCE: AtomicUsize = AtomicUsize::new(0);
 static DONE: [std::sync::atomic::AtomicU64; FRAMES] = [const { std::sync::atomic::AtomicU64::new(0) }; FRAMES];
+
+/// Whether the swap chain allows tearing (`None` before the first present).
+static TEARING: AtomicUsize = AtomicUsize::new(0);
+
+pub fn tearing() -> Option<bool> {
+    match TEARING.load(Ordering::Relaxed) {
+        0 => None,
+        1 => Some(false),
+        _ => Some(true),
+    }
+}
+
+/// Wait (until `deadline` at most) for the frame slot the next present uses to be off the GPU: with pacing off
+/// ([`crate::frame`]), this keeps the title's thread within the present's [`FRAMES`] slots of the GPU. `true` at
+/// once when there is no swap chain yet or the slot is free; `false` when the deadline passed first.
+pub fn wait_slot(deadline: Instant) -> bool {
+    if PRESENT_QUEUE.load(Ordering::Acquire) == 0 {
+        return true;
+    }
+    let f = FENCE.load(Ordering::Relaxed);
+    if f == 0 {
+        return true;
+    }
+    let want = DONE[SLOT.load(Ordering::Relaxed)].load(Ordering::Relaxed);
+    // SAFETY: the present's fence, alive while the swap chain is (cleared at shutdown)
+    let raw = f as *mut c_void;
+    let Some(fence) = (unsafe { ID3D12Fence::from_raw_borrowed(&raw) }) else { return true };
+    if unsafe { fence.GetCompletedValue() } >= want {
+        return true;
+    }
+    thread_local! {
+        static EVENT: HANDLE = unsafe { CreateEventW(None, false, false, None) }.unwrap_or_default();
+    }
+    let event = EVENT.with(|e| *e);
+    if event.is_invalid() || unsafe { fence.SetEventOnCompletion(want, event) }.is_err() {
+        return true;
+    }
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if unsafe { fence.GetCompletedValue() } >= want {
+            return true;
+        }
+        if left.is_zero() {
+            return false;
+        }
+        // an earlier wait's late signal may wake this one: the loop checks the fence again
+        let ms = u32::try_from(left.as_micros().div_ceil(1000)).unwrap_or(u32::MAX - 1);
+        unsafe { WaitForSingleObject(event, ms) };
+    }
+}
 
 /// The first submission of a frame on the swap chain's queue goes behind the frame's start timestamp: the list
 /// to put in front of it, if this is that submission.
@@ -232,6 +285,11 @@ struct Presenter {
     waitable: HANDLE,
     _window: HWND,
     format: DXGI_FORMAT,
+    /// the swap chain's creation flags: `ResizeBuffers` must pass the same (nothing resizes yet)
+    #[allow(dead_code)]
+    flags: u32,
+    /// `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING` is among them
+    tearing: bool,
     size: (u32, u32),
     buffers: Vec<ID3D12Resource>,
     rtv: ID3D12DescriptorHeap,
@@ -343,6 +401,11 @@ impl Presenter {
         let window = window(size, WINDOW_HIDDEN.load(Ordering::Relaxed))?;
         unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).map_err(e("DXGI factory"))?;
+            let tearing = factory.cast::<IDXGIFactory5>().is_ok_and(|f5| {
+                let mut allow = windows::Win32::Foundation::BOOL(0);
+                f5.CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &mut allow as *mut _ as *mut c_void, std::mem::size_of_val(&allow) as u32).is_ok() && allow.as_bool()
+            });
+            let flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32 | if tearing { DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 as u32 } else { 0 };
             let desc = DXGI_SWAP_CHAIN_DESC1 {
                 Width: size.0,
                 Height: size.1,
@@ -353,7 +416,7 @@ impl Presenter {
                 Scaling: DXGI_SCALING_STRETCH,
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
                 AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-                Flags: DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32,
+                Flags: flags,
                 ..Default::default()
             };
             let swap: IDXGISwapChain1 = factory.CreateSwapChainForHwnd(&q.host, window, &desc, None, None).map_err(e("swap chain"))?;
@@ -410,6 +473,7 @@ impl Presenter {
                 slots.push(Slot { cache, _begin: (ba, bl), done: 0, timed: false });
             }
             let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE).map_err(e("fence"))?;
+            TEARING.store(1 + usize::from(tearing), Ordering::Relaxed);
             PRESENT_QUEUE.store(q as *const Queue as usize, Ordering::Release);
             Ok(Presenter {
                 device,
@@ -418,6 +482,8 @@ impl Presenter {
                 waitable,
                 _window: window,
                 format,
+                flags,
+                tearing,
                 size,
                 buffers,
                 rtv,
@@ -528,7 +594,11 @@ impl Presenter {
                 }
             }
             let flip = Instant::now();
-            let _ = self.swap.Present(1, DXGI_PRESENT(0));
+            let _ = if crate::frame::vsync() {
+                self.swap.Present(1, DXGI_PRESENT(0))
+            } else {
+                self.swap.Present(0, if self.tearing { DXGI_PRESENT_ALLOW_TEARING } else { DXGI_PRESENT(0) })
+            };
             DXGI_NS.fetch_add(flip.elapsed().as_nanos() as u64, Ordering::Relaxed);
             self.value += 1;
             let _ = self.queue.host.Signal(&self.fence, self.value);
@@ -867,6 +937,7 @@ pub fn shutdown() {
     let p = PRESENTER.lock().unwrap_or_else(|e| e.into_inner()).take();
     let Some(p) = p else { return };
     PRESENT_QUEUE.store(0, Ordering::Release);
+    FENCE.store(0, Ordering::Relaxed);
     for b in &BEGIN {
         b.store(0, Ordering::Relaxed);
     }

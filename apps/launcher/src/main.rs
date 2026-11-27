@@ -799,6 +799,9 @@ impl App {
             (None, true) => "proof".into(),
             (None, false) => config.profile.clone(),
         };
+        // the layer reads its pacing from these until it reads rebuild.toml itself (C2)
+        env.push(("REBUILD_FRAME_RATE".into(), rebuild_config::frame_rate_env(&config)));
+        env.push(("REBUILD_VSYNC".into(), if config.bool("display.vsync") { "1" } else { "0" }.into()));
         let exe = if proof {
             PathBuf::from(self.proof_exe.trim())
         } else {
