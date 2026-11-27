@@ -61,13 +61,17 @@ output VGPR of every lane and every output SGPR of every wave is compared.
 
 ```text
 WARP, 40 instructions each        doubled 100 · native32 100 · partial64 100    300 / 300 exact
-group sizes                       doubled 64 and 40 (lanes past the group start with EXEC off) · native32 32 · partial64 32
+  group sizes                     doubled 64 and 40 (lanes past the group start with EXEC off) · native32 32 · partial64 32
+card (RTX 4070 Ti, real wave      doubled 50 · native32 50 · partial64 50       150 / 150 exact
+  intrinsics, [WaveSize(32)])     doubled 64, 128, 96, 40 · native32 32, 64 · partial64 32
 ```
 
 WARP's waves are 4 lanes wide, so it cannot create a `[WaveSize(32)]` pipeline. On WARP the test therefore
 runs one host wave per group and maps the wave intrinsics to a 32-lane wave in groupshared memory: this checks the
 lifter's lane logic (halves, masks, lane ids, orders). `wavetest --card` runs the same programs with the real
-intrinsics on the card (and doubled groups of 128 and 96).
+intrinsics on the card (and doubled groups of 128 and 96); its first card run read zeros everywhere because the
+test buffer had no state transitions (WARP forgives that, the card does not), now fixed. That failed run also
+left `agents\CARD` behind (`process::exit` skips the lock's destructor); both binaries now drop the lock first.
 
 Found and fixed on the way: a wave intrinsic inside a short-circuit (`a && WaveReadLaneAt(...)`) is not reached
 by every lane; a doubled `ds_bpermute` whose destination is its data must read both halves before either half
@@ -85,4 +89,24 @@ two-wave   two host waves of 32 per console wave, exchanging halves through grou
            (the previous layer's design; Wave::TwoWave, for this measurement only)
 ```
 
-Pending: the card was held by another lane when this was written (see `agents/wave64.md`).
+Every heap access is pointed at a valid resource of its type, user data is zero, and both versions touch the
+same resources: the difference is the wave mapping. The 8 with the most cross-lane work, on the card (lock
+held, 5 s fence bound, one small dispatch of each first):
+
+```text
+2048 groups of 64 console threads × 8 dispatches, median of 5, GPU µs
+program            cross   doubled   two-wave   two-wave / doubled
+f0c91b4d2578f5bf    563      16.4       20.4     1.25×
+78002af174ef11fc    266      25.6       63.5     2.48×
+b4db8c3785b6fbc5    192      44.0       43.0     0.98×
+a929109552ce1e84    113      57.3      119.8     2.09×
+3e55d5ea47dbcfb1    105      72.7       75.8     1.04×
+0f303afc7d91c03a    101     428.0      455.7     1.06×
+52a86f2c41d1882b     98     217.1      441.3     2.03×
+10efcf59eb60cca7     97    4746.2     5067.8     1.07×
+geometric mean: two-wave takes 1.41× the doubled time (+40.5 %)
+```
+
+**Doubling is the faster design**: never more than 2 % behind, and up to 2.5× ahead where the program crosses
+lanes often (each exchange through groupshared memory costs two barriers; a doubled exchange is a register
+read). The doubled program's cost is its larger register count, which these numbers already include.

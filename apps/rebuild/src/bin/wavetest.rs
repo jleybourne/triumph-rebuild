@@ -124,17 +124,27 @@ impl Dev {
             std::ptr::copy_nonoverlapping(input.as_ptr(), p as *mut u32, input.len());
             self.up.Unmap(0, None);
             let (buf, up, back, root, timer, stamps) = (self.buf.clone(), self.up.clone(), self.back.clone(), self.root.clone(), self.timer.clone(), self.stamps.clone());
-            let barrier = |l: &ID3D12GraphicsCommandList| {
+            // the buffer lives in COMMON between lists: COPY_DEST for the upload, UNORDERED_ACCESS for the dispatch,
+            // COPY_SOURCE for the read back (WARP forgives a missing transition; the card does not)
+            let barrier = |l: &ID3D12GraphicsCommandList, from: D3D12_RESOURCE_STATES, to: D3D12_RESOURCE_STATES| {
                 let b = D3D12_RESOURCE_BARRIER {
-                    Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
-                    Anonymous: D3D12_RESOURCE_BARRIER_0 { UAV: std::mem::ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER { pResource: std::mem::transmute_copy(&buf) }) },
+                    Type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                    Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                        Transition: std::mem::ManuallyDrop::new(D3D12_RESOURCE_TRANSITION_BARRIER {
+                            pResource: std::mem::transmute_copy(&buf),
+                            Subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                            StateBefore: from,
+                            StateAfter: to,
+                        }),
+                    },
                     ..Default::default()
                 };
                 l.ResourceBarrier(&[b]);
             };
             self.submit(|l| {
+                barrier(l, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
                 l.CopyBufferRegion(&buf, 0, &up, 0, BYTES);
-                barrier(l);
+                barrier(l, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 l.SetPipelineState(pso);
                 l.SetComputeRootSignature(&root);
                 l.SetComputeRootUnorderedAccessView(0, buf.GetGPUVirtualAddress());
@@ -144,8 +154,9 @@ impl Dev {
                 }
                 l.EndQuery(&timer, D3D12_QUERY_TYPE_TIMESTAMP, 1);
                 l.ResolveQueryData(&timer, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, &stamps, 0);
-                barrier(l);
+                barrier(l, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
                 l.CopyBufferRegion(&back, 0, &buf, 0, BYTES);
+                barrier(l, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
             })?;
             let freq = self.queue.GetTimestampFrequency().unwrap_or(1) as f64;
             self.stamps.Map(0, None, Some(&mut p)).unwrap();
@@ -421,6 +432,8 @@ fn main() {
     }
     println!("  failed     {failed}");
     if failed > 0 {
+        // the card lock goes first: process::exit skips destructors
+        drop(_lock);
         std::process::exit(1);
     }
 }

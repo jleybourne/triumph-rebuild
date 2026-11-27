@@ -450,6 +450,8 @@ fn main() {
                     Ok(us) => t[k].push(us),
                     Err(e) => {
                         println!("  {}  stopped: {e}", p.hash);
+                        // the card lock goes first: process::exit skips destructors
+                        drop(_lock);
                         std::process::exit(1);
                     }
                 }
