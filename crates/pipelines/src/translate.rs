@@ -99,7 +99,9 @@ pub fn lift_hlsl(p: &NativeProgram, isg1: &[u8], osg1: &[u8], v1: bool) -> Resul
     let bind = lift::Bindings { hw: p.stage, layout: &p.layout, used: &p.used };
     let insts = gfx10::decode(&p.patched_code()).map_err(|_| Refused::new("patched code does not decode"))?;
     let wave64 = p.wave64;
-    let run = |st| if v1 { lift::lift_program(&insts, st, Some(bind), wave64) } else { lift::lift_stage(&insts, st, Some(bind)) };
+    // how console lanes map to host lanes, by the program's wave class (agnostic programs: as before)
+    let wave = wave_of(p, &insts);
+    let run = |st| if v1 { lift::lift_program_wave(&insts, st, Some(bind), wave64, wave) } else { lift::lift_stage(&insts, st, Some(bind)) };
     // compute programs have no signatures
     let sig = |b: &[u8]| if stage == Stage::Cs { Ok(Vec::new()) } else { signature::parse(b) };
     let (Ok(isg1), Ok(osg1)) = (sig(isg1), sig(osg1)) else { return Err(Refused::new("signature unreadable")) };
@@ -217,16 +219,22 @@ pub fn native_of(bytes: &[u8]) -> Result<(NativeProgram, Vec<u8>, Vec<u8>), Stri
     Ok((p, part(FourCC::ISG1), part(FourCC::OSG1)))
 }
 
-/// Refuses what `translate v1` refuses before lifting: undecodable code, and wave-dependent programs.
+/// The wave mapping of a program (`rebuild_sir::lift::Wave::choose`): agnostic programs stay one console lane per
+/// host lane; wave-wide ones run native wave32, as a partly filled wave64 (graphics) or doubled (compute).
+pub fn wave_of(p: &NativeProgram, insts: &[gfx10::Instruction]) -> rebuild_sir::lift::Wave {
+    let class = features::analyse(p, &mut Findings::default()).class();
+    rebuild_sir::lift::Wave::choose(class, p.wave64, matches!(p.io, StageIo::Cs(_)), insts)
+}
+
+/// Refuses what `translate v1` refuses before lifting: undecodable code. Every wave class is lifted (wave-wide
+/// programs through `rebuild_sir::lift::wave`); a program the lifter cannot finish is refused there.
 pub fn check_kind(p: &NativeProgram) -> Result<(), String> {
     let row = features::analyse(p, &mut Findings::default());
     if let Some(e) = &row.decode_error {
         return Err(format!("does not decode: {e}"));
     }
-    match row.class() {
-        WaveClass::Agnostic => Ok(()),
-        c => Err(format!("{} ({}, first trigger {})", c.name(), if p.wave64 { "wave64" } else { "wave32" }, row.wide_reason.unwrap_or("v_readfirstlane_b32"))),
-    }
+    let _: WaveClass = row.class();
+    Ok(())
 }
 
 /// The layout of a compiled program, refusing user-data reads past the root constants.

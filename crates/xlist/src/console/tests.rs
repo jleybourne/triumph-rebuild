@@ -1212,3 +1212,23 @@ fn card_cost_per_draw() {
         assert_eq!(release(a), 0);
     }
 }
+
+#[test]
+fn lists_recording_at_once_on_one_allocator_get_their_own_host_allocators() {
+    let h = Arc::new(TestHost::default());
+    let (l1, a, _backend) = fake_list(h);
+    // a second list on the same console allocator while the first still records (the console allows it)
+    let l2 = create_list(0, a, std::ptr::null_mut()).expect("second list");
+    let pool = |a: Raw| alloc::state(a).unwrap().pool.lock().unwrap().iter().map(|(x, h)| (x.as_raw() as usize, *h)).collect::<Vec<_>>();
+    let p = pool(a);
+    assert_eq!(p.len(), 2, "two host allocators");
+    assert_ne!(p[0].0, p[1].0);
+    assert!(p.iter().all(|(_, h)| *h != 0), "both held");
+    // closing the first frees its host allocator; a third list reuses it instead of making another
+    unsafe { method::<unsafe extern "system" fn(Raw) -> HRESULT>(l1, 0x48)(l1) };
+    let l3 = create_list(0, a, std::ptr::null_mut()).expect("third list");
+    assert_eq!(pool(a).len(), 2, "reused, not grown");
+    for l in [l1, l2, l3] {
+        release(l);
+    }
+}

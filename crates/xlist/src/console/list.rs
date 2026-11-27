@@ -503,7 +503,13 @@ impl ListState {
             return E_FAIL;
         }
         self.open = false;
-        call!(self.Close())
+        let hr = call!(self.Close());
+        // the host allocator it recorded into is free for another list now
+        let me = self as *const Self as usize;
+        if let Some(a) = self.allocator() {
+            a.release(me);
+        }
+        hr
     }
 
     /// Cut the list at a memory wait: the work so far is one host list, the rest another that
@@ -513,12 +519,16 @@ impl ListState {
             self.segments.last_mut().expect("a segment").waits.push(wait);
             return;
         }
-        let Some(a) = self.allocator() else {
+        if self.allocator().is_none() {
+            self.stats.refused += 1;
+            return;
+        }
+        let _ = self.close_current();
+        let me = self as *const Self as usize;
+        let Some(allocator) = self.allocator().and_then(|a| a.take(me).ok()) else {
             self.stats.refused += 1;
             return;
         };
-        let allocator = a.allocator.clone();
-        let _ = self.close_current();
         let next = match self.spare.pop() {
             Some(h) => unsafe { h.list.Reset(&allocator, None) }.map(|_| h),
             None => self.backend.list(self.kind, &allocator).map(HostList::new),
@@ -648,7 +658,17 @@ pub(crate) fn host_of<'a>(p: Raw) -> Option<&'a Arc<dyn ListHost>> {
 /// the title. It starts with one reference; the title's `Release` frees it.
 pub fn create_list(kind: u32, allocator: Raw, pipeline: Raw) -> windows::core::Result<Raw> {
     let a = alloc::state(allocator).ok_or_else(|| windows::core::Error::from(E_INVALIDARG))?;
-    let host_list = a.backend.list(kind, &a.allocator)?;
+    // a new list starts recording: it holds a host allocator of the pool (a temporary holder until it has an address)
+    static TEMP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX / 2);
+    let temp = TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let host_allocator = a.take(temp)?;
+    let host_list = match a.backend.list(kind, &host_allocator) {
+        Ok(l) => l,
+        Err(e) => {
+            a.release(temp);
+            return Err(e);
+        }
+    };
     let enhanced_barriers = a.backend.enhanced_barriers();
     let first = HostList::new(host_list);
     let obj = Box::new(ListObject {
@@ -683,6 +703,7 @@ pub fn create_list(kind: u32, allocator: Raw, pipeline: Raw) -> windows::core::R
         },
     });
     let p: Raw = Box::into_raw(obj).cast();
+    a.rehold(temp, &*enter(p) as *const _ as usize);
     if !pipeline.is_null() {
         enter(p).set_pipeline(pipeline);
     }
@@ -866,16 +887,25 @@ unsafe extern "system" fn close(this: Raw) -> HRESULT {
 unsafe extern "system" fn reset(this: Raw, allocator: Raw, pipeline: Raw) -> HRESULT {
     let s = enter(this);
     let Some(a) = alloc::state(allocator) else { return E_INVALIDARG };
-    let host_allocator = a.allocator.clone();
     if s.open {
         let _ = s.close_current();
     }
+    let me = &*s as *const _ as usize;
+    let host_allocator = match a.take(me) {
+        Ok(h) => h,
+        Err(e) => return e.code(),
+    };
     while s.segments.len() > 1 {
         let seg = s.segments.pop().expect("more than one");
         s.spare.push(seg.list);
     }
     s.segments[0].waits.clear();
     if let Err(e) = unsafe { s.segments[0].list.list.Reset(&host_allocator, None) } {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 6 {
+            let akind = unsafe { (*allocator.cast::<super::alloc::AllocatorObject>()).kind };
+            eprintln!("xlist     list Reset refused by the host ({:#x}): list kind {}, allocator kind {akind}, allocator {allocator:?}", e.code().0, s.kind);
+        }
         return e.code();
     }
     s.allocator = allocator;
@@ -1194,6 +1224,7 @@ unsafe extern "system" fn barrier_groups(this: Raw, count: u32, groups: *const C
                         match s.resource(t.as_ptr().add(24).cast::<Raw>().read_unaligned()) {
                             Some(r) => {
                                 t.as_mut_ptr().add(24).cast::<Raw>().write_unaligned(r);
+                                host_layouts(&mut t);
                                 textures.push(t);
                             }
                             None => globals.push(t[..16].try_into().expect("16 bytes")),
@@ -1232,6 +1263,24 @@ unsafe extern "system" fn barrier_groups(this: Raw, count: u32, groups: *const C
         s.seg_work = true;
     }
     (s.globals, s.textures, s.buffers) = (globals, textures, buffers);
+}
+
+/// The console's barrier layouts that a host runtime may not know, as host layouts (`LayoutBefore` at +16,
+/// `LayoutAfter` at +20 of a texture barrier). 31 is `DIRECT_QUEUE_GENERIC_READ_COMPUTE_QUEUE_ACCESSIBLE`
+/// (Agility SDK 1.611): a host without it rejects the barrier and the whole list errors, so its `Close` and the
+/// title's next `Reset` fail (the title asserts). `GENERIC_READ` (1) is the same promise on every queue type.
+fn host_layouts(t: &mut [u8; 64]) {
+    const GENERIC_READ: u32 = 1;
+    const NEWEST_HOST: u32 = 30; // D3D12_BARRIER_LAYOUT_VIDEO_QUEUE_COMMON
+    for at in [16usize, 20] {
+        let v = u32::from_le_bytes(t[at..at + 4].try_into().expect("4 bytes"));
+        if v == 31 {
+            t[at..at + 4].copy_from_slice(&GENERIC_READ.to_le_bytes());
+        } else if v != u32::MAX && v > NEWEST_HOST {
+            // a layout newer still: COMMON keeps it legal (and correct where the resource is only read)
+            t[at..at + 4].copy_from_slice(&0u32.to_le_bytes());
+        }
+    }
 }
 
 /// 0x418 / 0x420 pipeline syncs `(flags, control, address, size)`: wait for earlier work and
@@ -1697,3 +1746,19 @@ pub(crate) static IMPLEMENTED: &[(usize, &str, Fp)] = &[
     (0x490, "Barrier (enhanced barrier groups)", Fp(barrier_groups as *const ())),
     (0x4a0, "allocate list-owned upload memory", Fp(allocate_upload as *const ())),
 ];
+
+#[cfg(test)]
+mod layout_tests {
+    #[test]
+    fn newer_console_layouts_become_host_ones() {
+        let mut t = [0u8; 64];
+        t[16..20].copy_from_slice(&31u32.to_le_bytes());
+        t[20..24].copy_from_slice(&6u32.to_le_bytes());
+        super::host_layouts(&mut t);
+        assert_eq!(u32::from_le_bytes(t[16..20].try_into().unwrap()), 1, "31 -> GENERIC_READ");
+        assert_eq!(u32::from_le_bytes(t[20..24].try_into().unwrap()), 6, "known layouts stay");
+        t[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+        super::host_layouts(&mut t);
+        assert_eq!(u32::from_le_bytes(t[20..24].try_into().unwrap()), u32::MAX, "UNDEFINED stays");
+    }
+}

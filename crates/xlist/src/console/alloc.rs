@@ -146,9 +146,43 @@ pub(crate) struct AllocatorState {
     pub backend: Arc<dyn Backend>,
     pub allocator: ID3D12CommandAllocator,
     pub uploads: Mutex<Uploads>,
+    pub kind: u32,
+    /// Host allocators behind this console one, with the list recording into each (0: none). The console lets
+    /// several lists record into one allocator at once; a host allocator takes one recording list at a time
+    /// (`Reset` fails with E_INVALIDARG otherwise, and the title asserts), so each open list gets its own.
+    pub pool: Mutex<Vec<(ID3D12CommandAllocator, usize)>>,
 }
 
 impl AllocatorState {
+    /// A host allocator for list `list` to record into: the one it already holds, a free one, or a new one.
+    pub fn take(&self, list: usize) -> windows::core::Result<ID3D12CommandAllocator> {
+        let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((a, _)) = pool.iter().find(|(_, h)| *h == list) {
+            return Ok(a.clone());
+        }
+        if let Some(slot) = pool.iter_mut().find(|(_, h)| *h == 0) {
+            slot.1 = list;
+            return Ok(slot.0.clone());
+        }
+        let a = self.backend.allocator(self.kind)?;
+        pool.push((a.clone(), list));
+        Ok(a)
+    }
+
+    /// Hand what `from` holds to `to` (a list known only after it is made).
+    pub fn rehold(&self, from: usize, to: usize) {
+        for slot in self.pool.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().filter(|(_, h)| *h == from) {
+            slot.1 = to;
+        }
+    }
+
+    /// List `list` stopped recording: its host allocator is free for another list.
+    pub fn release(&self, list: usize) {
+        for slot in self.pool.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().filter(|(_, h)| *h == list) {
+            slot.1 = 0;
+        }
+    }
+
     pub fn alloc(&self, size: u64, alignment: u64) -> *mut u8 {
         self.uploads.lock().unwrap_or_else(|e| e.into_inner()).alloc(&*self.backend, size, alignment)
     }
@@ -171,7 +205,7 @@ pub(crate) fn create_on(kind: u32, backend: Arc<dyn Backend>, host: Arc<dyn List
         header: Header { vtable: slots::allocator_table().funcs.as_ptr(), bits: 0, refs: AtomicU32::new(1) },
         kind,
         _pad: 0,
-        ours: AllocatorState { host, backend, allocator, uploads: Mutex::new(Uploads::default()) },
+        ours: AllocatorState { host, backend, pool: Mutex::new(vec![(allocator.clone(), 0)]), allocator, uploads: Mutex::new(Uploads::default()), kind },
     });
     Ok(Box::into_raw(obj).cast())
 }
@@ -255,13 +289,15 @@ unsafe extern "system" fn get_device(this: Raw, iid: *const GUID, out: *mut Raw)
 /// 0x40 Reset: the host allocator's, and the upload chunks are reused from the start.
 unsafe extern "system" fn reset(this: Raw) -> HRESULT {
     let Some(s) = state(this) else { return E_INVALIDARG };
-    match unsafe { s.allocator.Reset() } {
-        Ok(()) => {
-            s.uploads.lock().unwrap_or_else(|e| e.into_inner()).reset();
-            S_OK
+    // every host allocator behind it (the title resets once the GPU is done with all of its lists)
+    let pool: Vec<ID3D12CommandAllocator> = s.pool.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(a, _)| a.clone()).collect();
+    for a in pool {
+        if let Err(e) = unsafe { a.Reset() } {
+            return e.code();
         }
-        Err(e) => e.code(),
     }
+    s.uploads.lock().unwrap_or_else(|e| e.into_inner()).reset();
+    S_OK
 }
 
 /// 0x48: the console's allocation callback; accepted and ignored (as the fork did).

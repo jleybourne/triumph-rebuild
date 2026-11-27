@@ -416,12 +416,14 @@ pub unsafe extern "system" fn CreateFileW(
     template: HANDLE,
 ) -> HANDLE {
     let raw = host::from_wide(name).unwrap_or_default();
+    LAST_FLAGS.store(flags, std::sync::atomic::Ordering::Relaxed);
     let h = with("CreateFileW", INVALID_HANDLE_VALUE, |f| {
         f.create("CreateFileW", &raw, access, disposition, flags, flags, |p| unsafe {
             host::CreateFileW(p.as_ptr(), access, share, sa, OPEN_EXISTING, flags, template)
         })
     });
     trace_open("CreateFileW", &raw, h != INVALID_HANDLE_VALUE);
+    trace_handle(&raw, h);
     h
 }
 
@@ -441,6 +443,7 @@ pub unsafe extern "system" fn CreateFileA(
         })
     });
     trace_open("CreateFileA", &raw, h != INVALID_HANDLE_VALUE);
+    trace_handle(&raw, h);
     h
 }
 
@@ -462,6 +465,7 @@ pub unsafe extern "system" fn CreateFile2(
         })
     });
     trace_open("CreateFile2", &raw, h != INVALID_HANDLE_VALUE);
+    trace_handle(&raw, h);
     h
 }
 
@@ -885,6 +889,9 @@ pub fn override_export(name: &str) -> Option<u64> {
         "CreateSymbolicLinkW" => CreateSymbolicLinkW as *const (),
         "WerRegisterFile" => WerRegisterFile as *const (),
         "SetFileInformationByHandle" => SetFileInformationByHandle as *const (),
+        // REBUILD_TRACE_READS only: position-checked reads on traced handles
+        "ReadFile" if read_trace_on() => TracedReadFile as *const (),
+        "SetFilePointerEx" if read_trace_on() => TracedSetFilePointerEx as *const (),
         other => return crt::crt_export(other),
     };
     Some(f as usize as u64)
@@ -892,3 +899,76 @@ pub fn override_export(name: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests;
+
+// ---- REBUILD_TRACE_READS=<name part>: every read and seek on handles whose path contains it -------------
+
+fn read_trace_on() -> bool {
+    read_trace_name().is_some()
+}
+
+fn read_trace_name() -> Option<&'static str> {
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| std::env::var("REBUILD_TRACE_READS").ok().map(|s| s.to_ascii_lowercase())).as_deref()
+}
+
+static TRACED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+static LAST_FLAGS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static TRACE_LINES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Called by the create path: remember handles to trace.
+fn trace_handle(path: &str, h: HANDLE) {
+    if let Some(name) = read_trace_name() {
+        if h != INVALID_HANDLE_VALUE && path.to_ascii_lowercase().contains(name) {
+            TRACED.lock().unwrap_or_else(|e| e.into_inner()).push(h as usize);
+            eprintln!("reads     tracing {path} as handle {:#x} (flags {:#x})", h as usize, LAST_FLAGS.load(std::sync::atomic::Ordering::Relaxed));
+        }
+    }
+}
+
+fn traced(h: HANDLE) -> bool {
+    TRACED.lock().unwrap_or_else(|e| e.into_inner()).contains(&(h as usize))
+}
+
+fn position(h: HANDLE) -> i64 {
+    let mut p = -1i64;
+    unsafe { host::SetFilePointerEx(h, 0, &mut p, 1) };
+    p
+}
+
+#[allow(non_snake_case)]
+unsafe extern "system" fn TracedReadFile(h: HANDLE, buf: *mut c_void, len: u32, read: *mut u32, ov: *mut c_void) -> i32 {
+    if !traced(h) {
+        return unsafe { host::ReadFile(h, buf, len, read, ov) };
+    }
+    let before = if ov.is_null() { position(h) } else { -1 };
+    let ov_offset = if ov.is_null() { None } else { Some(unsafe { *(ov.cast::<u8>().add(0x10) as *const u64) }) };
+    let ok = unsafe { host::ReadFile(h, buf, len, read, ov) };
+    let code = unsafe { host::GetLastError() };
+    let got = if read.is_null() { 0 } else { unsafe { *read } };
+    let after = if ov.is_null() { position(h) } else { -1 };
+    if TRACE_LINES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4000 {
+        let first = if ok != 0 && got >= 4 { unsafe { std::ptr::read_unaligned(buf as *const u32) } } else { 0 };
+        let drift = if ov.is_null() && ok != 0 && after - before != got as i64 { "  <-- DRIFT" } else { "" };
+        eprintln!(
+            "reads     h {:#x} thread {} ReadFile {len:#x} into {:#x} got {got:#x} ok {ok} pos {before:#x} -> {after:#x} ov {ov_offset:x?} first {first:08x}{drift}",
+            h as usize,
+            unsafe { host::GetCurrentThreadId() },
+            buf as usize
+        );
+    }
+    set_last_error(code);
+    ok
+}
+
+#[allow(non_snake_case)]
+unsafe extern "system" fn TracedSetFilePointerEx(h: HANDLE, distance: i64, new: *mut i64, method: u32) -> i32 {
+    let ok = unsafe { host::SetFilePointerEx(h, distance, new, method) };
+    if traced(h) {
+        let code = unsafe { host::GetLastError() };
+        if TRACE_LINES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4000 {
+            eprintln!("reads     h {:#x} thread {} Seek {distance:#x} method {method} -> {:#x}", h as usize, unsafe { host::GetCurrentThreadId() }, position(h));
+        }
+        set_last_error(code);
+    }
+    ok
+}
