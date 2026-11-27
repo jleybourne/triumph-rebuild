@@ -2170,6 +2170,9 @@ dependencies = [
 [[package]]
 name = "rebuild-sir"
 version = "0.1.0"
+dependencies = [
+ "rebuild-shader",
+]
 
 [[package]]
 name = "rebuild-uma"

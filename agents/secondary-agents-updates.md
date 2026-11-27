@@ -12,8 +12,8 @@ Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives w
 
 | lane | job | branch | worktree | state | last reported |
 |:--|:--|:--|:--|:--|:--|
-| **gdk** | GDK runtime behind `xgameruntime.dll` (G1–G4) | `agent/gdk` | `D:\Developer\triumph-rebuild-gdk` | 🔄 started 14:15 | — |
-| **audio** | A5, our own XMA2 decoder | `agent/audio-xma` | `D:\Developer\triumph-rebuild-audio` | 🔄 started 14:15 | — |
+| **gdk** | GDK runtime behind `xgameruntime.dll` (G1–G4) | `agent/gdk` | `D:\Developer\triumph-rebuild-gdk` | ✅ **G1–G4 closed, PR open**: all 30 GUIDs the exe passes to `QueryApiImpl` named, 0 unknown; task queues and async (21 tests); 11 interfaces, 102 slots; 177 slot entries resolve | [#18](https://github.com/jleybourne/triumph-rebuild/pull/18) |
+| **audio** | A5, our own XMA2 decoder | `agent/audio-xma` | `D:\Developer\triumph-rebuild-audio` | ✅ **A5 closed, PR open**: all 1,818 XMA2 streams match FFmpeg within ±1 LSB (0.076 % off by 1); ~1,200× real time on one thread | [#17](https://github.com/jleybourne/triumph-rebuild/pull/17) |
 | **files** | F4 CRT file functions, F5 links, WER and vfs gaps | `agent/files-2` | `D:\Developer\triumph-rebuild-files` | ✅ **F4–F5 closed, PR open**: CRT side by side 92/92, F5 46/46, base hash unchanged | [#16](https://github.com/jleybourne/triumph-rebuild/pull/16) |
 | **shader** | S6, `oraclediff` | `agent/shader-s6` | `D:\Developer\triumph-rebuild-shader` | ✅ **S6 closed, PR open**: oracle vs itself 0 diffs over 25,694 (17.8 s, 4 threads); every injected binding, signature and wave-op mutation caught | [#15](https://github.com/jleybourne/triumph-rebuild/pull/15) |
 | **launcher** | U6, Add tile fit; plus the idle fix the owner asked for | `agent/launcher-idle` | `D:\Developer\triumph-rebuild-launcher` | ✅ **done by the coordinator, PR open** | [#14](https://github.com/jleybourne/triumph-rebuild/pull/14) |
@@ -142,6 +142,18 @@ From **files** round 2 (details in `agents/files.md`, PR #16):
 65. **Behaviour change in round-1 code:** opening a read-only file to write or overwrite it now fails, as on the host. Before, the copy into the overlay cleared the read-only bit.
 66. Chosen limits: Unicode `ccs=` modes write no BOM (logged; the title's `fopen` calls are byte streams); an invalid `fopen` mode fails with `EINVAL` and is logged instead of terminating the process; `_wchdir` changes only our current directory. Workspace 242 green, 0 warnings; round-1's 145-call comparison still has 0 differences.
 
+From **audio** round 2 (details in `agents/audio.md`, PR #17):
+67. **Licence check needed:** `wma/tables.rs` (WMA Pro code and level tables, data only, underivable) comes from the fork's `xma/tables.rs`, itself converted from FFmpeg's `wmaprodata.h` (LGPL-2.1+). It has the section 3 header and a `CREDITS.md` line; all decoding code is our own. LGPL-2.1-or-later may be used under GPL-3.0, but **confirm that vendoring this data is acceptable** under section 3.
+68. Stereo XMA2 isn't checked against a reference: all of the title's XMA2 streams are mono, and nothing can encode stereo XMA2. It's written and passes the random-input test; add a stereo stream dumped from a run-time XMA context if one appears.
+69. XMA voices now decode by default (`acp::Hal`). Codec 11 (most of `audio.rpf`) is the Opus framing `xapu.dll` decodes. The reference is FFmpeg 9.0.2's `xma2` (already installed via WinGet; nothing downloaded). Our output lines up 576 samples later than FFmpeg's (FFmpeg drops the first frame and trims 64).
+
+From **gdk** (details in `agents/gdk.md` and `agents/gdk-slots.csv`, PR #18):
+70. Call `rebuild_gdk::profile::configure(...)` before the title runs. Proposed config entry: `user.gamertag` (1–15 bytes, default `Player`). Title id and Store id come from `MicrosoftGame.config`; package size from the game folder.
+71. Wiring: point `GetProcAddress(xgameruntime, name)` at `runtime::get_proc` (it answers the 6 names); `LoadLibraryExA("xgameruntime.dll")` needs a stand-in handle; add `rebuild_gdk::discovery::lines()` to the Build 3 discovery list.
+72. **Seven interfaces in the exe's table aren't served yet:** game save, local storage, game UI, HDR, shell, capture and speech. `QueryApiImpl` refuses and logs each. The fork served them, so **the title may expect game saves at start-up**. The lane proposes a **G5** for these before the first start-up run.
+73. Workspace 238 → 280 tests green, 0 warnings; the crate's tests passed 30/30 repeat runs, which caught and fixed a real block-reuse race.
+74. **The game folder is changing, and it's not a lane:** since ~14:27 a new versioned subfolder (a second, newer copy of the title's package, multi-GB files still growing at 14:40) is being written under `game_dir`, and one top-level data file under `data\ttdb\ui` changed at 14:19. No lane writes there. Every whole-folder "hash unchanged" check will fail until the folder settles; the owner has been asked.
+
 From the **coordinator** (launcher follow-up, PR #14):
 63. **The launcher was not idle**: it requested a frame every 16 ms, so it drew at 60 fps even in the background beside a running game. It's fixed in PR #14: a scene clock that only runs when the window is focused and visible with no game running, `repaint_after()` (idle waits for input; motion at 30 fps; a running game's log read 4x a second, 1x minimised), and minimise on launch with restore on exit (`REBUILD_LAUNCHER_STAY_OPEN=1` keeps it open). **Measured: 4.5 % of one core in the foreground while drifting, 0.0 % minimised, 86–87 MB.** U6 (Add tile fit) is in the same PR.
 
@@ -163,6 +175,8 @@ From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f)
 
 | time | event |
 |:--|:--|
+| 14:45 | **gdk** done: PR #18 open (G1–G4; G5 proposed for 7 unserved interfaces). **All round-2 lanes have handed back.** A newer copy of the title is being written into the game folder (not a lane); owner asked. |
+| 14:40 | **audio A5** done: PR #17 open (our own XMA2 decoder, ±1 LSB on all 1,818 streams, ~1,200× real time); vendored LGPL-derived tables flagged for the lead. |
 | 14:35 | **files F4–F5** done: PR #16 open (CRT 92/92, F5 46/46 against the host). |
 | 14:30 | **shader S6** done: `oraclediff` PR #15 open (0 self-diffs over 25,694; all mutations caught; our own bitcode reader resolves 297,657 `dx.op` calls in a 1-in-50 audit). |
 | 14:22 | Master 927942b: BCPack decided (our own decoder, tables outside git, decode cache) as dstorage D5, **run by the lead's own helper**; the coordinator does not start it. No other new work. |

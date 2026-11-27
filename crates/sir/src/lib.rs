@@ -14,6 +14,7 @@ pub mod classify;
 pub mod gen;
 pub mod hlsl;
 pub mod lanes;
+pub mod lift;
 
 /// An SSA value: the index of the instruction that defines it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

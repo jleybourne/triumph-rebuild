@@ -1,0 +1,48 @@
+translate lift — v0 set through rebuild_sir::lift
+programs  2881 · fully translated 5 (0.2 %)
+  cs  5 / 132
+  ps  0 / 1798
+  vs  0 / 951
+
+  untranslated opcode                  blocks  (only one missing)
+  exp                                    2749     461
+  s_load_dwordx4                         2139       0
+  v_interp_p1_f32                        1376       0
+  v_interp_p2_f32                        1376       0
+  s_load_dwordx8                         1122       0
+  s_wqm_b64                               884       0
+  image_sample                            876       0
+  s_swappc_b64                            765       0
+  s_buffer_load_dwordx4                   596       0
+  s_buffer_load_dword                     573       0
+  s_buffer_load_dwordx16                  328       0
+  v_interp_mov_f32                        299       0
+  s_buffer_load_dwordx2                   247       0
+  buffer_load_dwordx4                     239       0
+  s_buffer_load_dwordx8                   186       0
+  image_store                             130       0
+  image_sample_lz                          87       0
+  image_load                               72       0
+  s_brev_b32                               72       0
+  v_cmp_class_f32                          71       0
+  v_fma_mix_f32                            68       0
+  v_interp_p1ll_f16                        62       0
+  v_interp_p2_f16                          62       0
+  buffer_load_dwordx3                      53       0
+  buffer_load_dword                        25       0
+  image_sample_l                           24       0
+  image_gather4_lz                         20       0
+  buffer_load_dwordx2                      16       0
+  buffer_store_format_xyzw                 15       0
+  buffer_store_dwordx4                     12       0
+  buffer_store_dwordx3                     11       0
+  v_cubema_f32                             11       0
+  v_cubesc_f32                             11       0
+  v_cubetc_f32                             11       0
+  v_cubeid_f32                             10       0
+  buffer_load_format_x                      9       0
+  ds_swizzle_b32                            9       0
+  ds_add_u32                                8       0
+  image_sample_b                            8       0
+  s_barrier                                 8       0
+  (79 untranslated opcodes in all)
