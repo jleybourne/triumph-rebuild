@@ -325,7 +325,8 @@ fn main() {
         // input sets that never finished, by program (the supervisor's record): skipped
         let mut hung: BTreeMap<String, Vec<u32>> = BTreeMap::new();
         for l in std::fs::read_to_string(out.join("hung.txt")).unwrap_or_default().lines() {
-            if let Some((h, k)) = l.split_once(' ') {
+            let mut w = l.split(' ');
+            if let (Some(h), Some(k)) = (w.next(), w.next()) {
                 hung.entry(h.to_string()).or_default().extend(k.trim().parse::<u32>().ok());
             }
         }
@@ -336,21 +337,19 @@ fn main() {
                 Err(e) => Row { hash: p.hash.clone(), stage: p.stage, single: p.single, verdict: "untested", reason: e, detail: String::new() },
                 Ok(o) => {
                     let skip = hung.get(&p.hash).cloned().unwrap_or_default();
-                    let mut r = run::program(&mut g, p, &o, &out, &skip);
-                    if g.lost() && r.verdict != "crash" {
-                        r.detail = format!("{}: {}", r.reason, r.detail);
-                        r.verdict = "crash";
-                        r.reason = "device lost".into();
+                    let r = run::program(&mut g, p, &o, &out, &skip);
+                    if g.lost() {
+                        // the device went with this input set: no row; the supervisor records the set (`current`)
+                        // and runs the program again without it
+                        eprintln!("execcheck: device lost on {}", std::fs::read_to_string(out.join("current")).unwrap_or_default());
+                        drop(card);
+                        std::process::exit(3);
                     }
                     r
                 }
             };
             writeln!(f, "{}", row.csv()).unwrap();
             f.flush().unwrap();
-            if g.lost() {
-                drop(card);
-                std::process::exit(3);
-            }
         }
         let _ = std::fs::remove_file(out.join("current"));
         drop(g);
@@ -395,10 +394,12 @@ fn main() {
         }
         // an input set that never finished (a loop whose trip count comes from the data): skipped next time,
         // unless every set has
-        if let (Some(4), Some(k)) = (st.code(), set) {
+        // an input set that never finished (a loop whose trip count comes from the data) or lost the device (an
+        // index from the data past every view): skipped next time, unless every set has
+        if let (Some(3 | 4), Some(k)) = (st.code(), set) {
             let path = out.join("hung.txt");
             let mut h = std::fs::read_to_string(&path).unwrap_or_default();
-            h.push_str(&format!("{cur} {k}\n"));
+            h.push_str(&format!("{cur} {k} {}\n", if st.code() == Some(4) { "never finished" } else { "lost the device" }));
             std::fs::write(&path, &h).unwrap();
             if h.lines().filter(|l| l.starts_with(&cur)).count() < run::SETS as usize {
                 let _ = std::fs::remove_file(out.join("current"));
@@ -413,7 +414,7 @@ fn main() {
                 stage: p.map_or("?", |p| p.stage),
                 single: p.is_some_and(|p| p.single),
                 verdict: "crash",
-                reason: if st.code() == Some(4) { "never finishes on any input set".into() } else { "device lost".into() },
+                reason: if set.is_some() { "no input set completes (loops or device loss)".into() } else { "device lost".into() },
                 detail: format!("{st}"),
             };
             let mut f = std::fs::OpenOptions::new().append(true).open(&csv).unwrap();

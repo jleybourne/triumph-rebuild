@@ -111,22 +111,22 @@ impl Lifter<'_> {
         }
     }
 
-    /// The descriptor whose heap index SGPR `s` holds is in a UAV range of the title's root signature: the range
-    /// of its table that starts last at or before its offset (known only for a constant offset). A load through
-    /// it reads the host's UAV, so it is declared as one (a UAV descriptor read as an SRV type is undefined).
-    fn desc_is_uav(&self, s: u8) -> bool {
-        let (Some(d), Some(off), Some(bind)) = (self.f.descs.get(&s), self.f.desc_off.get(&s), self.bind) else {
-            return false;
-        };
-        if *off < 0 {
-            return false;
-        }
-        let dword = *off as u32 / 4;
+    /// The kind of view the descriptor whose heap index SGPR `s` holds is, in the title's root signature: the
+    /// range of its table that starts last at or before its offset (known only for a constant offset).
+    fn desc_kind(&self, s: u8) -> Option<ResourceType> {
+        let (d, off, bind) = (self.f.descs.get(&s)?, *self.f.desc_off.get(&s)?, self.bind?);
+        let dword = u32::try_from(off).ok()? / 4;
         bind.used
             .iter()
             .filter(|u| u.root == RootType::Table && u.user_data == d.user_data && u.table_offset_dwords <= dword)
             .max_by_key(|u| u.table_offset_dwords)
-            .is_some_and(|u| u.kind == ResourceType::Uav)
+            .map(|u| u.kind)
+    }
+
+    /// The descriptor is a UAV: a load through it reads the host's UAV, so it is declared as one (a UAV
+    /// descriptor read as an SRV type is undefined).
+    fn desc_is_uav(&self, s: u8) -> bool {
+        self.desc_kind(s) == Some(ResourceType::Uav)
     }
 
     /// `s_load_dwordx4/x8` of a descriptor from a table: the destination's first SGPR becomes the heap index.
@@ -231,7 +231,12 @@ impl Lifter<'_> {
             return None;
         }
         let bind = self.bind?;
-        let cbv = bind.used.iter().any(|u| u.user_data == desc.user_data && u.kind == ResourceType::Cbv);
+        // a constant buffer when its range is one (an SRV range of the same table is a raw buffer); with no known
+        // offset, when the table holds any constant buffer
+        let cbv = match self.desc_kind(base) {
+            Some(k) => k == ResourceType::Cbv,
+            None => bind.used.iter().any(|u| u.user_data == desc.user_data && u.kind == ResourceType::Cbv),
+        };
         let uav = !cbv && self.desc_is_uav(base);
         self.use_desc(base, if cbv { View::Cbv } else if uav { View::RwRaw } else { View::Raw }, 0);
         let dw = off as u32 / 4;

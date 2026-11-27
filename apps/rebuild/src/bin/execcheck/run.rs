@@ -72,6 +72,7 @@ pub fn plan(p: &Prog) -> Result<Plan, String> {
     // each table at its own place: resource tables 256 slots apart, sampler tables 64
     let mut table_base: BTreeMap<u8, (Heap, u32)> = BTreeMap::new();
     let (mut nres, mut nsmp) = (0u32, 0u32);
+    let mut consts = Vec::new();
     for prm in &p.layout {
         if prm.user_data >= 16 {
             continue; // past the root constants: a read of it is refused by the translator
@@ -102,6 +103,7 @@ pub fn plan(p: &Prog) -> Result<Plan, String> {
                 for k in 0..prm.sgprs.max(1) as u8 {
                     let d = prm.user_data + k;
                     if d < 16 {
+                        consts.push(d);
                         for s in 0..SETS {
                             pl.ud[s as usize][d as usize] = word(s, 7, d as u64);
                         }
@@ -145,6 +147,14 @@ pub fn plan(p: &Prog) -> Result<Plan, String> {
                 let slot = ((base * 32) as i64 + off as i64) as u32 / 32;
                 let e = pl.strides.entry(slot).or_insert(0);
                 *e = (*e).max(u32::from(u.shadow).next_multiple_of(4));
+            }
+        }
+    }
+    // an index computed from user data must land in the filled region: constants are small integers in every set
+    if !dynamic.is_empty() {
+        for &d in &consts {
+            for s in 0..SETS {
+                pl.ud[s as usize][d as usize] = word(0, 7 + s as u64, d as u64);
             }
         }
     }
@@ -522,7 +532,7 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
     let mut per_set = Vec::new();
     for set in 0..SETS {
         if skip.contains(&set) {
-            per_set.push(format!("set{set} never finished"));
+            per_set.push(format!("set{set} did not complete"));
             continue;
         }
         let _ = std::fs::write(out.join("current"), format!("{} {set}", p.hash));
