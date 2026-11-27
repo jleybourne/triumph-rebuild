@@ -8,6 +8,8 @@
 //!
 //! `REBUILD_CONSOLE=series-s` answers Series S; otherwise Series X (the target).
 
+#![allow(non_snake_case)]
+
 use std::ffi::c_void;
 
 use windows::core::PCWSTR;
