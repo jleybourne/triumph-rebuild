@@ -1,35 +1,58 @@
 # Progress
 
 ```
-work toward 30 fps   [███████████░░░░░░░░░]  57 %
-shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694 counted (oracle match needed) · v0 set 2,834 / 2,881 translate and compile (pixel 1,791 / 1,798, vertex 926 / 951, compute 117 / 132) · all decode byte-exact
-runtime functions    [███████████████████░]  69 / 73 ours bound (xmem, modules, memory, process, files, audio, DirectStorage, xg); 624 more bind to the host directly
-launcher track       [██████████████░░░░░░]  5 / 7 steps (C1 registry, L1-L4 launcher merged; C2 and L5 left); does not count toward the fps %
-measured fps         none yet — the title creates its pipelines and loads content (7 GiB); Build 5: stream pipelines, Execute, Present next
-baseline to beat     7.6 fps · 131.3 ms · ~4,500 draws · 356 dropped   (the layer being replaced)
-target               30 fps · 33.3 ms · same draws · stated output resolution and upscaler mode
-updated              2026-11-27
+overall   ███████████░░░░░░░░░  57 %   work toward 30 fps, weighted by build step
+fps       no frame yet                 target 30 · baseline 7.6
+updated   2026-11-27
 ```
 
-The percentage is **work done, weighted by build step**. It is not fps. It cannot say how close the frame
-is to 33.3 ms until Build 5 produces a frame to measure. From then on, the frame line goes in the
-second row and is the number that counts.
+The percentage is **work done**, not fps. Once Build 5 shows a frame, the measured fps goes on the second line
+and becomes the number that counts.
+
+## At a glance
+
+| track | progress | | note |
+|---|---|--:|---|
+| **Build 5 · first frame** | `███████░░░░░░░░░░░░░` | 35 % | next: stream pipelines, Execute, Present |
+| shaders compiled (v0 set) | `████████████████████` | 2,834 / 2,881 | pixel 1,791 · vertex 926 · compute 117 |
+| shaders counted | `░░░░░░░░░░░░░░░░░░░░` | 0 / 25,694 | counted once execution matches the oracle |
+| runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
+| launcher | `██████████████░░░░░░` | 5 / 7 | C2 and L5 left · not part of the 57 % |
+
+| | fps | frame time | draws |
+|---|--:|--:|--:|
+| baseline (the layer being replaced) | 7.6 | 131.3 ms | ~4,500 (356 dropped) |
+| target | 30 | 33.3 ms | same |
 
 ## By build step
 
-| # | build | weight | done | earned | state |
-|---|---|---:|---:|---:|---|
-| 0 | three answers before more code | 10 | 70 % | 7.0 | (a) upload **done**; (b) translation **done**: 0.43 µs a draw; (c) blocked until the title renders (moved to Build 5) |
-| 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
-| 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
-| 3 | PE loader + console runtime | 15 | 100 % | 15.0 | loader, vfs, input merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides (32 / 73 ours); the title's code runs; files (22), audio, DirectStorage, xg built in lanes and merged, binding next |
-| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 65 % | 9.75 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; **front end closed**: 25,694 programs decode byte-exact, oracle set complete (PRs #5, #10) |
-| 5 | D3D12.X device, lists, descriptors, present | 12 | 35 % | 4.2 | device, queues, fences, allocators, lists, resources, descriptors, DXGI, root signatures, query heaps, command signatures, compute pipelines (pool + library) built; the title loads content; stream pipelines, Execute and Present next |
-| 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
-| 7 | upscaler: DLSS + FSR | 10 | 30 % | 3.0 | DLSS (PR #4) and FSR 3.1.6 (PR #8) standalone on a synthetic scene, one conventions table; wiring to the title's pass todo |
-| 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
-| 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **57.75 ≈ 57 %** | |
+| # | build | progress | done | weight | state |
+|--:|---|---|--:|--:|---|
+| 0 | three answers before more code | `██████████████░░░░░░` | 70 % | 10 | (a) upload and (b) translation done; (c) needs a frame |
+| 1 | tiled VRAM at console addresses | `████████████████████` | 100 % | 10 | closed |
+| 2 | CPU-written memory ring; GPU→CPU | `████████████████████` | 100 % | 8 | closed |
+| 3 | PE loader + console runtime | `████████████████████` | 100 % | 15 | closed: the title's code runs |
+| 4 | shader recompiler RDNA2 → DXIL | `█████████████░░░░░░░` | 65 % | 15 | front end closed; execution check, wave64 open |
+| 5 | device, lists, descriptors, present | `███████░░░░░░░░░░░░░` | 35 % | 12 | creation path mostly built; Execute, Present open |
+| 6 | list translation | `██░░░░░░░░░░░░░░░░░░` | 10 % | 8 | translator core measured |
+| 7 | upscaler: DLSS + FSR | `██████░░░░░░░░░░░░░░` | 30 % | 10 | both standalone; wiring to the title open |
+| 8 | frame pacing | `░░░░░░░░░░░░░░░░░░░░` | 0 % | 6 | 30 fps on NVIDIA closes here |
+| 9 | AMD validation by testers | `░░░░░░░░░░░░░░░░░░░░` | 0 % | 6 | 30 fps on AMD closes here |
+| | **total** | `███████████░░░░░░░░░` | **57 %** | 100 | 57.75 points earned |
+
+## Build 5 · first frame, piece by piece
+
+| piece | progress | state |
+|---|---|---|
+| device, queues, fences, allocators, lists, resources, DXGI | `████████████████████` | done |
+| root signatures, query heaps, command signatures | `████████████████████` | done |
+| compute pipelines (library + pool) | `████████████████░░░░` | done; 80 BVH-builder programs need on-demand translation |
+| graphics and stream pipelines (0x50, 0x2b0) | `░░░░░░░░░░░░░░░░░░░░` | next: the title asks for 6 |
+| title start-up to its first submission | `██████████░░░░░░░░░░` | loads 7 GiB, then a null lookup at `exe+0xb5a5f8` |
+| ExecuteCommandLists + PresentX | `░░░░░░░░░░░░░░░░░░░░` | todo |
+| a non-black frame, captured | `░░░░░░░░░░░░░░░░░░░░` | todo: closes Build 5 |
+| frame line (fps, ms, draws, …) | `██░░░░░░░░░░░░░░░░░░` | contract agreed with the launcher; todo |
+| Build 0 (c): the title's GPU time | `░░░░░░░░░░░░░░░░░░░░` | needs a frame |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
