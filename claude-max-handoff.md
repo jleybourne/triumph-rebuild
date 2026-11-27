@@ -153,7 +153,14 @@ The owner's rules, in their own words:
   (0x58 bytes, byte +0x18 = 1), slots per docs/research/d3d12x-device.md section 6, every other slot a trap.
 - S7 merged (#21): v0 interface diffs vs the oracle = 1 (translator: void main for PS with no outputs) + the fp16
   component bug, both sent to lane shader-cf (it owns crates/sir for now). Oracle: 4 swapped files fixed in
-  D:ictory-dataebuild-oracle (backup in oracle-swapped-backup); `apps/rebuild/src/bin/oracle.rs` must settle
+  D:ictory-data
+ebuild-oracle (backup in oracle-swapped-backup); `apps/rebuild/src/bin/oracle.rs` must settle
   same-timestamp cache entries like `oraclediff --ties` before it is run again; agents/shader-oracle.csv sizes of
   those 4 rows to swap (agents/shader.md item 3). Build 5 rule from S7 item 5: the runtime mirrors every buffer
   descriptor the title writes as a RAW view too (a translated program may read any slot as ByteAddressBuffer).
+- Merged today after round 3: #21 S7, #22 pipelines (82/82 root signatures, 117 CS + 1,374 graphics PSOs, library
+  load ~5 ms, cold PSO 2.2-7.6 ms each -> create on worker threads + ID3D12PipelineLibrary next), #23 built-in test
+  profiles (9) + launcher picker + matrix writer, #24 BCPack decoder (bit-exact vs fork, 1.7-3.0x faster) + cache.
+  Still running: shader-cf (v1 control flow + 2 translator bugs + sampler sidecar), cmdlist. 360 tests green.
+  Open for the owner: D5b needs real BCPack data (capture during a title run, or a helper reads packages read-only).
+  Launcher redesign mockups (dark/light, 7 screens + top-bar variant): https://claude.ai/artifact/C4JarmJgfw9jAdFdGnJZLY

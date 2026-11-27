@@ -13,13 +13,13 @@ Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives w
 | lane | job | branch | worktree | state |
 |:--|:--|:--|:--|:--|
 | **gdk** | G5: the two interfaces the title asks for at start (from runs/build3-reached.txt) | `agent/gdk-2` | `D:\Developer	riumph-rebuild-gdk` | ✅ merged (#20) |
-| **dstorage** | D5: our BCPack decoder and decode cache (plan decision 8) | `agent/dstorage-bcpack` | `D:\Developer	riumph-rebuild-dstorage` | running |
+| **dstorage** | D5: our BCPack decoder and decode cache (plan decision 8) | `agent/dstorage-bcpack` | `D:\Developer	riumph-rebuild-dstorage` | ✅ merged (#24) |
 | **device-research** | Build 5 input: D3D12.X device slots, inline object layouts, startup call sequence (docs only) | `agent/device-research` | `D:\Developer	riumph-rebuild-device` | ✅ merged (#19) |
-| **shader** | S7: classify the last v0 interface diffs against the oracle (tool fixes only; translator bugs reported) | `agent/shader-s7` | `D:\Developer	riumph-rebuild-shader` | running |
+| **shader** | S7: classify the last v0 interface diffs against the oracle (tool fixes only; translator bugs reported) | `agent/shader-s7` | `D:\Developer	riumph-rebuild-shader` | ✅ merged (#21) |
 | **shader-cf** | v1: structurize reducible control flow in `crates/sir` (handed over by the lead during Build 5) | `agent/shader-cf` | `D:\Developer	riumph-rebuild-cf` | running |
-| **pipelines** | root signatures and the hash-keyed pipeline library (`crates/pipelines`) | `agent/pipelines` | `D:\Developer	riumph-rebuild-pipelines` | running |
+| **pipelines** | root signatures and the hash-keyed pipeline library (`crates/pipelines`) | `agent/pipelines` | `D:\Developer	riumph-rebuild-pipelines` | ✅ merged (#22) |
 | **cmdlist** | Build 5/6: the D3D12.X command list and allocator objects (`crates/xlist`), interface for the lead's device | `agent/cmdlist` | `D:\Developer	riumph-rebuild-cmdlist` | running |
-| **profiles** | built-in test profiles (hardware tiers + stress) in `crates/config` and the launcher; a matrix writer (owner request) | `agent/profiles` | `D:\Developer	riumph-rebuild-profiles` | running |
+| **profiles** | built-in test profiles (hardware tiers + stress) in `crates/config` and the launcher; a matrix writer (owner request) | `agent/profiles` | `D:\Developer	riumph-rebuild-profiles` | ✅ merged (#23) |
 
 
 ### Round 2 (from 2026-11-27 14:15)
