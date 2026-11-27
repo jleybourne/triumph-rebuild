@@ -1,0 +1,15 @@
+[package]
+name = "rebuild-gdk"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+
+[[bin]]
+name = "gdkslots"
+path = "src/bin/gdkslots.rs"
+
+[[bin]]
+name = "gdkguids"
+path = "src/bin/gdkguids.rs"

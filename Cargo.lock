@@ -2115,6 +2115,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rebuild-gdk"
+version = "0.1.0"
+
+[[package]]
 name = "rebuild-input"
 version = "0.1.0"
 dependencies = [
