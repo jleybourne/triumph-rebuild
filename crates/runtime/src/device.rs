@@ -442,7 +442,9 @@ fn vtable() -> &'static [usize; SLOTS] {
         t[0x288 / 8] = crate::frame::GetFrameStatisticsX as *const () as usize;
         t[0x58 / 8] = crate::pipeline::CreateComputePipelineState as *const () as usize;
         t[0x1f0 / 8] = crate::pipeline::CreateComputePipelineStateX as *const () as usize;
-        for off in [0x40, 0x48, 0x58, 0x60, 0x120, 0x180, 0x1f0, 0x248, 0x270, 0x278, 0x280, 0x288] {
+        t[0x50 / 8] = crate::pipeline::CreateGraphicsPipelineState as *const () as usize;
+        t[0x2b0 / 8] = crate::pipeline::CreatePipelineState as *const () as usize;
+        for off in [0x40, 0x48, 0x50, 0x58, 0x60, 0x120, 0x180, 0x1f0, 0x248, 0x270, 0x278, 0x280, 0x288, 0x2b0] {
             WRITTEN[off / 8].store(true, Ordering::Relaxed);
         }
         // resources, heaps, views (crates/d3d12x)
