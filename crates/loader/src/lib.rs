@@ -6,6 +6,7 @@
 //!   panic.
 //! - [`map`]: lay an image out in memory at a chosen base, apply its relocations, and bind its imports
 //!   through a [`map::Resolver`]. Nothing in the image is executed.
+//! - [`strings`]: ASCII and UTF-16 strings in an image, DLL names and API-like names (loader L5).
 //! - [`region`] (Windows): reserve and commit read-write memory at a chosen address to map into.
 //!
 //! Title code is never run here, no thread is made for it and no kernel call is implemented: that is
@@ -14,6 +15,7 @@
 pub mod map;
 pub mod pe;
 pub mod prepare;
+pub mod strings;
 #[cfg(windows)]
 pub mod region;
 

@@ -202,6 +202,9 @@ pub struct Image {
     pub exports: Vec<Export>,
     pub tls: Option<Tls>,
     pub pdata: Vec<RuntimeFunction>,
+    /// RVA of every string the import, delay-load and export tables point at (DLL names, import
+    /// names, export names, forwarders), so a string scan can tell table entries from other strings.
+    pub table_strings: Vec<u32>,
 }
 
 pub const FILE_DLL: u16 = 0x2000;
@@ -354,12 +357,16 @@ impl Image {
             exports: Vec::new(),
             tls: None,
             pdata: Vec::new(),
+            table_strings: Vec::new(),
         };
         let v = View { data, size_of_headers, sections: &img.sections };
         let relocs = parse_relocs(&v, dirs[dir::BASERELOC])?;
-        let imports = parse_imports(&v, dirs[dir::IMPORT])?;
-        let delay_imports = parse_delay_imports(&v, dirs[dir::DELAY_IMPORT], image_base)?;
-        let (export_name, exports) = parse_exports(&v, dirs[dir::EXPORT])?;
+        let mut ts = Vec::new();
+        let imports = parse_imports(&v, dirs[dir::IMPORT], &mut ts)?;
+        let delay_imports = parse_delay_imports(&v, dirs[dir::DELAY_IMPORT], image_base, &mut ts)?;
+        let (export_name, exports) = parse_exports(&v, dirs[dir::EXPORT], &mut ts)?;
+        ts.sort_unstable();
+        ts.dedup();
         let tls = parse_tls(&v, dirs[dir::TLS], image_base)?;
         let pdata = parse_pdata(&v, dirs[dir::EXCEPTION])?;
         img.relocs = relocs;
@@ -369,6 +376,7 @@ impl Image {
         img.exports = exports;
         img.tls = tls;
         img.pdata = pdata;
+        img.table_strings = ts;
         Ok(img)
     }
 
@@ -379,6 +387,22 @@ impl Image {
     /// Reads `len` bytes at `rva` from the file (None if not file-backed).
     pub fn read<'a>(&self, data: &'a [u8], rva: u32, len: usize) -> Option<&'a [u8]> {
         View { data, size_of_headers: self.size_of_headers, sections: &self.sections }.bytes(rva, len)
+    }
+
+    /// File offset of `rva`, if the file backs it.
+    pub fn file_offset(&self, data: &[u8], rva: u32) -> Option<usize> {
+        View { data, size_of_headers: self.size_of_headers, sections: &self.sections }.offset(rva).map(|(o, _)| o)
+    }
+
+    /// The RVA of file offset `off`, if a section or the headers map it.
+    pub fn rva_of_offset(&self, off: usize) -> Option<u32> {
+        if off < self.size_of_headers as usize {
+            return Some(off as u32);
+        }
+        self.sections.iter().find_map(|s| {
+            let within = off.checked_sub(s.file_offset as usize)?;
+            (within < s.mapped_file_size() as usize).then(|| s.rva + within as u32)
+        })
     }
 
     /// Finds an export by name.
@@ -419,7 +443,7 @@ fn parse_relocs(v: &View, d: DataDir) -> Result<Vec<Reloc>, PeError> {
 }
 
 /// Walks one import lookup table. `names` is the ILT (or the IAT if there is none).
-fn parse_thunks(v: &View, names: u32, iat: u32) -> Result<Vec<Import>, PeError> {
+fn parse_thunks(v: &View, names: u32, iat: u32, ts: &mut Vec<u32>) -> Result<Vec<Import>, PeError> {
     let mut out = Vec::new();
     for i in 0..MAX_THUNKS {
         let t = v
@@ -434,6 +458,7 @@ fn parse_thunks(v: &View, names: u32, iat: u32) -> Result<Vec<Import>, PeError> 
             let hn = (t & 0x7fff_ffff) as u32;
             let hint = v.u16(hn).ok_or(PeError::Truncated("import hint"))?;
             let name = v.cstr(hn + 2).ok_or(PeError::Truncated("import name"))?;
+            ts.push(hn + 2);
             Symbol::Name { hint, name }
         };
         out.push(Import { symbol, iat_rva: iat.wrapping_add(i as u32 * 8) });
@@ -441,7 +466,7 @@ fn parse_thunks(v: &View, names: u32, iat: u32) -> Result<Vec<Import>, PeError> 
     Err(PeError::Malformed("import lookup table has no end"))
 }
 
-fn parse_imports(v: &View, d: DataDir) -> Result<Vec<ImportModule>, PeError> {
+fn parse_imports(v: &View, d: DataDir, ts: &mut Vec<u32>) -> Result<Vec<ImportModule>, PeError> {
     let mut out = Vec::new();
     if !d.present() {
         return Ok(out);
@@ -455,13 +480,14 @@ fn parse_imports(v: &View, d: DataDir) -> Result<Vec<ImportModule>, PeError> {
             return Ok(out);
         }
         let dll = v.cstr(name).ok_or(PeError::Truncated("import DLL name"))?;
-        let entries = parse_thunks(v, if ilt != 0 { ilt } else { iat }, iat)?;
+        ts.push(name);
+        let entries = parse_thunks(v, if ilt != 0 { ilt } else { iat }, iat, ts)?;
         out.push(ImportModule { dll, entries });
     }
     Err(PeError::Malformed("import directory has no end"))
 }
 
-fn parse_delay_imports(v: &View, d: DataDir, base: u64) -> Result<Vec<ImportModule>, PeError> {
+fn parse_delay_imports(v: &View, d: DataDir, base: u64, ts: &mut Vec<u32>) -> Result<Vec<ImportModule>, PeError> {
     let mut out = Vec::new();
     if !d.present() {
         return Ok(out);
@@ -477,13 +503,14 @@ fn parse_delay_imports(v: &View, d: DataDir, base: u64) -> Result<Vec<ImportModu
         // Attribute bit 0 clear: the old form, where the fields hold VAs, not RVAs.
         let fix = |x: u32| if attrs & 1 == 0 { (x as u64).wrapping_sub(base) as u32 } else { x };
         let dll = v.cstr(fix(name)).ok_or(PeError::Truncated("delay-load DLL name"))?;
-        let entries = parse_thunks(v, fix(int), fix(iat))?;
+        ts.push(fix(name));
+        let entries = parse_thunks(v, fix(int), fix(iat), ts)?;
         out.push(ImportModule { dll, entries });
     }
     Err(PeError::Malformed("delay-load directory has no end"))
 }
 
-fn parse_exports(v: &View, d: DataDir) -> Result<(Option<String>, Vec<Export>), PeError> {
+fn parse_exports(v: &View, d: DataDir, ts: &mut Vec<u32>) -> Result<(Option<String>, Vec<Export>), PeError> {
     let mut out = Vec::new();
     if !d.present() {
         return Ok((None, out));
@@ -496,11 +523,15 @@ fn parse_exports(v: &View, d: DataDir) -> Result<(Option<String>, Vec<Export>), 
         return Err(PeError::Malformed("export count"));
     }
     let dll_name = if name != 0 { v.cstr(name) } else { None };
+    if dll_name.is_some() {
+        ts.push(name);
+    }
     let mut by_index: Vec<Option<String>> = vec![None; nfuncs as usize];
     for i in 0..nnames {
         let n = v.u32(names.wrapping_add(i * 4)).ok_or(PeError::Truncated("export names"))?;
         let o = v.u16(ords.wrapping_add(i * 2)).ok_or(PeError::Truncated("export ordinals"))? as usize;
         let s = v.cstr(n).ok_or(PeError::Truncated("export name"))?;
+        ts.push(n);
         match by_index.get_mut(o) {
             Some(slot) if slot.is_none() => *slot = Some(s),
             Some(_) => {} // a second name for one function; the first wins
@@ -514,6 +545,9 @@ fn parse_exports(v: &View, d: DataDir) -> Result<(Option<String>, Vec<Export>), 
             continue; // an unused ordinal
         }
         let forwarded = (rva as u64) >= lo && (rva as u64) < hi;
+        if forwarded {
+            ts.push(rva);
+        }
         out.push(Export {
             ordinal: base.wrapping_add(i as u32),
             name,
@@ -639,6 +673,22 @@ mod tests {
         let g = img.export("Gamma").unwrap();
         assert_eq!(g.rva, None);
         assert_eq!(g.forward.as_deref(), Some("kernelx.XMemFree"));
+    }
+
+    #[test]
+    fn table_strings_and_offsets() {
+        let s = synth::dll(synth::BASE);
+        let img = Image::parse(&s.file).unwrap();
+        // 3 import DLL names + 4 import names (one by ordinal has none) ... counted from the builder:
+        // kernelx.dll, xgameruntime.dll, bink2.dll; XMemAlloc, XGameRuntimeInitialize, BinkOpen;
+        // synth.dll; Alpha, Beta, Gamma; the forwarder
+        assert_eq!(img.table_strings.len(), 11);
+        for &rva in &img.table_strings {
+            let off = img.file_offset(&s.file, rva).unwrap();
+            assert_eq!(img.rva_of_offset(off), Some(rva));
+            assert!(s.file[off].is_ascii_alphanumeric());
+        }
+        assert_eq!(img.rva_of_offset(s.file.len() + 1), None);
     }
 
     #[test]
