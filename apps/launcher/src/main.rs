@@ -2115,7 +2115,16 @@ impl App {
                                 ui.painter().circle_filled(c, 26.0, alpha(th::ACCENT, 0.12 + 0.1 * h));
                                 ui.painter().text(c, Align2::CENTER_CENTER, icon::PLUS, th::icon(24.0), th::ACCENT);
                                 ui.painter().text(c + Vec2::new(0.0, 46.0), Align2::CENTER_CENTER, "Add a game", th::semibold(15.0), th::TEXT);
-                                ui.painter().text(c + Vec2::new(0.0, 68.0), Align2::CENTER_CENTER, "Pick its folder; the launcher checks what it is", th::regular(12.5), th::TEXT_2);
+                                // wraps and centres inside the dashed outline at any tile width (U6)
+                                let mut job = egui::text::LayoutJob::simple(
+                                    "Pick its folder; the launcher checks what it is".to_owned(),
+                                    th::regular(12.5),
+                                    th::TEXT_2,
+                                    (b.width() - 2.0 * th::S3).max(60.0),
+                                );
+                                job.halign = egui::Align::Center;
+                                let galley = ui.painter().layout_job(job);
+                                ui.painter().galley(Pos2::new(c.x, c.y + 60.0), galley, th::TEXT_2);
                                 w::focus_ring(ui, &resp, r, th::R_MD);
                                 resp
                             });
