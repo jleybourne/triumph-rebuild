@@ -96,6 +96,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "opus-pure"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da6dcc20af557d030b6f206e75c764bcda8c28a5bd03c73935c7e8fcf5f4f4a"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -124,6 +130,14 @@ dependencies = [
  "rebuild-uma",
  "rebuild-upscale",
  "rebuild-xlist",
+ "windows",
+]
+
+[[package]]
+name = "rebuild-audio"
+version = "0.1.0"
+dependencies = [
+ "opus-pure",
  "windows",
 ]
 
