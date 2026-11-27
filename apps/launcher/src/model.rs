@@ -157,6 +157,18 @@ impl Model {
         }
     }
 
+    /// Apply a built-in test profile: its keys are set (and become explicit), `profile` is its name, and
+    /// every other setting is left as it was. All or nothing; the refusal is returned.
+    pub fn apply_builtin(&mut self, b: &rebuild_config::Builtin) -> Result<(), String> {
+        b.apply(&mut self.config)?;
+        for (k, _) in b.settings {
+            if let Some(s) = rebuild_config::find(k) {
+                self.explicit.insert(s.key);
+            }
+        }
+        Ok(())
+    }
+
     pub fn reset(&mut self, s: &Setting) {
         self.config.reset(s.key);
         self.explicit.remove(s.key);
@@ -255,6 +267,34 @@ mod tests {
         assert!(why.contains("black screen"));
         m.apply(fsr, Edit::Slide(2)).unwrap();
         assert!(m.refusal.is_none());
+    }
+
+    /// Applying a built-in through the launcher, then saving, keeps the user's unrelated explicit settings.
+    #[test]
+    fn applying_a_builtin_then_saving_keeps_unrelated_settings() {
+        let dir = crate::temp_dir("builtin-apply");
+        let path = dir.join("rebuild.toml");
+        std::fs::write(&path, "profile = \"mine\"\n[settings]\n\"display.vsync\" = true\n\"memory.upload_workers\" = 4\n\"future.switch\" = 1\n").unwrap();
+        let mut st = crate::store::Store::load(&path).unwrap();
+        let b = rebuild_config::builtin("low-pc").unwrap();
+        st.model.apply_builtin(b).unwrap();
+        // the user then edits one setting outside the profile
+        st.model.apply(rebuild_config::find("display.frame_cap").unwrap(), Edit::Slide(60)).unwrap();
+        st.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let back = Config::parse(&text).unwrap();
+        assert!(back.bool("display.vsync"));
+        assert!(text.contains("\"memory.upload_workers\" = 4"), "an explicit default is kept:\n{text}");
+        assert!(text.contains("future.switch"), "an unknown key is kept");
+        assert_eq!(back.int("display.frame_cap"), 60);
+        assert!(b.matches(&back));
+        assert_eq!(rebuild_config::profiles::Active::of(&back), rebuild_config::profiles::Active::Builtin(b));
+        // a stable-only file refuses a built-in that uses an experimental limit, and is unchanged
+        let mut m = Model::new(Config::parse("stable_only = true").unwrap());
+        assert!(m.apply_builtin(rebuild_config::builtin("series-x").unwrap()).is_err());
+        assert_eq!(m.config.explicit().count(), 0);
+        assert!(m.explicit.is_empty());
+        assert!(m.apply_builtin(rebuild_config::builtin("stress-cores").unwrap()).is_ok());
     }
 
     #[test]

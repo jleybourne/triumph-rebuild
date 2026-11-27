@@ -76,9 +76,13 @@ impl Home {
         v
     }
 
-    /// Save the settings under a profile name (the file's `profile` field is set to it).
+    /// Save the settings under a profile name (the file's `profile` field is set to it). A built-in's
+    /// name is refused: built-ins are read-only, so an edited one is saved as a copy under a new name.
     pub fn save_profile(&self, name: &str, config: &Config) -> Result<PathBuf, String> {
         let name = profile_name(name)?;
+        if let Some(b) = rebuild_config::builtin(name) {
+            return Err(format!("\"{}\" is a built-in profile and can't be overwritten: save it under another name (e.g. \"{} copy\")", b.name, b.name));
+        }
         let mut c = config.clone();
         c.profile = name.to_string();
         let path = self.profiles_dir().join(format!("{name}.toml"));
@@ -89,6 +93,37 @@ impl Home {
     pub fn load_profile(&self, name: &str) -> Result<Config, String> {
         load_file(&self.profiles_dir().join(format!("{}.toml", profile_name(name)?)))
     }
+}
+
+/// The test matrix: one `rebuild.toml` per chosen built-in in `dir` (`<name>.toml`; all of them when
+/// `names` is empty), each the user's settings in `base` with that profile applied, and its own
+/// frame-line log beside it (`<name>.frame-line.log`) so runs in turn don't overwrite each other. Nothing
+/// is run. Every file is checked by `Config::parse` (0 problems) before any is written.
+pub fn write_matrix(dir: &Path, base: &Config, names: &[&str]) -> Result<Vec<PathBuf>, String> {
+    let chosen: Vec<&rebuild_config::Builtin> = if names.is_empty() {
+        rebuild_config::BUILTIN_PROFILES.iter().collect()
+    } else {
+        names
+            .iter()
+            .map(|n| rebuild_config::builtin(n).ok_or_else(|| format!("\"{n}\": no such built-in profile")))
+            .collect::<Result<_, _>>()?
+    };
+    let mut files = Vec::new();
+    for b in chosen {
+        let mut c = rebuild_config::profiles::matrix_config(base, b)?;
+        let log = dir.join(format!("{}.frame-line.log", b.name));
+        c.set("diagnostics.frame_log_path", rebuild_config::Value::Path(log.display().to_string()))?;
+        let text = c.to_toml();
+        let back = Config::parse(&text)?;
+        if !back.problems.is_empty() {
+            return Err(format!("{}: {}", b.name, back.problems.join("; ")));
+        }
+        files.push((dir.join(format!("{}.toml", b.name)), text));
+    }
+    for (path, text) in &files {
+        crate::write_atomic(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(files.into_iter().map(|(p, _)| p).collect())
 }
 
 /// A profile name is a file name: letters, digits, `-`, `_`, space.
@@ -134,6 +169,47 @@ mod tests {
         export(&back, &out).unwrap();
         assert_eq!(load_file(&out).unwrap(), back);
         assert!(home.save_profile("../escape", &c).is_err());
+    }
+
+    #[test]
+    fn builtins_cannot_be_overwritten() {
+        let home = Home { dir: crate::temp_dir("builtin") };
+        let c = Config::parse("").unwrap();
+        for b in rebuild_config::BUILTIN_PROFILES {
+            assert!(home.save_profile(b.name, &c).unwrap_err().contains("built-in"), "{}", b.name);
+            assert!(home.save_profile(&b.name.to_uppercase(), &c).is_err(), "{}: any case", b.name);
+        }
+        assert!(home.profiles().is_empty(), "nothing written");
+        // an edited built-in is saved as a copy, and the built-in is still itself
+        let mut edited = c.clone();
+        rebuild_config::builtin("series-s").unwrap().apply(&mut edited).unwrap();
+        edited.set("display.width", Value::Int(1920)).unwrap();
+        home.save_profile("series-s copy", &edited).unwrap();
+        assert_eq!(home.profiles(), vec!["series-s copy".to_string()]);
+        assert_eq!(rebuild_config::builtin("series-s").unwrap().value("display.width"), Some(Value::Int(2560)));
+    }
+
+    #[test]
+    fn the_matrix_writes_one_parsing_file_per_builtin() {
+        let home = Home { dir: crate::temp_dir("matrix") };
+        let mut base = Config::parse("").unwrap();
+        base.set("game.dir", Value::Path(r"D:\games\title".into())).unwrap();
+        base.set("display.vsync", Value::Bool(true)).unwrap();
+        let dir = home.dir.join("matrix");
+        let all = write_matrix(&dir, &base, &[]).unwrap();
+        assert_eq!(all.len(), rebuild_config::BUILTIN_PROFILES.len());
+        for (p, b) in all.iter().zip(rebuild_config::BUILTIN_PROFILES) {
+            let c = Config::parse(&std::fs::read_to_string(p).unwrap()).unwrap();
+            assert!(c.problems.is_empty(), "{}: {:#?}", p.display(), c.problems);
+            assert!(b.matches(&c) && c.profile == b.name, "{}", b.name);
+            assert!(c.bool("display.vsync"), "the user's other settings are kept");
+            assert_eq!(c.get("game.dir"), Value::Path(r"D:\games\title".into()));
+            assert!(c.get("diagnostics.frame_log_path").to_string().ends_with(&format!("{}.frame-line.log", b.name)));
+        }
+        let some = write_matrix(&home.dir.join("two"), &base, &["series-x", "stress-cpu"]).unwrap();
+        assert_eq!(some.len(), 2);
+        assert!(write_matrix(&home.dir.join("bad"), &base, &["series-x", "no-such"]).is_err());
+        assert!(!home.dir.join("bad").exists(), "nothing written for an unknown name");
     }
 
     #[test]

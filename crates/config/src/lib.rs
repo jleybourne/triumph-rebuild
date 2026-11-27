@@ -8,6 +8,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+pub mod profiles;
+pub use profiles::{builtin, Builtin, BUILTIN_PROFILES};
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Bool(bool),

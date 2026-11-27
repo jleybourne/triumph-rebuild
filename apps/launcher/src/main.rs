@@ -6,6 +6,9 @@
 //! `rebuild-launcher --check` prints the system check for the selected game without opening a window.
 //! `rebuild-launcher --shots <dir> [--size WxH]` renders every page from a fixture (placeholder names,
 //! demo data) to PNGs in `<dir>`, then exits.
+//! `rebuild-launcher --matrix <dir> [--profiles a,b,...]` writes one `rebuild.toml` per built-in test
+//! profile (all of them, or the named ones) into `<dir>`, from the selected game's settings, and exits.
+//! Nothing is run: the files are for running the same build under each profile in turn.
 //! `REBUILD_MEASURE_LOCK=<file>`: while that file exists, the check creates no D3D12 device.
 
 #![cfg_attr(not(test), windows_subsystem = "windows")]
@@ -14,7 +17,8 @@ mod ui;
 
 use eframe::egui::{self, Align, Align2, Color32, CornerRadius, Id, Key, Layout, Pos2, Rect, Sense, StrokeKind, Vec2};
 use ui::icons as icon;
-use rebuild_config::{Config, Setting};
+use rebuild_config::profiles::{self, Active};
+use rebuild_config::{Config, Setting, BUILTIN_PROFILES};
 use rebuild_launcher::{
     gamemeta,
     home::{self, Home},
@@ -42,6 +46,10 @@ fn main() {
         std::process::exit(print_check());
     }
     let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
+    if let Some(dir) = arg("--matrix") {
+        attach_console();
+        std::process::exit(print_matrix(&PathBuf::from(dir), arg("--profiles").as_deref().unwrap_or("")));
+    }
     let shots = arg("--shots").map(PathBuf::from);
     let size = arg("--size")
         .and_then(|s| s.split_once('x').and_then(|(a, b)| Some([a.parse::<f32>().ok()?, b.parse::<f32>().ok()?])))
@@ -100,6 +108,36 @@ fn print_check() -> i32 {
     }
     println!("{} checks, {} failed", checks.len(), fails);
     if fails == 0 { 0 } else { 1 }
+}
+
+/// `--matrix <dir>`: the test matrix from the selected game's settings (`home::write_matrix`).
+fn print_matrix(dir: &std::path::Path, names: &str) -> i32 {
+    let root = Home::locate().dir;
+    let lib = Library::load(&root).unwrap_or(Library { root: root.clone(), games: Vec::new(), selected: None });
+    let home = lib.selected.as_deref().map(|id| lib.home(id)).unwrap_or(Home { dir: root });
+    let base = match Store::load(&home.rebuild_toml()) {
+        Ok(s) => s.model.config,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let names: Vec<&str> = names.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+    match home::write_matrix(dir, &base, &names) {
+        Ok(files) => {
+            for f in &files {
+                let name = f.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                let summary = rebuild_config::builtin(name).map(|b| b.summary()).unwrap_or_default();
+                println!("{}  {summary}", f.display());
+            }
+            println!("{} test configurations written (from {})", files.len(), home.rebuild_toml().display());
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
 }
 
 /// `--check` prints to the console it was started from (the app is a windows-subsystem binary).
@@ -1335,10 +1373,19 @@ impl App {
                     c.choice("display.window"),
                     c.choice("upscaler.backend").to_uppercase(),
                     c.choice("upscaler.mode").replace('_', " "),
-                    if c.profile.is_empty() { "default" } else { &c.profile }
+                    Active::of(c).describe()
                 )
             };
             ui.label(egui::RichText::new(sub).font(th::regular(14.5)).color(th::TEXT_2));
+            if !first_run {
+                let limits = profiles::limits_in_force(c);
+                let (text, col) = if limits.is_empty() {
+                    ("No hardware limits: the whole machine".to_string(), th::TEXT_3)
+                } else {
+                    (format!("{}  Limits in force: {}", icon::GAUGE, limits.join("  ·  ")), th::WARNING)
+                };
+                ui.label(egui::RichText::new(text).font(th::small()).color(col));
+            }
             ui.add_space(th::S3);
             ui.horizontal(|ui| {
                 let running = self.running.is_some();
@@ -1718,6 +1765,26 @@ impl App {
         }
     }
 
+    /// Apply a built-in test profile: its keys only; every other setting is kept. "Save as" is offered
+    /// a copy's name, since a built-in can't be saved over.
+    fn apply_builtin(&mut self, b: &'static rebuild_config::Builtin) {
+        match self.store.model.apply_builtin(b) {
+            Ok(()) => {
+                self.profile_name = format!("{} copy", b.name);
+                self.toast(Tone::Info, format!("{} applied ({} settings; the rest kept). Save to make it active.", b.label, b.settings.len()));
+            }
+            Err(e) => self.toast(Tone::Bad, format!("{e}. Turn off Stable only to use it.")),
+        }
+    }
+
+    /// The test matrix: one rebuild.toml per built-in, from the settings as they are now.
+    fn write_matrix(&mut self, dir: &std::path::Path) {
+        match home::write_matrix(dir, &self.store.model.config, &[]) {
+            Ok(files) => self.toast(Tone::Good, format!("{} test configurations written to {}", files.len(), dir.display())),
+            Err(e) => self.toast(Tone::Bad, e),
+        }
+    }
+
     fn profiles_page(&mut self, ui: &mut egui::Ui) {
         let art = self.art.clone();
         page_header(ui, Tab::Profiles);
@@ -1725,6 +1792,8 @@ impl App {
         let mut save_as = false;
         let mut export = false;
         let mut import = false;
+        let mut apply: Option<&'static rebuild_config::Builtin> = None;
+        let mut matrix = false;
         w::card(ui, &art, 0, Some((icon::FLOPPY_DISK, "Save these settings as a profile")), |ui| {
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.profile_name).hint_text("profile name").desired_width(280.0).margin(egui::Margin::symmetric(10, 8)));
@@ -1762,8 +1831,50 @@ impl App {
                 });
             });
         });
+        let active = Active::of(&self.store.model.config);
+        w::card(ui, &art, 1, Some((icon::FLASK, "Built-in test profiles")), |ui| {
+            w::muted(ui, "Read-only sets of output, upscaler and hardware limits, for testing the same build as different machines. Applying one sets only those; everything else you set is kept. Edit it, then save it as a copy.");
+            for (i, b) in BUILTIN_PROFILES.iter().enumerate() {
+                ui.add_space(th::S1);
+                if i > 0 {
+                    let r = ui.available_rect_before_wrap();
+                    ui.painter().hline(r.x_range(), r.top(), th::stroke(1.0, th::HAIRLINE));
+                    ui.add_space(th::S1);
+                }
+                let (is_active, edited) = match &active {
+                    Active::Builtin(a) => (a.name == b.name, false),
+                    Active::Edited(a) => (a.name == b.name, a.name == b.name),
+                    Active::User(_) => (false, false),
+                };
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(b.label).font(th::semibold(14.5)).color(th::TEXT));
+                    w::pill(ui, "built-in", th::ACCENT, false);
+                    if !b.stable() {
+                        w::pill(ui, "experimental", th::WARNING, false).on_hover_text(format!("Sets {}: refused while Stable only is on", b.experimental_keys().join(", ")));
+                    }
+                    if is_active {
+                        w::pill(ui, if edited { "active, edited" } else { "active" }, th::SUCCESS, false);
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let label = if edited { "Re-apply" } else { "Apply" };
+                        if w::button(ui, icon::CHECK, label, !is_active || edited).clicked() {
+                            apply = Some(b);
+                        }
+                    });
+                });
+                w::muted(ui, b.purpose);
+                ui.label(egui::RichText::new(b.summary()).font(th::mono(11.5)).color(th::TEXT_3));
+            }
+            ui.add_space(th::S2);
+            ui.horizontal(|ui| {
+                if w::button(ui, icon::STACK, "Write test matrix…", true).clicked() {
+                    matrix = true;
+                }
+                w::muted(ui, "One rebuild.toml per built-in, from these settings, into a folder you pick. Nothing is run.");
+            });
+        });
         if self.profiles.is_empty() {
-            w::card(ui, &art, 1, None, |ui| {
+            w::card(ui, &art, 2, None, |ui| {
                 empty_state(ui, icon::USER_CIRCLE, "No profiles yet", "Save the settings above under a name, and switch between them here or on Play.");
             });
         } else {
@@ -1773,7 +1884,7 @@ impl App {
                 ui.columns(per_row, |cols| {
                     for (k, p) in chunk.iter().enumerate() {
                         let ui = &mut cols[k];
-                        w::card(ui, &art, 1 + row * per_row + k, None, |ui| {
+                        w::card(ui, &art, 2 + row * per_row + k, None, |ui| {
                             ui.horizontal(|ui| {
                                 ui.label(egui::RichText::new(icon::USER_CIRCLE).font(th::icon(22.0)).color(th::ACCENT));
                                 ui.label(egui::RichText::new(p).font(th::semibold(15.0)).color(th::TEXT));
@@ -1805,6 +1916,14 @@ impl App {
         }
         if let Some(p) = load {
             self.load_profile(&p);
+        }
+        if let Some(b) = apply {
+            self.apply_builtin(b);
+        }
+        if matrix {
+            if let Some(dir) = rfd::FileDialog::new().set_title("Folder for the test matrix").pick_folder() {
+                self.write_matrix(&dir);
+            }
         }
         if export {
             if let Some(p) = rfd::FileDialog::new().add_filter("toml", &["toml"]).set_file_name("rebuild.toml").save_file() {
@@ -2408,6 +2527,28 @@ mod smoke {
         app.switch_game(&ctx, &idb);
         assert_eq!(app.store.model.config.int("display.width"), 3840);
         run.every_page(&mut app);
+
+        // a built-in test profile on B: its keys set, B's other settings kept, shown as active; the
+        // matrix writes a file per built-in; B is saved and reloaded as the built-in
+        let vsync = rebuild_config::find("display.vsync").unwrap();
+        app.store.model.apply(vsync, Edit::Toggle(true)).unwrap();
+        let low = rebuild_config::builtin("low-pc").unwrap();
+        app.apply_builtin(low);
+        assert_eq!(app.store.model.config.int("display.width"), 1920);
+        assert!(app.store.model.config.bool("display.vsync"));
+        assert_eq!(Active::of(&app.store.model.config), Active::Builtin(low));
+        assert_eq!(app.profile_name, "low-pc copy");
+        app.set_tab(&ctx, Tab::Profiles);
+        run.frames(&mut app, 3);
+        app.set_tab(&ctx, Tab::Play);
+        run.frames(&mut app, 3);
+        app.write_matrix(&root.join("matrix"));
+        assert_eq!(std::fs::read_dir(root.join("matrix")).unwrap().count(), BUILTIN_PROFILES.len());
+        assert!(app.save());
+        app.switch_game(&ctx, &ida);
+        app.switch_game(&ctx, &idb);
+        assert_eq!(Active::of(&app.store.model.config), Active::Builtin(low));
+        assert!(app.store.model.config.bool("display.vsync"));
 
         // remove B (keeping its data), which was selected: A becomes selected
         assert!(app.confirm_remove(&ctx, &idb, "Placeholder B", false));
