@@ -315,9 +315,10 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, second lead session: helper PRs #1-#13 merged and bound; translation started (1,360 / 1,798 v0 PS compile); game folder frozen for helpers
-progress  47 % (progress.md) · shaders 0 / 25,694 counted (all decode byte-exact; they count once translations match the oracle)
-tests     250 green (4 ignored), 0 warnings: cargo test --release
+updated   2026-11-27 (late), second lead session: Build 3 closed (the title reaches D3D12XboxCreateDevice in 1.4 s);
+          v0 shaders 2,834 / 2,881 compile; round 3 of the lanes running
+progress  51 % (progress.md) · shaders 0 / 25,694 counted (they count once the execution check matches the oracle)
+tests     317 green (6 ignored), 0 warnings: cargo test --release --no-fail-fast
 ```
 
 | build | state | where | proof |
@@ -327,14 +328,14 @@ tests     250 green (4 ignored), 0 warnings: cargo test --release
 | 0 (c) title GPU time | ⏸️ needs a frame (Build 5) | — | — |
 | 1 tiles at console addresses | ✅ | `crates/uma/src/{lib,tiles,arena}.rs`, `gputest --tiled/--arena/--scale` | [runs/build1-tiles.md](runs/build1-tiles.md) |
 | 2 upload ring + labels | ✅ | `crates/uma/src/{ring,labels}.rs`, `gputest --ring/--labels` | [ring](runs/build2-ring.md) · [labels](runs/build2-labels.md) |
-| 3 loader + runtime | 🔄 the title's code runs (16/16 DLL entries, exe entry 60 s); files, audio, DirectStorage, xg bound; drives G:/T:/S:; stack sampler built; GDK (lane `gdk`) and the wait ⏳ | `crates/loader`, `crates/runtime`, `runtitle` | [startup](runs/build3-startup.md) |
-| 4 shaders | 🔄 front end closed (decoder, oracle); lifter: ALU, PS IO, resources; 1,360 / 1,798 v0 PS compile; VS, CS, control flow, oracle check ⏳ | `crates/sir/src/lift*`, `translate`, [design](docs/design/shader-ir.md) | [ps](runs/build4-ps.md) · [lift](runs/build4-lift.md) · [coverage](runs/build4-coverage.md) |
-| 5 device, lists, present | ⏳ (translator core done in `crates/xlist`) | — | — |
+| 3 loader + runtime | ✅ the title reaches `D3D12XboxCreateDevice` in 1.4 s: GDK runtime ours, TLS slot 0 the title's (`runtime/src/tls.rs`), graphics placement no longer spins in the kernel; runs guarded (job, budget, watchdog, crash reporter) | `crates/loader`, `crates/runtime`, `runtitle` | [reached](runs/build3-reached.md) · [startup](runs/build3-startup.md) |
+| 4 shaders | 🔄 v0 set 2,834 / 2,881 compile (PS 1,791, VS 926, CS 117); interface vs the oracle: ≤ 42 diffs (lane S7 classifying); execution check, control flow, wave64 ⏳ | `crates/sir/src/lift*`, `translate ps/vs/cs`, [design](docs/design/shader-ir.md) | [ps](runs/build4-ps.md) · [vs](runs/build4-vs.md) · [cs](runs/build4-cs.md) · [oracle](runs/build4-oraclediff.md) |
+| 5 device, lists, present | ⏳ next: lane device-research maps the D3D12.X device; descriptor shadow table (plan decision 9) to write | `crates/runtime/src/exports.rs` (`on_create_device`) | — |
 | 6 list translation | 🔄 core built | `crates/xlist` | Build 0 (b) |
 | 7 upscaler | ⏳ (plan decision 5 corrected) | — | — |
 | 8 pacing · 9 AMD testers | ⏳ | — | — |
-| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | merged: all of round 1 (#1-#13). **Round 2 (section 5): new lane `gdk` (G1-G4), `audio` A5, `files` F4-F5, `shader` S6, `launcher` U6** | their pull requests |
-| launcher track | 🔄 C1 registry (settings never replaced); L1-L4 launcher merged (PR #13); C2 and L5 ⏳ | `crates/config`, `apps/launcher`, [design](docs/design/launcher.md) | config 7 tests, launcher 34 |
+| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | merged: rounds 1 and 2 (#1-#18). **Round 3 running: `gdk` G5, `dstorage` D5, `device-research`, `shader` S7** | their pull requests |
+| launcher track | 🔄 C1 registry; L1-L4 + U6 merged; hardware limits for testing (RAM, VRAM, CPU cores, CPU usage) in the launcher and applied before the title; C2 and L5 ⏳ | `crates/config`, `apps/launcher`, `crates/runtime/src/limits.rs` | config, launcher tests |
 
 ## 9. Taking over as lead
 

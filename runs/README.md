@@ -5,10 +5,14 @@ with the raw output beside it. Machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB, PC
 
 | | run | answer | raw |
 |:--:|:--|:--|:--|
-| 🔄 | [Build 4 — pixel shaders translated with IO and resources](build4-ps.md) | 1,360 / 1,798 v0 pixel shaders translate and compile with DXC (`ps_6_6`, `-O3`); not yet checked against the oracle | [translate ps](build4-ps.txt) |
+| ✅ | [Build 3 — closed: the title reaches its first render call](build3-reached.md) | entry point → `D3D12XboxCreateDevice` in 1.4 s; TLS slot 0 given to the title; exit 0, machine unaffected | [runtitle --run](build3-reached.txt) |
+| 🔄 | [Build 4 — our v0 DXIL against the oracle](build4-oraclediff.md) | interface diffs SigIn 1,231 → 35, SigOut 801 → 3, Bindings 525 → 4 of 2,834; self-check 0, every mutation caught | — |
+| 🔄 | [Build 4 — compute programs](build4-cs.md) | 117 / 132 v0 compute programs translate and compile (`cs_6_6`) | [translate cs](build4-cs.txt) |
+| 🔄 | [Build 4 — vertex shaders](build4-vs.md) | 926 / 951 v0 vertex shaders translate and compile (`vs_6_6`) | [translate vs](build4-vs.txt) |
+| 🔄 | [Build 4 — pixel shaders translated with IO and resources](build4-ps.md) | 1,791 / 1,798 v0 pixel shaders translate and compile with DXC (`ps_6_6`, `-O3`) | [translate ps](build4-ps.txt) |
 | ✅ | [Build 4 — the lifter, scalar and vector ALU](build4-lift.md) | ~150 ALU forms; the v0 set has no ALU opcode left untranslated | [translate lift](build4-lift.txt) |
 | ✅ | [Build 4 — opcode coverage of the v0 set](build4-coverage.md) | 2,881 programs, 173 opcodes; 119 cover 95.6 %, 143 cover 99.6 % | [translate coverage](build4-coverage.txt) |
-| ✅ | [Build 3 — the title's own code runs](build3-startup.md) | 16/16 DLL entry points ok; exe TLS callbacks and entry run 60 s without a crash; waits before its first render call | [runtitle --run](build3-startup.txt) |
+| ✅ | [Build 3 — the title's own code runs](build3-startup.md) | 16/16 DLL entry points ok; exe TLS callbacks and entry run 60 s without a crash; waited (later found: graphics placement spinning in the kernel, fixed) | [runtitle --run](build3-startup.txt) |
 | ✅ | [Build 3 — the title mapped and bound](build3-maptitle.md) | 17 images, 8,257 relocations; 1,876 of 1,924 imports bound (97.5 %) | [maptitle](build3-maptitle.txt) |
 | ✅ | [Build 3 — what the title's imports bind to](build3-runtime-census.md) | 624 of 697 imports (89.5 %) bind straight to the host; 34 overrides; 39 console-only in 7 DLLs | [runtimecensus](build3-runtime-census.txt) |
 | ✅ | [Build 4 — the shader core on the card](build4-sirtest.md) | IR → HLSL → DXC → GPU: 300 runs exact on every lane; per-lane `WaveReadLaneAt` exact | [sirtest](build4-sirtest.txt) |
