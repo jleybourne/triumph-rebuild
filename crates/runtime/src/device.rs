@@ -447,7 +447,9 @@ fn vtable() -> &'static [usize; SLOTS] {
         t[0x288 / 8] = crate::frame::GetFrameStatisticsX as *const () as usize;
         t[0x58 / 8] = crate::pipeline::CreateComputePipelineState as *const () as usize;
         t[0x1f0 / 8] = crate::pipeline::CreateComputePipelineStateX as *const () as usize;
-        for off in [0x40, 0x48, 0x58, 0x60, 0x120, 0x180, 0x1f0, 0x248, 0x270, 0x278, 0x280, 0x288] {
+        t[0x50 / 8] = crate::pipeline::CreateGraphicsPipelineState as *const () as usize;
+        t[0x2b0 / 8] = crate::pipeline::CreatePipelineState as *const () as usize;
+        for off in [0x40, 0x48, 0x50, 0x58, 0x60, 0x120, 0x180, 0x1f0, 0x248, 0x270, 0x278, 0x280, 0x288, 0x2b0] {
             WRITTEN[off / 8].store(true, Ordering::Relaxed);
         }
         // resources, heaps, views (crates/d3d12x)
@@ -572,6 +574,11 @@ mod tests {
 
     #[test]
     fn the_object_calls_through_its_table_and_untouched_slots_trap() {
+        // a device on the card: never while the lead is running or timing the title
+        if std::path::Path::new(r"D:\Developer\triumph-rebuild\agents\MEASURING").exists() {
+            eprintln!("skipped: agents\\MEASURING is present");
+            return;
+        }
         let mut out: *mut c_void = std::ptr::null_mut();
         // ID3D12Device11
         let iid: [u8; 16] = [0x44, 0xc3, 0x05, 0x54, 0x57, 0xd4, 0x4e, 0x44, 0xb4, 0xdd, 0x23, 0x66, 0xe4, 0x5a, 0xee, 0x39];

@@ -12,8 +12,11 @@
 //! is too slow. The first fault at a site patches a detour instead: the 3 bytes become `jmp short` to the last 5
 //! bytes of a run of `int3` padding nearby (a run of at least 6 that ends at a 16-byte function boundary, so a
 //! real `int3` at its start stays), which jump to a stub that zeroes the line with flags and registers kept, then
-//! returns to the next instruction. Nothing is relocated (`rAX` is implicit). With no padding in reach the
-//! handler emulates that site.
+//! returns to the next instruction. Nothing is relocated (`rAX` is implicit). With no padding in reach (the
+//! title's unrolled clear routines), the site and the one instruction after it become a `jmp rel32` to a stub
+//! that also runs a copy of that instruction; only register-only forms with no branch or RIP-relative operand
+//! are moved (`add r64, imm8`, `cmp`/`test`/`mov` and the like between registers). Anything else: the handler
+//! emulates that site.
 //!
 //! Anything else stays an illegal instruction.
 
@@ -149,15 +152,42 @@ pub fn find_cave(window: &[u8], window_at: usize, from: usize) -> Option<usize> 
     None
 }
 
+/// The length of the instruction at `code` if it may be moved into a stub as is: register-only, no branch, no
+/// memory operand (so nothing RIP-relative). `REX 83 /r ib` (add, or, adc, sbb, and, sub, xor, cmp with an imm8)
+/// and `REX op /r` for add, or, and, sub, xor, cmp, test, mov between registers.
+pub fn movable_len(code: &[u8]) -> Option<usize> {
+    let rex = *code.first()?;
+    if !(0x40..=0x4f).contains(&rex) {
+        return None;
+    }
+    let op = *code.get(1)?;
+    let modrm = *code.get(2)?;
+    if modrm >> 6 != 3 {
+        return None;
+    }
+    match op {
+        0x83 => Some(4),
+        0x01 | 0x03 | 0x09 | 0x0b | 0x21 | 0x23 | 0x29 | 0x2b | 0x31 | 0x33 | 0x39 | 0x3b | 0x85 | 0x89 | 0x8b => Some(3),
+        _ => None,
+    }
+}
+
 /// The stub at `at`: zero the 64-byte line at rax, flags and registers kept, then `jmp back`.
 pub fn clzero_stub(at: usize, back: usize) -> Vec<u8> {
+    clzero_stub_with(at, &[], back)
+}
+
+/// As [`clzero_stub`], running `moved` (instructions taken from after the site) before jumping back.
+pub fn clzero_stub_with(at: usize, moved: &[u8], back: usize) -> Vec<u8> {
     // pushfq; push rdx; mov rdx, rax; and rdx, -64
     let mut b = vec![0x9c, 0x52, 0x48, 0x89, 0xc2, 0x48, 0x83, 0xe2, 0xc0];
     b.extend([0x48, 0xc7, 0x02, 0, 0, 0, 0]); // mov qword [rdx], 0
     for d in (8..64).step_by(8) {
         b.extend([0x48, 0xc7, 0x42, d as u8, 0, 0, 0, 0]); // mov qword [rdx+d], 0
     }
-    b.extend([0x5a, 0x9d, 0xe9]); // pop rdx; popfq; jmp rel32
+    b.extend([0x5a, 0x9d]); // pop rdx; popfq
+    b.extend_from_slice(moved);
+    b.push(0xe9); // jmp rel32
     let rel = back as i64 - (at + b.len() + 4) as i64;
     b.extend((rel as i32).to_le_bytes());
     b
@@ -234,7 +264,24 @@ pub unsafe fn patch_clzero(site: usize) -> Option<()> {
     let from = site + 2;
     let window_at = site.saturating_sub(126);
     let window = unsafe { std::slice::from_raw_parts(window_at as *const u8, site - window_at + 140) };
-    let cave = find_cave(window, window_at, from)?;
+    let Some(cave) = find_cave(window, window_at, from) else {
+        // no padding in reach: move the next instruction into the stub, jump there directly
+        let after = unsafe { std::slice::from_raw_parts((site + 3) as *const u8, 15) };
+        let n = movable_len(after)?;
+        let moved = after[..n].to_vec();
+        let stub = unsafe { stub_space(&mut pages, site, 128) }?;
+        let code = clzero_stub_with(stub, &moved, site + 3 + n);
+        unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), stub as *mut u8, code.len()) };
+        let _ = unsafe { FlushInstructionCache(GetCurrentProcess(), Some(stub as *const c_void), code.len()) };
+        let mut patch = vec![0xe9];
+        patch.extend(((stub as i64 - (site + 5) as i64) as i32).to_le_bytes());
+        patch.resize(3 + n, 0x90); // never run: the jump leaves first
+        if !unsafe { write_code(site, &patch) } {
+            return None;
+        }
+        CLZERO_PATCHED.fetch_add(1, Ordering::Relaxed);
+        return Some(());
+    };
     let stub = unsafe { stub_space(&mut pages, cave, 128) }?;
     let code = clzero_stub(stub, site + 3);
     unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), stub as *mut u8, code.len()) };
@@ -301,6 +348,42 @@ mod tests {
         unsafe {
             let _ = VirtualFree(page as *mut c_void, 0, MEM_RELEASE);
         }
+    }
+
+    #[test]
+    fn with_no_padding_in_reach_the_next_instruction_moves_into_the_stub() {
+        use windows::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READWRITE};
+        // mov rax, rcx; clzero; add rax, 40h; mov [rdx], rax; ret -- in a page of NOPs (no int3 anywhere)
+        let page = unsafe { VirtualAlloc(None, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) } as usize;
+        let f = page + 0x400;
+        unsafe {
+            std::ptr::write_bytes(page as *mut u8, 0x90, 0x1000);
+            let code = [0x48u8, 0x89, 0xc8, 0x0f, 0x01, 0xfc, 0x48, 0x83, 0xc0, 0x40, 0x48, 0x89, 0x02, 0xc3];
+            std::ptr::copy_nonoverlapping(code.as_ptr(), f as *mut u8, code.len());
+        }
+        assert_eq!(unsafe { patch_clzero(f + 3) }, Some(()));
+        assert_eq!(unsafe { *((f + 3) as *const u8) }, 0xe9, "a direct jump");
+        let buf = vec![0xffu8; 256];
+        let line = (buf.as_ptr() as usize + 64) & !63;
+        let mut after = 0usize;
+        let run: unsafe extern "system" fn(usize, *mut usize) = unsafe { std::mem::transmute(f) };
+        unsafe { run(line + 8, &mut after) };
+        let off = line - buf.as_ptr() as usize;
+        assert!(buf[off..off + 64].iter().all(|&b| b == 0), "the line is zero");
+        assert!(buf[..off].iter().chain(&buf[off + 64..]).all(|&b| b == 0xff), "nothing else");
+        assert_eq!(after, line + 8 + 0x40, "the moved add ran once");
+        unsafe {
+            let _ = VirtualFree(page as *mut c_void, 0, MEM_RELEASE);
+        }
+    }
+
+    #[test]
+    fn only_register_forms_are_moved() {
+        assert_eq!(movable_len(&[0x48, 0x83, 0xc0, 0x40]), Some(4), "add rax, 40h");
+        assert_eq!(movable_len(&[0x4d, 0x39, 0xda]), Some(3), "cmp r10, r11");
+        assert_eq!(movable_len(&[0x48, 0x83, 0x40, 0x08, 0x01]), None, "a memory operand");
+        assert_eq!(movable_len(&[0x72, 0xf1]), None, "a branch");
+        assert_eq!(movable_len(&[0x83, 0xc0, 0x40]), None, "no REX: not one of the forms seen");
     }
 
     #[test]
