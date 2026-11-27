@@ -77,6 +77,15 @@ Every line ends in something measurable, not in "done". States: `done` · `doing
 | todo | submit-ahead and fence waits that never stall the title | frame time ≈ card's own work |
 | todo | frame line: fps · ms · draws · dropped · copies · copy-back · translation | one parseable line a second |
 
+## Build 9 — 60 displayed (30 real + frame generation)
+
+| state | work | closes when |
+|---|---|---|
+| todo | preserve what generation needs from the title: motion vectors, depth, previous frame | the resources exist and survive the frame boundary |
+| todo | generate the in-between frame at present (optical flow, occlusion-aware) | two presented frames per rendered frame |
+| todo | artefact checks on camera motion, thin geometry, UI | capture comparison; UI must not wobble |
+| todo | fall back to one frame when the title's motion data is not usable | no visible stutter on scenes without vectors |
+
 ## Rules that keep the number honest
 
 - A step is closed by its number on the frame line, not by its code compiling.

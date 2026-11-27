@@ -11,8 +11,9 @@ than both.
 ## The frame we are building toward
 
 ```
-baseline target     30 fps in-world  (33.3 ms)
-stretch             60 displayed     (45+ fps native, then frame generation)
+baseline target     30 fps in-world  (33.3 ms)   = steps 1, 2, 6, 7
+stretch             60 displayed                 = 30 real + frame generation (step 9)
+not attempted       60 native                    the card would need ~16 ms at 1440p
 ```
 
 The layer this replaces sits at 131.3 ms / 7.6 fps and spends **85 ms of that on copies and copy-back
@@ -69,6 +70,7 @@ runtime).
 | 6 | list cache + parallel translation | translation measurably off the critical path |
 | 7 | the title's own FSR running natively | internal resolution drops, picture correct |
 | 8 | frame pacing: submit-ahead, fences, no stalls | frame time ≈ the card's own work |
+| 9 | frame generation at present (30 real → 60 displayed) | two frames presented per rendered frame, motion vectors preserved, no artefacting on camera motion |
 
 Steps 3-5 are large but mechanical, and there are two working implementations to read while writing them.
 Steps 1, 2, 6 and 7 are the ones that decide whether a frame can ever be 33 ms.
