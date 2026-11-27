@@ -8,8 +8,48 @@ A console-to-Windows layer for a current-generation title, built around one deci
 learned from make differently: **GPU-owned memory lives in VRAM at the title's addresses and is never
 copied back; only what the CPU really changed goes up, in 64-byte chunks, off the submit thread.**
 
+## Why a rebuild
+
+**The layer we have runs the title at 7.6 fps (131.3 ms a frame), and the cost is in its shape, not its tuning.**
+
 ```
-crates/uma        the address space: windows, 64 KiB pages, placement, sharing
+where 131 ms goes     copies in 31-48 ms · copies back 48-54 ms · ~68 ms waiting in present
+                      while the submit thread copies · 243 ms of list calls on the recording threads
+what was tried        19 measured A/B experiments against that structure: copy merging (4 ways),
+                      double buffering, barrier de-duplication, rep movsb, upload heaps, wider
+                      prepare, ordered copies ... every one neutral or worse
+what that means       the copies exist because the layer gives the title plain CPU memory and keeps
+                      a mirror; making copies cheaper cannot remove them
+```
+
+The layer has to give the GPU the title's memory **from the first allocation**. In the old tree that is a
+retrofit into the allocator, the guard bookkeeping and the shadows all at once, and its own attempt failed
+for exactly that reason: "0 regions placed", because the title's heap arrives page by page
+(`ROADBLOCK.md` in the fork). Changing the memory model changes everything built on it, so we rebuild
+around the right model instead of retrofitting the old one.
+
+**Why not take the sibling layer (xcl) as it is:** its licence is GPL-2.0 and ours is GPL-3.0-only, and copying
+its structure would also copy its ceilings. We read both layers to learn *how* each part works and *what the
+title does*, then write our own.
+
+**Why each main choice was made:**
+
+| choice | why | evidence |
+|---|---|---|
+| GPU-owned memory in VRAM at the title's addresses, never copied back | the copy-back is 48-54 ms of the old frame and exists only to fake shared memory | old layer's frame line; `gputest` proves the GPU and CPU can share bytes |
+| CPU changes sent as 64-byte chunks, scattered by one compute dispatch, a frame ahead | the old layer copied 115 MB to deliver ~48 MB of real change; one copy per range costs more than the bytes | **measured here:** 16-30 ms of worker time at the title's real shape, 12.64 GB/s link; one copy per range = 146 ms ([`runs/build0a-upload.md`](runs/build0a-upload.md)) |
+| list calls translated on workers, cached only if it pays | 243 ms of list calls; translation is the CPU half of the frame | Build 0 (b) measures it next |
+| descriptors as a dirty list | the old layer scanned 203,127 slots to update 12,027 | old layer's frame line |
+| nothing compiles in a frame | runtime pipeline compiles measured 4× slower per draw | old layer's runs |
+| DLSS on NVIDIA, FSR on AMD | the title's own GPU work is 43-63 ms; 30 fps needs fewer pixels, not just less overhead | fork's per-list timestamps; how to lower the internal resolution is still open ([`progress.md`](progress.md)) |
+
+**What is still unproven, said plainly:** rebuilding versus keeping the old loader and shader translator
+and replacing only the memory model has not been costed, and no title frame has run on this code yet.
+
+## The tree
+
+```
+crates/uma        the address space: windows, 64 KiB pages, placement, sharing; 64 B chunk diff
 apps/rebuild     the launcher
 apps/gputest      the proof: the GPU writes, the CPU reads, nothing is copied
 apps/uploadbench  Build 0 (a): write-watch + 64 B diff + upload, timed at the old layer's volume
@@ -30,8 +70,8 @@ route       GPU-owned in VRAM, CPU changes as dirty chunks + parallel list trans
 
 **"Better than both" is specific, not a slogan.** Where they made a choice that costs frame time we take
 the opposite one: no host mirror, no copy-back path, no guard-page faults, no runtime pipeline compiles,
-no per-frame descriptor scans — plus two things neither of them does: command lists cached by content and
-replayed, and descriptor updates tracked as a dirty list instead of a 203,127-slot scan.
+no per-frame descriptor scans — plus what neither of them does: descriptor updates tracked as a dirty list
+instead of a 203,127-slot scan, and command lists cached by content, kept only if the hit rate pays.
 
 ## The decision
 
@@ -51,8 +91,9 @@ memory one 64 KiB page at a time, so:
 ## What is proven so far
 
 ```
-crates/uma unit tests   8 tests green: page-per-page backing, sharing by address, lifetime by user
-                        count, refusal without partial commit, window-relative addresses, covering page
+crates/uma unit tests   15 tests green: page-per-page backing, sharing by address, lifetime by user
+                        count, refusal without partial commit, window-relative addresses, covering page;
+                        64 B diff (shadow and hash), run joining, gather, chunk indices
 
 apps/gputest            PROVEN on the development card (RTX 4070 Ti):
                           "the GPU wrote into memory the CPU reads, with no copy"

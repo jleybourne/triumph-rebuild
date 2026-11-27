@@ -62,6 +62,20 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
 
+### 2026-11-27 — README: why we chose a rebuild
+
+```
+[██░░░░░░░░░░░░░░░░░░]   8 %   (unchanged: documentation only)
+measured fps   none yet
+```
+
+- **Added** "Why a rebuild" to the README: where the old 131 ms goes, the 19 failed tuning experiments, why
+  the memory model can't be retrofitted, and why not adopt xcl. Also a table of each main choice with its
+  reason and its evidence, including the Build 0 (a) numbers, and the open questions stated plainly.
+- **Fixed** two stale README lines: the test count (15, not 8), and list caching, which now reads "kept only if
+  the hit rate pays", as the plan says.
+- **Next:** unchanged — Build 0 (b).
+
 ### 2026-11-27 — Build 0 (a): the upload benchmark
 
 ```
