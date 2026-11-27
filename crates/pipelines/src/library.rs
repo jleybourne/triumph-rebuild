@@ -1,13 +1,14 @@
-﻿//! The pipeline library: one file, built offline from the translated programs, read at start.
+//! The pipeline library: one file, built offline from the translated programs, read at start.
 //!
 //! ```text
-//! header   0x00 "RBPIPLIB" Â· 0x08 version Â· 0x0c user-data dwords Â· 0x10 programs Â· 0x14 layouts
-//!          0x18 roots Â· 0x1c pairs Â· 0x20 content hash (32 bytes) Â· 0x40 tables
+//! header   0x00 "RBPIPLIB" · 0x08 version · 0x0c user-data dwords · 0x10 programs · 0x14 layouts
+//!          0x18 roots · 0x1c pairs · 0x20 content hash (32 bytes) · 0x40 tables
 //! program  32 bytes, sorted by (hash, stage): hash u64, stage u32, layout u32, compute root u32 (or !0),
 //!          DXIL offset u32, DXIL length u32, 0
-//! layout   8 bytes: offset, length of its encoding (user data u8, shadow u8, samplers u16, 16 bytes each)
+//! layout   8 bytes: offset, length of its encoding (user data u8, shadow u8, samplers u16, comparison
+//!          mask u32, then 16 bytes per sampler)
 //! root     8 bytes: offset, length of a serialized root signature (version 1.1)
-//! pair     12 bytes, sorted: vertex layout, pixel layout, root â€” every pair of layouts the library's
+//! pair     12 bytes, sorted: vertex layout, pixel layout, root — every pair of layouts the library's
 //!          vertex and pixel shaders use, so any VS + PS the title pairs has its root signature ready
 //! blobs    16-byte aligned
 //! ```
@@ -25,7 +26,7 @@ use crate::layout::{RootDesc, StageLayout};
 use crate::Stage;
 
 const MAGIC: &[u8; 8] = b"RBPIPLIB";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER: usize = 0x40;
 const PROGRAM: usize = 32;
 const CHUNK: usize = 1 << 20;
@@ -42,6 +43,7 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
 fn encode_layout(l: &StageLayout) -> Vec<u8> {
     let mut v = vec![u8::from(l.user_data), u8::from(l.shadow)];
     v.extend((l.samplers.len() as u16).to_le_bytes());
+    v.extend(l.compare.to_le_bytes());
     for w in &l.samplers {
         for x in w {
             v.extend(x.to_le_bytes());
@@ -52,10 +54,12 @@ fn encode_layout(l: &StageLayout) -> Vec<u8> {
 
 fn decode_layout(b: &[u8]) -> Option<StageLayout> {
     let n = u16::from_le_bytes(b.get(2..4)?.try_into().ok()?) as usize;
-    let words = b.get(4..4 + 16 * n)?;
+    let compare = u32::from_le_bytes(b.get(4..8)?.try_into().ok()?);
+    let words = b.get(8..8 + 16 * n)?;
     Some(StageLayout {
         user_data: b[0] != 0,
         shadow: b[1] != 0,
+        compare,
         samplers: words.chunks_exact(16).map(|c| [0, 1, 2, 3].map(|k| u32_at(c, 4 * k))).collect(),
     })
 }
@@ -470,7 +474,7 @@ mod tests {
     }
 
     fn sample() -> Vec<Input> {
-        let s = |n: usize| StageLayout { user_data: n > 0, shadow: n > 1, samplers: vec![[n as u32, 15 << 20, 0, 0]; n] };
+        let s = |n: usize| StageLayout { user_data: n > 0, shadow: n > 1, samplers: vec![[n as u32, 15 << 20, 0, 0]; n], compare: (n as u32) & 1 };
         vec![
             Input { hash: 0x30, stage: Stage::Cs, dxil: vec![1; 100], layout: s(1) },
             Input { hash: 0x10, stage: Stage::Vs, dxil: vec![2; 33], layout: s(0) },
@@ -503,6 +507,7 @@ mod tests {
             assert!(lib.get(0x10, Stage::Cs).is_none() && lib.get(0x11, Stage::Vs).is_none());
             assert_eq!(lib.iter().map(|e| e.hash).collect::<Vec<_>>(), [0x10, 0x10, 0x20, 0x30, 0x40]);
             assert_eq!(lib.layout(ps.layout).unwrap().samplers.len(), 2);
+            assert_eq!((lib.layout(ps.layout).unwrap().compare, lib.layout(cs.layout).unwrap().compare), (0, 1), "comparison masks kept");
         }
         std::fs::remove_file(&path).unwrap();
     }

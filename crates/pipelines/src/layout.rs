@@ -75,12 +75,16 @@ pub struct StageLayout {
     pub shadow: bool,
     /// Immediate sampler words, register `s{k}` at index k (up to the highest the program binds).
     pub samplers: Vec<[u32; 4]>,
+    /// Bit k: sampler k is read by a comparison (`SampleCmp*`), so its static sampler takes a comparison
+    /// filter (the host refuses a `SamplerComparisonState` bound to a plain sampler).
+    pub compare: u32,
 }
 
 impl StageLayout {
-    /// The layout of a program from its `PSV0` bindings and the immediate sampler words the lifter found.
-    /// Any binding outside the layout above is refused with its name.
-    pub fn from_bindings(bindings: &[Binding], immediate: &[[u32; 4]]) -> Result<StageLayout, String> {
+    /// The layout of a program from its `PSV0` bindings and the immediate sampler words the lifter found
+    /// (`compare`: bit k when sampler k is a comparison sampler). Any binding outside the layout above is
+    /// refused with its name.
+    pub fn from_bindings(bindings: &[Binding], immediate: &[[u32; 4]], compare: u32) -> Result<StageLayout, String> {
         let mut l = StageLayout::default();
         let mut samplers = 0usize;
         for b in bindings {
@@ -95,6 +99,7 @@ impl StageLayout {
             }
         }
         l.samplers = immediate[..samplers].to_vec();
+        l.compare = if samplers >= 32 { compare } else { compare & ((1u32 << samplers) - 1) };
         Ok(l)
     }
 }
@@ -124,8 +129,17 @@ pub struct RootDesc {
     pub flags: u32,
 }
 
-fn samplers(words: &[[u32; 4]], vis: Visibility) -> impl Iterator<Item = Sampler> + '_ {
-    words.iter().enumerate().map(move |(k, w)| Sampler { desc: sampler::decode(*w), register: k as u32, space: IMMEDIATE_SAMPLER_SPACE, vis })
+/// `D3D12_FILTER_REDUCTION_TYPE` bits of a filter: 1 is comparison.
+const REDUCTION: u32 = 3 << 7;
+
+fn samplers(l: &StageLayout, vis: Visibility) -> impl Iterator<Item = Sampler> + '_ {
+    l.samplers.iter().enumerate().map(move |(k, w)| {
+        let mut desc = sampler::decode(*w);
+        if k < 32 && l.compare >> k & 1 != 0 {
+            desc.filter = desc.filter & !REDUCTION | 1 << 7;
+        }
+        Sampler { desc, register: k as u32, space: IMMEDIATE_SAMPLER_SPACE, vis }
+    })
 }
 
 impl RootDesc {
@@ -136,7 +150,7 @@ impl RootDesc {
                 Param::Constants { register: 0, space: 0, count: user_dwords, vis: Visibility::All },
                 Param::Srv { register: 0, space: SHADOW_SPACE, vis: Visibility::All },
             ],
-            samplers: samplers(&cs.samplers, Visibility::All).collect(),
+            samplers: samplers(cs, Visibility::All).collect(),
             flags: flags::HEAP,
         }
     }
@@ -149,7 +163,7 @@ impl RootDesc {
                 Param::Constants { register: 0, space: 0, count: user_dwords, vis: Visibility::Pixel },
                 Param::Srv { register: 0, space: SHADOW_SPACE, vis: Visibility::All },
             ],
-            samplers: samplers(&vs.samplers, Visibility::Vertex).chain(samplers(&ps.samplers, Visibility::Pixel)).collect(),
+            samplers: samplers(vs, Visibility::Vertex).chain(samplers(ps, Visibility::Pixel)).collect(),
             flags: flags::GRAPHICS,
         }
     }
@@ -209,24 +223,26 @@ mod tests {
         let l = StageLayout::from_bindings(
             &[b(res::CBV, 0, 0, 0), b(res::SRV_RAW, SHADOW_SPACE, 0, 0), b(res::SAMPLER, IMMEDIATE_SAMPLER_SPACE, 1, 1)],
             &[TRILINEAR_WRAP, TRILINEAR_WRAP, TRILINEAR_WRAP],
+            0b110,
         )
         .unwrap();
         assert!(l.user_data && l.shadow);
         assert_eq!(l.samplers.len(), 2, "registers up to the highest bound, unbound third dropped");
-        assert_eq!(StageLayout::from_bindings(&[], &[TRILINEAR_WRAP]).unwrap(), StageLayout::default());
+        assert_eq!(l.compare, 0b10, "compare bits past the bound samplers dropped");
+        assert_eq!(StageLayout::from_bindings(&[], &[TRILINEAR_WRAP], 1).unwrap(), StageLayout::default());
     }
 
     #[test]
     fn bindings_outside_the_layout_are_refused() {
-        let e = StageLayout::from_bindings(&[b(res::UAV_RAW, 0, 0, 0)], &[]).unwrap_err();
+        let e = StageLayout::from_bindings(&[b(res::UAV_RAW, 0, 0, 0)], &[], 0).unwrap_err();
         assert!(e.contains("uav u0 space0"), "{e}");
-        assert!(StageLayout::from_bindings(&[b(res::CBV, 0, 1, 1)], &[]).is_err());
-        assert!(StageLayout::from_bindings(&[b(res::SAMPLER, IMMEDIATE_SAMPLER_SPACE, 0, 1)], &[TRILINEAR_WRAP]).is_err());
+        assert!(StageLayout::from_bindings(&[b(res::CBV, 0, 1, 1)], &[], 0).is_err());
+        assert!(StageLayout::from_bindings(&[b(res::SAMPLER, IMMEDIATE_SAMPLER_SPACE, 0, 1)], &[TRILINEAR_WRAP], 0).is_err());
     }
 
     #[test]
     fn compute_root_shape() {
-        let l = StageLayout { user_data: true, shadow: false, samplers: vec![TRILINEAR_WRAP] };
+        let l = StageLayout { user_data: true, shadow: false, samplers: vec![TRILINEAR_WRAP], compare: 0 };
         let r = RootDesc::compute(&l, USER_DATA_DWORDS);
         assert_eq!(r.params[param::CS_USER_DATA as usize], Param::Constants { register: 0, space: 0, count: 16, vis: Visibility::All });
         assert_eq!(r.params[param::CS_SHADOW as usize], Param::Srv { register: 0, space: 101, vis: Visibility::All });
@@ -238,8 +254,8 @@ mod tests {
 
     #[test]
     fn graphics_root_shape_and_sampler_visibility() {
-        let vs = StageLayout { user_data: true, shadow: true, samplers: vec![TRILINEAR_WRAP] };
-        let ps = StageLayout { user_data: true, shadow: false, samplers: vec![TRILINEAR_WRAP, [2 | 2 << 3 | 2 << 6, 0, 0, 1 << 30]] };
+        let vs = StageLayout { user_data: true, shadow: true, samplers: vec![TRILINEAR_WRAP], compare: 0 };
+        let ps = StageLayout { user_data: true, shadow: false, samplers: vec![TRILINEAR_WRAP, [2 | 2 << 3 | 2 << 6, 0, 0, 1 << 30]], compare: 0 };
         let r = RootDesc::graphics(&vs, &ps, USER_DATA_DWORDS);
         assert_eq!(r.dwords(), 34);
         assert!(r.flags & flags::ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT != 0 && r.flags & flags::HEAP == flags::HEAP);
@@ -249,6 +265,16 @@ mod tests {
         r.check().unwrap();
         // the same parameters whatever the programs use
         assert_eq!(RootDesc::graphics(&StageLayout::default(), &StageLayout::default(), 16).params, r.params);
+    }
+
+    #[test]
+    fn comparison_samplers_take_a_comparison_filter() {
+        let aniso = [0, 0, 2 << 20 | 2 << 22, 0];
+        let l = StageLayout { user_data: false, shadow: false, samplers: vec![TRILINEAR_WRAP, TRILINEAR_WRAP, aniso], compare: 0b101 };
+        let r = RootDesc::compute(&l, USER_DATA_DWORDS);
+        let f: Vec<u32> = r.samplers.iter().map(|s| s.desc.filter).collect();
+        assert_eq!(f, [0x95, 0x15, 0xd5], "COMPARISON_MIN_MAG_MIP_LINEAR, untouched, COMPARISON_ANISOTROPIC");
+        r.check().unwrap();
     }
 
     #[test]
