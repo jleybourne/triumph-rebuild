@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use rebuild_shader::gfx10::enc::{self, Decoded, Src};
-use rebuild_shader::native::{PsInput, VsInput, VsOutput};
+use rebuild_shader::native::{ComputeIo, PsInput, VsInput, VsOutput};
 use rebuild_shader::signature::Element;
 
 use super::{Lifted, Lifter};
@@ -116,6 +116,8 @@ pub enum Stage<'a> {
     None,
     Ps(PsStage<'a>),
     Vs(VsStage<'a>),
+    /// A compute program: thread ids in v0-v2, group ids in the SGPRs after the user data, LDS.
+    Cs(ComputeIo),
 }
 
 /// What the stage's inputs and outputs need, gathered while lifting.
@@ -517,6 +519,57 @@ pub fn vs_program(l: &Lifted, vs: &VsStage, bind: Option<&super::Bindings>, isg1
     s.push_str("    Out r = (Out)0;\n");
     s.push_str(&returns);
     s.push_str("    return r;\n}\n");
+    Ok(s)
+}
+
+/// A whole compute program: `numthreads` and the LDS size from the dispatch settings, thread ids (v0-v2) and
+/// group ids (the system SGPRs) as system values. It writes only through UAVs, so it returns nothing.
+pub fn cs_program(l: &Lifted, cs: &ComputeIo, bind: Option<&super::Bindings>) -> Result<String, String> {
+    if !l.unsupported.is_empty() {
+        return Err(format!("untranslated: {}", l.unsupported[0].1));
+    }
+    let (ids, info) = cs.system_sgprs();
+    let mut init = String::new();
+    for s in &l.live_in {
+        if let Some(k) = ids.iter().position(|x| *x == Some(*s)) {
+            let _ = writeln!(init, "    s{s} = gid.{};", ["x", "y", "z"][k]);
+            continue;
+        }
+        if info == Some(*s) {
+            return Err("reads the thread-group info SGPR".into());
+        }
+        let k = bind.and_then(|b| b.user_dword(*s)).ok_or(format!("reads s{s}, which is no user data"))?;
+        if bind.is_some_and(|b| b.is_heap_base(*s)) {
+            let _ = writeln!(init, "    s{s} = 0u; // heap base: descriptors are indexed from the heap's start");
+            continue;
+        }
+        let _ = writeln!(init, "    s{s} = sir_ud[{}].{};", k / 4, ["x", "y", "z", "w"][k as usize % 4]);
+    }
+    let mut s = String::from(super::PRELUDE);
+    for k in 0..l.immediate_samplers.len() {
+        let _ = writeln!(s, "SamplerState sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
+    }
+    if l.uses_shadow {
+        let _ = writeln!(s, "ByteAddressBuffer sir_shadow : register(t0, space{});", super::SHADOW_SPACE);
+    }
+    if init.contains("sir_ud") {
+        s.push_str("cbuffer SirUserData : register(b0, space0) { uint4 sir_ud[16]; };\n");
+    }
+    if l.uses_lds {
+        let _ = writeln!(s, "groupshared uint sir_lds[{}];", (cs.lds_bytes() / 4).max(1));
+    }
+    let [x, y, z] = cs.threads;
+    let _ = writeln!(s, "[numthreads({}, {}, {})]", x.max(1), y.max(1), z.max(1));
+    s.push_str("void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {\n");
+    s.push_str(&super::declarations(l));
+    s.push_str(&init);
+    for k in 0..cs.thread_id_vgprs().min(3) {
+        if l.vgprs.contains(&u16::from(k)) {
+            let _ = writeln!(s, "    v{k} = tid.{};", ["x", "y", "z"][k as usize]);
+        }
+    }
+    s.push_str(&l.body);
+    s.push_str("}\n");
     Ok(s)
 }
 

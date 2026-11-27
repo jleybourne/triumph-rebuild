@@ -1,0 +1,12 @@
+translate cs — v0 compute programs, lifted with IO and compiled by DXC (cs_6_6, -O3)
+programs  132 · compiled 117 (88.6 %)
+
+  not compiled, by first reason          programs
+  untranslated: buffer_store_format_xyzw (typed access by byte offset)      8
+  untranslated: buffer_atomic_add               1
+  untranslated: buffer_load_format_x (typed access by byte offset)      1
+  untranslated: s_cselect_b64                   1
+  untranslated: s_lshr_b32                      1
+  untranslated: v_add_co_u32                    1
+  untranslated: v_cmp_ne_u32                    1
+  untranslated: v_cvt_f32_u32                   1

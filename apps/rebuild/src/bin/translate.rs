@@ -87,8 +87,9 @@ fn main() {
     match mode.as_str() {
         "coverage" => coverage(&picked.iter().map(|(s, o, _, _)| (*s, o.clone())).collect::<Vec<_>>()),
         "lift" => lift_report(&picked),
-        "ps" => ps_report(&walk, false),
-        "vs" => ps_report(&walk, true),
+        "ps" => ps_report(&walk, "ps"),
+        "vs" => ps_report(&walk, "vs"),
+        "cs" => ps_report(&walk, "cs"),
         m => {
             eprintln!("translate: unknown mode {m}");
             std::process::exit(2);
@@ -174,7 +175,8 @@ fn dxc() -> Option<std::path::PathBuf> {
 
 /// The v0 pixel shaders: lifted with IO, assembled, compiled.
 /// `ps` (pixel shaders) or `vs` (vertex shaders that run as the hardware VS): lift with IO, assemble, compile.
-fn ps_report(walk: &census::Walk, vs: bool) {
+fn ps_report(walk: &census::Walk, kind: &str) {
+    let vs = kind == "vs";
     use rebuild_shader::native::StageIo;
     use rebuild_shader::signature;
     let dxc = dxc().expect("dxc.exe (Windows SDK) or REBUILD_DXC");
@@ -193,7 +195,8 @@ fn ps_report(walk: &census::Walk, vs: bool) {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(p) = walk.programs.get(i) else { break };
                     let io_ok = match &p.native.io {
-                        StageIo::Ps { .. } => !vs,
+                        StageIo::Ps { .. } => kind == "ps",
+                        StageIo::Cs(_) => kind == "cs",
                         StageIo::Vs { .. } => vs && p.native.stage == rebuild_shader::native::HwStage::Vs,
                         _ => false,
                     };
@@ -211,7 +214,9 @@ fn ps_report(walk: &census::Walk, vs: bool) {
                         continue;
                     };
                     let bind = rebuild_sir::lift::Bindings { hw: p.native.stage, layout: &p.native.layout, used: &p.native.used };
-                    let (Ok(isg1), Ok(osg1)) = (signature::parse(&p.isg1), signature::parse(&p.osg1)) else {
+                    // compute programs have no signatures
+                    let sig = |b: &[u8]| if kind == "cs" { Ok(Vec::new()) } else { signature::parse(b) };
+                    let (Ok(isg1), Ok(osg1)) = (sig(&p.isg1), sig(&p.osg1)) else {
                         bump("signature unreadable".into());
                         continue;
                     };
@@ -226,6 +231,11 @@ fn ps_report(walk: &census::Walk, vs: bool) {
                             let stage = || rebuild_sir::lift::VsStage { inputs, outputs };
                             let l = rebuild_sir::lift::lift_stage(&insts, rebuild_sir::lift::Stage::Vs(stage()), Some(bind));
                             let r = rebuild_sir::lift::vs_program(&l, &stage(), Some(&bind), &isg1, &osg1);
+                            (l, r)
+                        }
+                        StageIo::Cs(io) => {
+                            let l = rebuild_sir::lift::lift_stage(&insts, rebuild_sir::lift::Stage::Cs(*io), Some(bind));
+                            let r = rebuild_sir::lift::cs_program(&l, io, Some(&bind));
                             (l, r)
                         }
                         _ => unreachable!(),
@@ -255,12 +265,12 @@ fn ps_report(walk: &census::Walk, vs: bool) {
                             continue;
                         }
                     };
-                    let ext = if vs { "vs" } else { "ps" };
+                    let ext = kind;
                     let hl = out.join(format!("{}.{ext}.hlsl", p.hash));
                     let obj = out.join(format!("{}.{ext}.dxil", p.hash));
                     std::fs::write(&hl, &src).expect("write hlsl");
                     let r = std::process::Command::new(&dxc)
-                        .args(["-T", if vs { "vs_6_6" } else { "ps_6_6" }, "-E", "main", "-O3", "-enable-16bit-types", "-Fo"])
+                        .args(["-T", &format!("{kind}_6_6"), "-E", "main", "-O3", "-enable-16bit-types", "-Fo"])
                         .arg(&obj)
                         .arg(&hl)
                         .output()
@@ -278,7 +288,9 @@ fn ps_report(walk: &census::Walk, vs: bool) {
         }
     });
     let (n, ok) = (total.load(Ordering::Relaxed), compiled.load(Ordering::Relaxed));
-    if vs {
+    if kind == "cs" {
+        println!("translate cs — v0 compute programs, lifted with IO and compiled by DXC (cs_6_6, -O3)");
+    } else if vs {
         println!("translate vs — v0 vertex shaders (hardware VS), lifted with IO and compiled by DXC (vs_6_6, -O3)");
     } else {
         println!("translate ps — v0 pixel shaders, lifted with IO and compiled by DXC (ps_6_6, -O3)");

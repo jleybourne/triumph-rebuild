@@ -196,13 +196,20 @@ impl Lifter<'_> {
     /// `ByteAddressBuffer` loads at `vaddr (offen) + offset + soffset`. Out of range reads 0 on both. The
     /// indexed form (`idxen`: index times the descriptor's stride) is refused until the stride is known.
     pub(super) fn mubuf(&mut self, name: &str, d: &Decoded) -> Option<()> {
-        let n: u16 = match name {
-            "buffer_load_dword" => 1,
-            "buffer_load_dwordx2" => 2,
-            "buffer_load_dwordx3" => 3,
-            "buffer_load_dwordx4" => 4,
+        if name.contains("_format_") {
+            return self.mubuf_typed(name, d);
+        }
+        let store = name.starts_with("buffer_store_dword");
+        let n: u16 = match name.trim_start_matches("buffer_load_").trim_start_matches("buffer_store_") {
+            "dword" => 1,
+            "dwordx2" => 2,
+            "dwordx3" => 3,
+            "dwordx4" => 4,
             _ => return None,
         };
+        if !store && !name.starts_with("buffer_load_dword") {
+            return None;
+        }
         if d.get("lds")? == 1 || d.get("tfe")? == 1 {
             self.why = Some("lds or tfe".into());
             return None;
@@ -238,10 +245,88 @@ impl Lifter<'_> {
         let load = ["Load", "Load2", "Load3", "Load4"][n as usize - 1];
         let ty = if n == 1 { String::new() } else { n.to_string() };
         let sh = if idxen { format!(" uint2 sh = sir_shadow.Load2(s{rsrc} * 16u);") } else { String::new() };
+        if store {
+            // out of range writes are dropped on both
+            let vals: Vec<String> = (0..n).map(|k| {
+                self.out.vgprs.insert(vdata + k);
+                format!("v{}", vdata + k)
+            }).collect();
+            let value = if n == 1 { vals[0].clone() } else { format!("uint{n}({})", vals.join(", ")) };
+            let mut cond = if self.out.exec_narrowed { "ex".to_string() } else { "true".to_string() };
+            if idxen {
+                cond = format!("{cond} && v{vaddr} < sh.y");
+            }
+            let st = ["Store", "Store2", "Store3", "Store4"][n as usize - 1];
+            let _ = writeln!(self.out.body, "    {{ RWByteAddressBuffer b = ResourceDescriptorHeap[s{rsrc}];{sh} if ({cond}) b.{st}({addr}, {value}); }}");
+            return Some(());
+        }
         let _ = writeln!(self.out.body, "    {{ ByteAddressBuffer b = ResourceDescriptorHeap[s{rsrc}];{sh} uint{ty} r = b.{load}({addr});{guard}");
         for k in 0..n {
             let e = if n == 1 { "r".to_string() } else { format!("r.{}", ["x", "y", "z", "w"][k as usize]) };
             self.vwrite_raw(vdata + k, e);
+        }
+        self.out.body.push_str("    }\n");
+        Some(())
+    }
+
+    /// Typed buffer loads and stores (`buffer_load_format_x`-`xyzw`, `buffer_store_format_*`): the element format
+    /// is the console descriptor's, and the runtime builds the host's typed view from that descriptor, so the
+    /// shader indexes `Buffer<float4>` / `RWBuffer<float4>` by element and the view converts. The indexed form
+    /// with no byte offset only; others are refused with the reason.
+    pub(super) fn mubuf_typed(&mut self, name: &str, d: &Decoded) -> Option<()> {
+        let store = name.starts_with("buffer_store_");
+        let n = match name.rsplit('_').next()? {
+            "x" => 1u16,
+            "xy" => 2,
+            "xyz" => 3,
+            "xyzw" => 4,
+            _ => return None,
+        };
+        let soff_zero = matches!(enc::src(d.get("soffset")?), Src::Inline(128) | Src::Null);
+        if d.get("idxen")? != 1 || d.get("offen")? == 1 || d.get("offset")? != 0 || !soff_zero {
+            self.why = Some("typed access by byte offset".into());
+            return None;
+        }
+        if d.get("lds")? == 1 || d.get("tfe")? == 1 {
+            self.why = Some("lds or tfe".into());
+            return None;
+        }
+        let rsrc = (d.get("srsrc")? * 4) as u8;
+        let Some(res) = self.descs.get(&rsrc).copied() else {
+            self.why = Some("descriptor not traced".into());
+            return None;
+        };
+        if res.heap != Heap::Resource {
+            self.why = Some("not a resource descriptor".into());
+            return None;
+        }
+        let (vaddr, vdata) = (d.get("vaddr")? as u16, d.get("vdata")? as u16);
+        self.out.vgprs.insert(vaddr);
+        let ch = ["x", "y", "z", "w"];
+        if store {
+            let vals: Vec<String> = (0..4u16)
+                .map(|k| {
+                    if k < n {
+                        self.out.vgprs.insert(vdata + k);
+                        format!("asfloat(v{})", vdata + k)
+                    } else {
+                        "0.0f".into()
+                    }
+                })
+                .collect();
+            let guard = if self.out.exec_narrowed { "if (ex) " } else { "" };
+            // only the channels the instruction names change: read, merge, write
+            let merge: Vec<String> = (0..n).map(|k| format!("o.{} = {};", ch[k as usize], vals[k as usize])).collect();
+            let _ = writeln!(
+                self.out.body,
+                "    {{ RWBuffer<float4> b = ResourceDescriptorHeap[s{rsrc}]; {guard}{{ float4 o = b[v{vaddr}]; {} b[v{vaddr}] = o; }} }}",
+                merge.join(" ")
+            );
+            return Some(());
+        }
+        let _ = writeln!(self.out.body, "    {{ Buffer<float4> b = ResourceDescriptorHeap[s{rsrc}]; float4 r = b[v{vaddr}];");
+        for k in 0..n {
+            self.vwrite_raw(vdata + k, format!("asuint(r.{})", ch[k as usize]));
         }
         self.out.body.push_str("    }\n");
         Some(())
@@ -253,7 +338,7 @@ impl Lifter<'_> {
         let sampled = name.starts_with("image_sample") || name.starts_with("image_gather");
         // a16: float addresses packed two fp16 per register (sampling with no bias only, so far)
         let a16 = d.get("a16")? == 1;
-        let a16_ok = matches!(name, "image_sample" | "image_sample_lz" | "image_sample_l" | "image_load");
+        let a16_ok = matches!(name, "image_sample" | "image_sample_lz" | "image_sample_l" | "image_load" | "image_store");
         for (flag, why) in [("a16", "16-bit address"), ("d16", "16-bit data"), ("tfe", "tfe"), ("lwe", "lwe"), ("unorm", "unnormalised")] {
             if d.get(flag)? == 1 && (flag != "unorm" || sampled) && (flag != "a16" || !a16_ok) {
                 self.why = Some(why.into());

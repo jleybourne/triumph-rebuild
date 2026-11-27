@@ -45,6 +45,8 @@ pub struct Lifted {
     pub immediate_samplers: Vec<[u32; 4]>,
     /// The descriptor shadow table is read (`sir_shadow`, see [`SHADOW_SPACE`]).
     pub uses_shadow: bool,
+    /// LDS is read or written (`groupshared uint sir_lds[]`).
+    pub uses_lds: bool,
 }
 
 /// The register space of the descriptor shadow table: per heap index, 16 bytes the runtime writes from the
@@ -126,7 +128,7 @@ fn inline_bits(code: u16) -> String {
 
 pub mod io;
 pub mod res;
-pub use io::{ps_program, vs_program, PsStage, Stage, VsStage};
+pub use io::{cs_program, ps_program, vs_program, PsStage, Stage, VsStage};
 pub use res::Bindings;
 
 struct Lifter<'a> {
@@ -260,6 +262,65 @@ impl Lifter<'_> {
         Some(())
     }
 
+    /// LDS as `groupshared uint sir_lds[]`, by dword: reads and writes of 1, 2 or 4 dwords, the two-address
+    /// forms (offsets in dwords, or 64 dwords with `st64`), and `ds_add_u32`. Only active lanes write.
+    fn lds(&mut self, name: &str, d: &Decoded) -> Option<()> {
+        if !matches!(self.stage, Stage::Cs(_)) || d.get("gds")? == 1 {
+            return None;
+        }
+        self.out.uses_lds = true;
+        let a = d.get("addr")? as u16;
+        self.out.vgprs.insert(a);
+        let (o0, o1) = (d.get("offset0")?, d.get("offset1")?);
+        let off = o0 | o1 << 8;
+        let guard = if self.out.exec_narrowed { "if (ex) " } else { "" };
+        let data = |l: &mut Self, f: &str, k: u16| -> Option<String> {
+            let v = d.get(f)? as u16 + k;
+            l.out.vgprs.insert(v);
+            Some(format!("v{v}"))
+        };
+        let width = |n: &str| -> Option<u16> {
+            Some(match n.rsplit('_').next()? {
+                "b32" | "u32" => 1,
+                "b64" => 2,
+                "b96" => 3,
+                "b128" => 4,
+                _ => return None,
+            })
+        };
+        match name {
+            "ds_read_b32" | "ds_read_b64" | "ds_read_b96" | "ds_read_b128" => {
+                let vdst = d.get("vdst")? as u16;
+                for k in 0..width(name)? {
+                    self.vwrite_raw(vdst + k, format!("sir_lds[((v{a} + {off}u) >> 2) + {k}u]"));
+                }
+            }
+            "ds_write_b32" | "ds_write_b64" | "ds_write_b96" | "ds_write_b128" => {
+                for k in 0..width(name)? {
+                    let v = data(self, "data0", k)?;
+                    self.line(format!("{guard}sir_lds[((v{a} + {off}u) >> 2) + {k}u] = {v};"));
+                }
+            }
+            "ds_read2_b32" | "ds_read2st64_b32" => {
+                let (vdst, m) = (d.get("vdst")? as u16, if name.contains("st64") { 64 } else { 1 });
+                self.vwrite_raw(vdst, format!("sir_lds[(v{a} >> 2) + {}u]", o0 * m));
+                self.vwrite_raw(vdst + 1, format!("sir_lds[(v{a} >> 2) + {}u]", o1 * m));
+            }
+            "ds_write2_b32" | "ds_write2st64_b32" => {
+                let m = if name.contains("st64") { 64 } else { 1 };
+                let (x, y) = (data(self, "data0", 0)?, data(self, "data1", 0)?);
+                self.line(format!("{guard}sir_lds[(v{a} >> 2) + {}u] = {x};", o0 * m));
+                self.line(format!("{guard}sir_lds[(v{a} >> 2) + {}u] = {y};", o1 * m));
+            }
+            "ds_add_u32" => {
+                let x = data(self, "data0", 0)?;
+                self.line(format!("{guard}InterlockedAdd(sir_lds[(v{a} + {off}u) >> 2], {x});"));
+            }
+            _ => return None,
+        }
+        Some(())
+    }
+
     fn usrc(&mut self, d: &Decoded, field: &str) -> Option<String> {
         let code = d.get(field)?;
         self.src(code, d.literal)
@@ -372,6 +433,7 @@ impl Lifter<'_> {
             Encoding::Exp => self.export(&d),
             Encoding::Vop3p => self.vop3p(name, &d),
             Encoding::Ds if name == "ds_swizzle_b32" => self.swizzle(&d),
+            Encoding::Ds => self.lds(name, &d),
             Encoding::Vop1 | Encoding::Vop2 | Encoding::Vop3 | Encoding::Vopc => {
                 if d.extra.is_some() {
                     return None; // SDWA / DPP: not yet
@@ -385,6 +447,10 @@ impl Lifter<'_> {
     fn sopp(&mut self, name: &str) -> Option<()> {
         match name {
             "s_endpgm" | "s_nop" | "s_clause" | "s_code_end" | "s_dcache_inv" | "s_ttracedata" => Some(()),
+            "s_barrier" if matches!(self.stage, Stage::Cs(_)) => {
+                self.line("GroupMemoryBarrierWithGroupSync();".into());
+                Some(())
+            }
             n if n.starts_with("s_waitcnt") || n.starts_with("s_inst_prefetch") || n.starts_with("s_sethalt") => Some(()),
             _ => None,
         }
@@ -682,7 +748,7 @@ impl Lifter<'_> {
             }
             // float, one operand
             "v_floor_f32" | "v_ceil_f32" | "v_trunc_f32" | "v_rndne_f32" | "v_fract_f32" | "v_sqrt_f32" | "v_rsq_f32"
-            | "v_rcp_f32" | "v_exp_f32" | "v_log_f32" | "v_sin_f32" | "v_cos_f32" => {
+            | "v_rcp_f32" | "v_rcp_iflag_f32" | "v_exp_f32" | "v_log_f32" | "v_sin_f32" | "v_cos_f32" => {
                 let x = f0(self)?;
                 let e = match name {
                     "v_floor_f32" => format!("floor({x})"),
@@ -692,7 +758,7 @@ impl Lifter<'_> {
                     "v_fract_f32" => format!("frac({x})"),
                     "v_sqrt_f32" => format!("sqrt({x})"),
                     "v_rsq_f32" => format!("rsqrt({x})"),
-                    "v_rcp_f32" => format!("rcp({x})"),
+                    "v_rcp_f32" | "v_rcp_iflag_f32" => format!("rcp({x})"),
                     "v_exp_f32" => format!("exp2({x})"),
                     "v_log_f32" => format!("log2({x})"),
                     "v_sin_f32" => format!("sin(({x}) * 6.2831853f)"),
