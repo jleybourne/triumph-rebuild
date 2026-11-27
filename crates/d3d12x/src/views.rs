@@ -214,6 +214,11 @@ pub trait HostDevice: Send + Sync {
     /// A host resource for a console description already turned host (`desc`); `None` with no
     /// GPU (the stand-in).
     fn resource(&self, desc: &D3D12_RESOURCE_DESC, heap: D3D12_HEAP_TYPE, flags: D3D12_HEAP_FLAGS, clear: Option<&D3D12_CLEAR_VALUE>) -> Result<Option<ID3D12Resource>, HRESULT>;
+    /// As [`ResourceHost::resource`] on the default heap, in the title's initial layout (a host barrier layout,
+    /// already checked against `desc`'s flags) so its first barrier's "before" matches.
+    fn resource_in(&self, desc: &D3D12_RESOURCE_DESC, clear: Option<&D3D12_CLEAR_VALUE>, _layout: D3D12_BARRIER_LAYOUT) -> Result<Option<ID3D12Resource>, HRESULT> {
+        self.resource(desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_NONE, clear)
+    }
     /// A host query heap; `None` with no GPU (the stand-in).
     fn query_heap(&self, _desc: &D3D12_QUERY_HEAP_DESC) -> Result<Option<ID3D12QueryHeap>, HRESULT> {
         Ok(None)
@@ -381,6 +386,31 @@ impl HostDevice for DeviceHost {
         let mut r: Option<ID3D12Resource> = None;
         let state = if heap == D3D12_HEAP_TYPE_UPLOAD { D3D12_RESOURCE_STATE_GENERIC_READ } else if heap == D3D12_HEAP_TYPE_READBACK { D3D12_RESOURCE_STATE_COPY_DEST } else { D3D12_RESOURCE_STATE_COMMON };
         unsafe { self.device.CreateCommittedResource(&D3D12_HEAP_PROPERTIES { Type: heap, ..Default::default() }, flags, desc, state, clear.map(|c| c as *const _), &mut r) }.map_err(hr)?;
+        Ok(r)
+    }
+
+    fn resource_in(&self, desc: &D3D12_RESOURCE_DESC, clear: Option<&D3D12_CLEAR_VALUE>, layout: D3D12_BARRIER_LAYOUT) -> Result<Option<ID3D12Resource>, HRESULT> {
+        // common: the legacy call (interop with both barrier kinds); otherwise the layout call, the only way a
+        // texture starts in a layout the title's enhanced barriers then name
+        let Some(d10) = self.device.cast::<ID3D12Device10>().ok().filter(|_| layout != D3D12_BARRIER_LAYOUT_COMMON) else {
+            return self.resource(desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_NONE, clear);
+        };
+        let d1 = D3D12_RESOURCE_DESC1 {
+            Dimension: desc.Dimension,
+            Alignment: desc.Alignment,
+            Width: desc.Width,
+            Height: desc.Height,
+            DepthOrArraySize: desc.DepthOrArraySize,
+            MipLevels: desc.MipLevels,
+            Format: desc.Format,
+            SampleDesc: desc.SampleDesc,
+            Layout: desc.Layout,
+            Flags: desc.Flags,
+            ..Default::default()
+        };
+        let heap = D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() };
+        let mut r: Option<ID3D12Resource> = None;
+        unsafe { d10.CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d1, layout, clear.map(|c| c as *const _), None, None, &mut r) }.map_err(hr)?;
         Ok(r)
     }
 

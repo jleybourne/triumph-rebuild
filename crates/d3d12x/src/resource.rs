@@ -206,6 +206,53 @@ pub(crate) fn heap_methods() -> Vec<(usize, &'static str, Fp)> {
 
 const DEFAULT_HEAP: HeapProperties = HeapProperties { kind: 1, cpu_pages: 0, pool: 0, creation_nodes: 1, visible_nodes: 1 };
 
+/// The title's initial state of a new resource: a legacy state (0xd8, 0xe8) or a barrier layout (0x3f8, 0x428).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Initial {
+    State(u32),
+    Layout(u32),
+}
+
+/// The host barrier layout a texture is created in: the title's, as the host knows it, when `hd`'s flags allow
+/// it (a flag the host stripped, depth with unordered access say, falls back to common).
+pub(crate) fn initial_layout(initial: Initial, hd: &D3D12_RESOURCE_DESC) -> D3D12_BARRIER_LAYOUT {
+    // layouts: 1 generic read, 2 render target, 3 unordered access, 4 depth write, 5 depth read, 6 shader
+    // resource, 7 copy source, 8 copy dest, 9 resolve source, 10 resolve dest
+    let l: i32 = match initial {
+        Initial::State(s) => match s {
+            0x4 => 2,
+            0x8 => 3,
+            0x10 => 4,
+            0x20 => 5,
+            0x40 | 0x80 | 0xc0 => 6,
+            0x800 => 7,
+            0x400 => 8,
+            0x2000 => 9,
+            0x1000 => 10,
+            0 => 0,
+            // read combinations (generic read and the like)
+            s if s & !(0x1 | 0x2 | 0x20 | 0x40 | 0x80 | 0x200 | 0x800 | 0x2000) == 0 => 1,
+            _ => 0,
+        },
+        // the console's read layout (31): generic read
+        Initial::Layout(31) => 1,
+        Initial::Layout(l) if l <= 10 => l as i32,
+        Initial::Layout(_) => 0,
+    };
+    let f = hd.Flags.0;
+    let has = |flag: D3D12_RESOURCE_FLAGS| f & flag.0 != 0;
+    let ok = match l {
+        2 => has(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET),
+        3 => has(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+        4 | 5 => has(D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL),
+        1 | 6 => !has(D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE),
+        // resolve layouts need multisampling (source) or a resolve-capable target: keep it simple
+        9 | 10 => false,
+        _ => true,
+    };
+    D3D12_BARRIER_LAYOUT(if ok { l } else { 0 })
+}
+
 /// Where a new resource's memory comes from.
 enum Backing {
     /// allocate console memory for it (committed)
@@ -222,6 +269,7 @@ impl Resources {
         heap: HeapProperties,
         heap_flags: u32,
         backing: Backing,
+        initial: Initial,
         clear: *const D3D12_CLEAR_VALUE,
         iid: *const GUID,
         out: *mut Raw,
@@ -259,7 +307,7 @@ impl Resources {
                         c
                     });
                     let clear = clear.filter(|_| hd.Flags.0 & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL.0) != 0);
-                    match ctx.host.resource(&hd, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_NONE, clear.as_ref()) {
+                    match ctx.host.resource_in(&hd, clear.as_ref(), initial_layout(initial, &hd)) {
                         Ok(t) => t,
                         Err(hr) => {
                             if owned {
@@ -298,11 +346,11 @@ impl Resources {
     /// # Safety
     /// Pointers as the title passes them (each may be null).
     #[allow(clippy::too_many_arguments)]
-    pub unsafe fn create_committed(&self, heap: *const HeapProperties, heap_flags: u32, desc: *const D3D12_RESOURCE_DESC, _state: u32, clear: *const D3D12_CLEAR_VALUE, iid: *const GUID, out: *mut Raw) -> HRESULT {
+    pub unsafe fn create_committed(&self, heap: *const HeapProperties, heap_flags: u32, desc: *const D3D12_RESOURCE_DESC, state: u32, clear: *const D3D12_CLEAR_VALUE, iid: *const GUID, out: *mut Raw) -> HRESULT {
         let (Some(&h), Some(d)) = (unsafe { heap.as_ref() }, unsafe { desc.as_ref() }) else {
             return E_INVALIDARG;
         };
-        unsafe { self.make_resource(d, h, heap_flags, Backing::Own, clear, iid, out) }
+        unsafe { self.make_resource(d, h, heap_flags, Backing::Own, Initial::State(state), clear, iid, out) }
     }
 
     /// 0x3f8 CreateCommittedResource3 `(*heap, flags, *desc1, layout, *clear, protected, ncast,
@@ -317,7 +365,7 @@ impl Resources {
         heap: *const HeapProperties,
         heap_flags: u32,
         desc: *const D3D12_RESOURCE_DESC1,
-        _layout: u32,
+        layout: u32,
         clear: *const D3D12_CLEAR_VALUE,
         _protected: Raw,
         _ncast: u32,
@@ -325,7 +373,10 @@ impl Resources {
         iid: *const GUID,
         out: *mut Raw,
     ) -> HRESULT {
-        unsafe { self.create_committed(heap, heap_flags, desc.cast(), 0, clear, iid, out) }
+        let (Some(&h), Some(d)) = (unsafe { heap.as_ref() }, unsafe { desc.cast::<D3D12_RESOURCE_DESC>().as_ref() }) else {
+            return E_INVALIDARG;
+        };
+        unsafe { self.make_resource(d, h, heap_flags, Backing::Own, Initial::Layout(layout), clear, iid, out) }
     }
 
     /// 0xe0 CreateHeap `(*desc, iid, *out)`: console memory of the heap's size.
@@ -351,7 +402,7 @@ impl Resources {
     /// # Safety
     /// As [`Resources::create_committed`]; `heap` one of ours.
     #[allow(clippy::too_many_arguments)]
-    pub unsafe fn create_placed(&self, heap: Raw, offset: u64, desc: *const D3D12_RESOURCE_DESC, _state: u32, clear: *const D3D12_CLEAR_VALUE, iid: *const GUID, out: *mut Raw) -> HRESULT {
+    pub unsafe fn create_placed(&self, heap: Raw, offset: u64, desc: *const D3D12_RESOURCE_DESC, state: u32, clear: *const D3D12_CLEAR_VALUE, iid: *const GUID, out: *mut Raw) -> HRESULT {
         let (Some(h), Some(d)) = (heap_object(heap), unsafe { desc.as_ref() }) else {
             return E_INVALIDARG;
         };
@@ -361,19 +412,19 @@ impl Resources {
             self.inner.events.note("placed resource past its heap", offset);
             return E_INVALIDARG;
         }
-        unsafe { self.make_resource(d, h.desc.properties, h.desc.flags, Backing::At(h.address + offset, heap), clear, iid, out) }
+        unsafe { self.make_resource(d, h.desc.properties, h.desc.flags, Backing::At(h.address + offset, heap), Initial::State(state), clear, iid, out) }
     }
 
     /// 0x428 a resource at a title-mapped address `(address, *desc1, layout, *clear, iid, *out)`.
     ///
     /// # Safety
     /// As [`Resources::create_committed`].
-    pub unsafe fn create_at_address(&self, address: u64, desc: *const D3D12_RESOURCE_DESC1, _layout: u32, clear: *const D3D12_CLEAR_VALUE, iid: *const GUID, out: *mut Raw) -> HRESULT {
+    pub unsafe fn create_at_address(&self, address: u64, desc: *const D3D12_RESOURCE_DESC1, layout: u32, clear: *const D3D12_CLEAR_VALUE, iid: *const GUID, out: *mut Raw) -> HRESULT {
         let Some(d) = (unsafe { desc.cast::<D3D12_RESOURCE_DESC>().as_ref() }) else { return E_INVALIDARG };
         if address == 0 {
             return E_INVALIDARG;
         }
-        unsafe { self.make_resource(d, DEFAULT_HEAP, 0, Backing::At(address, std::ptr::null_mut()), clear, iid, out) }
+        unsafe { self.make_resource(d, DEFAULT_HEAP, 0, Backing::At(address, std::ptr::null_mut()), Initial::Layout(layout), clear, iid, out) }
     }
 
     /// 0xc8 GetResourceAllocationInfo `(visible mask, count, *descs)` → `*out` (struct return:
@@ -488,5 +539,36 @@ impl Resources {
     #[inline]
     pub fn host_resource(&self, p: Raw) -> Option<Raw> {
         resource(p).and_then(|r| r.host.as_ref().map(|h| h.as_raw()))
+    }
+}
+
+#[cfg(test)]
+mod initial_tests {
+    use super::{initial_layout, Initial};
+    use windows::Win32::Graphics::Direct3D12::*;
+
+    fn tex(flags: D3D12_RESOURCE_FLAGS) -> D3D12_RESOURCE_DESC {
+        D3D12_RESOURCE_DESC { Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D, Width: 64, Height: 64, DepthOrArraySize: 1, MipLevels: 1, Flags: flags, ..Default::default() }
+    }
+
+    #[test]
+    fn the_titles_initial_layout_is_kept_when_the_host_flags_allow_it() {
+        let plain = tex(D3D12_RESOURCE_FLAG_NONE);
+        let uav = tex(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        let depth = tex(D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+        let l = |i, d: &D3D12_RESOURCE_DESC| initial_layout(i, d).0;
+        assert_eq!(l(Initial::Layout(6), &plain), 6);
+        assert_eq!(l(Initial::Layout(3), &uav), 3);
+        assert_eq!(l(Initial::Layout(31), &plain), 1, "the console's read layout");
+        assert_eq!(l(Initial::Layout(3), &plain), 0, "UAV stripped (depth with unordered access)");
+        assert_eq!(l(Initial::Layout(2), &plain), 0, "no render target flag");
+        assert_eq!(l(Initial::Layout(4), &depth), 4);
+        assert_eq!(l(Initial::Layout(0xffff_ffff), &plain), 0, "undefined");
+        // legacy states
+        assert_eq!(l(Initial::State(0xc0), &plain), 6);
+        assert_eq!(l(Initial::State(0x8), &uav), 3);
+        assert_eq!(l(Initial::State(0xac3), &plain), 1, "generic read");
+        assert_eq!(l(Initial::State(0x4 | 0x8), &tex(D3D12_RESOURCE_FLAGS(0x1 | 0x4))), 0, "two writes");
+        assert_eq!(l(Initial::State(0x8000_0000), &plain), 0);
     }
 }
