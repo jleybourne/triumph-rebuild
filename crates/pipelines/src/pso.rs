@@ -709,15 +709,27 @@ mod tests {
 
     const LOCK: &str = r"D:\Developer\triumph-rebuild\agents\MEASURING";
 
-    /// A device for a GPU test, or `None` (test skipped, with the reason printed) while the measurement
-    /// lock is present or when no device with SM 6.6 exists.
-    fn device() -> Option<ID3D12Device> {
+    /// A device for a GPU test: WARP (correctness, no card), else the card under the exclusive `agents\CARD`
+    /// lock (held until the returned guard drops). `None` (test skipped, reason printed) while the measurement
+    /// lock is present, while another lane holds the card, or when no device with SM 6.6 exists.
+    fn device() -> Option<(ID3D12Device, Option<crate::d3d::CardLock>)> {
         if Path::new(LOCK).exists() {
             eprintln!("skipped: the measurement lock is present");
             return None;
         }
+        let warp = match crate::d3d::Gpu::warp() {
+            Ok(g) => return Some((g.device, None)),
+            Err(e) => e,
+        };
+        let card = match crate::d3d::CardLock::take() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipped: no WARP ({warp}) and {e}");
+                return None;
+            }
+        };
         match crate::d3d::Gpu::new(false) {
-            Ok(g) => Some(g.device),
+            Ok(g) => Some((g.device, Some(card))),
             Err(e) => {
                 eprintln!("skipped: {e}");
                 None
@@ -769,7 +781,7 @@ mod tests {
 
     #[test]
     fn cache_round_trip_and_refused_cache_rebuilt() {
-        let Some(device) = device() else { return };
+        let Some((device, _card)) = device() else { return };
         let d = dir("cache");
         let Some(cs) = tiny_cs(&d) else { return };
         let cache = d.join("pso-cache.bin");
@@ -846,7 +858,7 @@ mod tests {
 
     #[test]
     fn the_pool_creates_real_pipelines_asynchronously() {
-        let Some(device) = device() else { return };
+        let Some((device, _card)) = device() else { return };
         let d = dir("pool");
         let Some(cs) = tiny_cs(&d) else { return };
         let cr = PsoCreator::new(&device, programs(&device, &d, cs), None);
@@ -866,7 +878,7 @@ mod tests {
     /// session record) takes them from the disk cache with no DXC call.
     #[test]
     fn programs_outside_the_library_are_translated_on_demand() {
-        let Some(device) = device() else { return };
+        let Some((device, _card)) = device() else { return };
         let d = dir("ondemand");
         let Some(cs) = tiny_cs(&d) else { return };
         let rpf = std::env::var_os("REBUILD_SHADERS").map_or_else(|| PathBuf::from(r"D:\victory-data\shaders.rpf"), PathBuf::from);

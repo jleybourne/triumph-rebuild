@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use rebuild_shader::features::{self, Findings, WaveClass};
 use rebuild_shader::native::{HwStage, NativeProgram, StageIo};
-use rebuild_shader::{blake3, gfx10, signature, Container, FourCC};
+use rebuild_shader::{gfx10, signature, Container, FourCC};
 
 use crate::layout::{StageLayout, USER_DATA_DWORDS};
 use crate::sidecar::Samplers;
@@ -40,9 +40,7 @@ pub fn dxc_path() -> Option<PathBuf> {
 
 /// The program hash of a console container: the first 8 bytes (big-endian) of the BLAKE3 of the container
 /// (its declared size; bytes past it do not count), as the census and the program library name it.
-pub fn program_hash(bytes: &[u8]) -> Option<u64> {
-    container_bytes(bytes).map(|b| u64::from_be_bytes(blake3::hash(b).as_bytes()[..8].try_into().unwrap()))
-}
+pub use crate::stream::program_hash;
 
 /// The container's own bytes (its declared size).
 pub fn container_bytes(bytes: &[u8]) -> Option<&[u8]> {
@@ -128,10 +126,38 @@ pub fn lift_hlsl(p: &NativeProgram, isg1: &[u8], osg1: &[u8], v1: bool) -> Resul
     Ok(Hlsl { stage, src, samplers: Samplers { words: l.immediate_samplers, compare, top_dword: None }, top_dword })
 }
 
+/// DXC processes this process runs at once, at most (the owner's rule: the machine stays responsive).
+pub const MAX_DXC: usize = 4;
+
+static DXC_RUNNING: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+static DXC_FREE: std::sync::Condvar = std::sync::Condvar::new();
+
+/// One of the [`MAX_DXC`] slots, given back on drop.
+struct DxcSlot;
+
+impl DxcSlot {
+    fn take() -> DxcSlot {
+        let mut n = DXC_RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        while *n >= MAX_DXC {
+            n = DXC_FREE.wait(n).unwrap_or_else(|e| e.into_inner());
+        }
+        *n += 1;
+        DxcSlot
+    }
+}
+
+impl Drop for DxcSlot {
+    fn drop(&mut self) {
+        *DXC_RUNNING.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        DXC_FREE.notify_one();
+    }
+}
+
 /// Compiles `hlsl` (a file) to `out` with DXC, as every translated program is compiled. `Err`: DXC's first
 /// error line. A failure with no error line (DXC itself died: 6 of 7,402 in one corpus run under load, each
 /// compiling clean when run again) is tried once more.
 pub fn compile_file(dxc: &Path, stage: Stage, hlsl: &Path, out: &Path) -> Result<(), String> {
+    let _slot = DxcSlot::take();
     let mut last = String::new();
     for _ in 0..2 {
         let r = std::process::Command::new(dxc)
@@ -291,7 +317,7 @@ mod tests {
         let mut c = vec![0u8; 0x40];
         c[..4].copy_from_slice(b"DXBC");
         c[0x18..0x1c].copy_from_slice(&0x20u32.to_le_bytes());
-        let want = u64::from_be_bytes(blake3::hash(&c[..0x20]).as_bytes()[..8].try_into().unwrap());
+        let want = u64::from_be_bytes(rebuild_shader::blake3::hash(&c[..0x20]).as_bytes()[..8].try_into().unwrap());
         assert_eq!(program_hash(&c), Some(want), "bytes past the container's size do not count");
         assert_eq!(program_hash(b"DXIL"), None);
         assert!(native_of(b"nope").unwrap_err().contains("not a DXBC"));

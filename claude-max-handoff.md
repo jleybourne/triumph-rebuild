@@ -212,3 +212,10 @@ ebuild-oracle (backup in oracle-swapped-backup); `apps/rebuild/src/bin/oracle.rs
   exe+0xb5a5f8 (fn 0x140B5A5D0, rcx struct [0]=null, from exe+0x32764; game-side lookup returned null) on several threads.
 - Symbolize our frames offline: python scratch sym.py target\release\runtitle.exe <off>... (crash prints runtitle.exe+off).
 - Tests 445 green. Progress 57 %.
+
+- Round 5 helpers launched: lane `ondemand` (on-demand translation of programs missing from the library; status agents/ondemand.md) and lane `streampso` (0x2b0/0x50 graphics pipelines; agents/streampso.md). Lead: the null lookup at exe+0xb5a5f8, then Execute/PresentX.
+- Round 5 adds lanes `present` (queue Execute 0x050/0x118, PresentX 0x100, PNG capture, frame line + summary.toml; agents/present.md) and `shaderexec` (execution check vs the oracle; agents/shaderexec.md).
+
+- PR #30 (streampso) merged: 0x50/0x2b0 served, 14 graphics pipelines, 0 refused. clzero: 5 sites detoured (relocation path), 0 emulated. The title calls ExecuteCommandListsX x2 + PresentX x1 at ~1.44 s (both trap: lane `present`), then the null program binding at exe+0xb5a5f8 (engine set-program 0x140122BD6 stores [ctx+0x12328]=null). Intermittent hang inside D3D12XboxCreateDevice seen twice (maybe helper GPU load): runtitle now dumps all threads at TIMEOUT. Tests 460. Progress 58 %.
+- GPU resets 21:18-21:20 (nvlddmkm 153 x3) happened during my title runs (MEASURING set; present lane cleared). Not reproduced: a monitored run at ~21:45 left the count at 444. Runs now count nvlddmkm events before/after.
+- Round 5 adds lanes shadercov, wave64, ffx. All lanes: card only with MEASURING absent + exclusive agents\CARD lock; WARP for correctness.

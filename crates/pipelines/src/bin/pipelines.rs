@@ -26,7 +26,8 @@
 //!                    first N compute containers of the corpus (REBUILD_SHADERS) offered and requested through
 //!                    the pool, translated on its workers (lift, HLSL, DXC), pipelines created; then a second
 //!                    session over the same disk cache (REBUILD_PSO_CACHE_DIR\ondemand-bench, deleted first).
-//!                    --count N (default 95) · --threads N
+//!                    --count N (default 95) · --threads N. Runs only with agents\MEASURING absent, holding
+//!                    agents\CARD; at most 4 DXC processes at once.
 //! ```
 //! The sampler words come from the translator's `<hash>.<stage>.samplers` sidecars when present; only
 //! programs without one are lifted again from the corpus (`build --lift-all` lifts every program and compares).
@@ -652,10 +653,11 @@ fn run_ondemand(args: &[String]) {
     use rebuild_pipelines::pso::{Programs, PsoCreator};
     use rebuild_pipelines::state::{Desc, Key};
     use rebuild_pipelines::translate;
-    if Path::new(LOCK).exists() {
-        eprintln!("pipelines ondemand: the measurement lock is present ({LOCK}); not touching the GPU");
+    // the card only with MEASURING absent and the exclusive agents\CARD lock, released however this ends
+    let _card = rebuild_pipelines::d3d::CardLock::take().unwrap_or_else(|e| {
+        eprintln!("pipelines ondemand: {e}; not touching the card");
         std::process::exit(3);
-    }
+    });
     let val = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).and_then(|v| v.parse::<usize>().ok());
     let count = val("--count").unwrap_or(95);
     let threads = val("--threads").unwrap_or_else(|| default_threads(cpu_core_limit()));

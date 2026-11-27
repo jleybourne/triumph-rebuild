@@ -124,7 +124,9 @@ fn in_title(addr: u64) -> bool {
     IMAGES.get().is_some_and(|v| v.iter().any(|(_, b, s)| addr >= *b && addr < b + s))
 }
 
-static PEEKS: std::sync::OnceLock<Vec<(bool, u64)>> = std::sync::OnceLock::new();
+/// (base, offset): base 0 is the exe (a preferred address given), 1..=16 a register of the faulting context
+static PEEKS: std::sync::OnceLock<Vec<(usize, u64)>> = std::sync::OnceLock::new();
+const REGS: [&str; 16] = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"];
 
 static REPORTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -168,8 +170,8 @@ unsafe fn report_inner(kind: &str, p: *const EXCEPTION_POINTERS) {
     }
     let _ = write!(
         out,
-        "\n          rax {:#x} rcx {:#x} rdx {:#x} r8 {:#x} r9 {:#x} rsp {:#x}\n          call chain (unwound):\n",
-        ctx.Rax, ctx.Rcx, ctx.Rdx, ctx.R8, ctx.R9, ctx.Rsp
+        "\n          rax {:#x} rcx {:#x} rdx {:#x} rbx {:#x} rsp {:#x} rbp {:#x} rsi {:#x} rdi {:#x}\n          r8 {:#x} r9 {:#x} r10 {:#x} r11 {:#x} r12 {:#x} r13 {:#x} r14 {:#x} r15 {:#x}\n          call chain (unwound):\n",
+        ctx.Rax, ctx.Rcx, ctx.Rdx, ctx.Rbx, ctx.Rsp, ctx.Rbp, ctx.Rsi, ctx.Rdi, ctx.R8, ctx.R9, ctx.R10, ctx.R11, ctx.R12, ctx.R13, ctx.R14, ctx.R15
     );
     // the facts first, so a fault while unwinding cannot lose them
     write_err(&out.b[..out.n]);
@@ -182,20 +184,19 @@ unsafe fn report_inner(kind: &str, p: *const EXCEPTION_POINTERS) {
         use windows::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION};
         let title = IMAGES.get().and_then(|v| v.iter().find(|i| i.0.ends_with(".exe"))).map(|i| i.1).unwrap_or(0);
         let mut pk = Buf { b: [0; 2048], n: 0 };
-        for &(stack, off) in peeks {
-            let at = if stack { ctx.Rsp + off } else { title + off };
+        let regs = [ctx.Rax, ctx.Rcx, ctx.Rdx, ctx.Rbx, ctx.Rsp, ctx.Rbp, ctx.Rsi, ctx.Rdi, ctx.R8, ctx.R9, ctx.R10, ctx.R11, ctx.R12, ctx.R13, ctx.R14, ctx.R15];
+        for &(base, off) in peeks {
+            let at = if base == 0 { title + off } else { regs[base - 1].wrapping_add(off) };
             let mut m = MEMORY_BASIC_INFORMATION::default();
             let ok = unsafe { VirtualQuery(Some(at as *const _), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } != 0
                 && m.State.0 == 0x1000
                 && m.Protect.0 & 0x66 != 0;
-            let tag = if stack { "rsp+" } else { "exe+" };
+            let tag = if base == 0 { "exe+" } else { REGS[base - 1] };
             if ok {
                 let v = unsafe { (at as *const u64).read_unaligned() };
-                let _ = write!(pk, "          peek {tag}{off:#x} = {v:#x}
-");
+                let _ = write!(pk, "          peek {tag}+{off:#x} = {v:#x}\n");
             } else {
-                let _ = write!(pk, "          peek {tag}{off:#x} unreadable
-");
+                let _ = write!(pk, "          peek {tag}+{off:#x} unreadable\n");
             }
         }
         write_err(&pk.b[..pk.n]);
@@ -244,6 +245,14 @@ unsafe extern "system" fn first_chance(p: *mut EXCEPTION_POINTERS) -> i32 {
     let code = unsafe { (*(*p).ExceptionRecord).ExceptionCode };
     if code == EXCEPTION_ACCESS_VIOLATION && FIRST_CHANCE.fetch_add(1, Ordering::Relaxed) < 4 {
         unsafe { report("first-chance", p) };
+        // the first access violation in title code: what the device saw by then (the run usually ends here,
+        // through the title's own filter, before ours)
+        let at = unsafe { (*(*p).ExceptionRecord).ExceptionAddress } as u64;
+        if in_title(at) && FATAL.fetch_add(1, Ordering::Relaxed) == 0 {
+            if let Some(f) = ON_FATAL.get() {
+                f();
+            }
+        }
     }
     // a title assert (int3) or a fail-fast ends the run without reaching the unhandled filter: report it here
     let c = code.0 as u32;
@@ -342,9 +351,9 @@ pub fn install(images: Vec<(String, u64, u64)>) {
         let parse = |t: &str| u64::from_str_radix(t.trim_start_matches("0x"), 16).ok();
         let peeks = list
             .split(',')
-            .filter_map(|t| match t.trim().strip_prefix("rsp+") {
-                Some(o) => parse(o).map(|o| (true, o)),
-                None => parse(t.trim()).map(|a| (false, a.saturating_sub(0x1_4000_0000))),
+            .filter_map(|t| match t.trim().split_once('+') {
+                Some((r, o)) => REGS.iter().position(|x| *x == r).and_then(|i| parse(o).map(|o| (i + 1, o))),
+                None => parse(t.trim()).map(|a| (0, a.saturating_sub(0x1_4000_0000))),
             })
             .collect();
         let _ = PEEKS.set(peeks);
@@ -363,7 +372,7 @@ pub fn install(images: Vec<(String, u64, u64)>) {
 /// REBUILD_THREADS: at the first fatal exception, where every other thread of the process stands (suspended,
 /// unwound to 12 frames; threads with no title frame are counted, not printed). Diagnostic only: a thread
 /// suspended inside the unwinder's lock could stall this, which the run's watchdog ends.
-fn other_threads() {
+pub fn other_threads() {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::Debug::{
         GetThreadContext, RtlLookupFunctionEntry, RtlVirtualUnwind, CONTEXT, CONTEXT_FLAGS, UNW_FLAG_NHANDLER,

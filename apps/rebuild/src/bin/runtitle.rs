@@ -407,6 +407,8 @@ fn main() {
         }
         None => {
             println!("TIMEOUT   no render call within {seconds} s");
+            // where every thread stands (a hang inside a call we serve shows here)
+            crash::other_threads();
             write_summary("timeout", &format!("no render call within {seconds} s"));
         }
     }

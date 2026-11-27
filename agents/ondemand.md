@@ -56,6 +56,19 @@ tests                    workspace 450 passed, 0 failed, 11 ignored, 0 warnings 
 For the title's 80 BVH programs, expect about 80 x (55 ms DXC + 10 ms PSO) / 12 workers, or about 0.5 s
 spread over load in the first session, and well under 0.1 s after that.
 
+## GPU rule (lead, after 3 driver resets)
+
+- `d3d::CardLock::take()`: the card only with `agents\MEASURING` absent and `agents\CARD` created new (refused if
+  it exists), removed on drop, so also on a panic. `d3d::Gpu::warp()`: a WARP device.
+- `pso.rs` tests (all three GPU tests in the file, the pipelines lane's included) run on WARP; the card is used
+  only if WARP fails, and then under `CardLock`. `pipelines ondemand` (a timing bench, so the card) holds
+  `CardLock` for its run.
+- At most 4 DXC processes at once per process (`translate::MAX_DXC`, a semaphore in `compile_file`), for the
+  runtime's pool and the `translate` binary alike.
+- No fence waits in this lane's code (PSO creation only).
+- Not changed: `stream.rs`'s GPU test (lane streampso) still creates a card device with only the MEASURING
+  check; it could use the same `device()` pattern.
+
 ## Tests
 
 - `translate::a_container_translates_to_what_translate_v1_writes`: 4 corpus compute containers through
