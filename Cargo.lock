@@ -69,6 +69,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rebuild-dstorage"
+version = "0.1.0"
+dependencies = [
+ "rebuild-vfs",
+ "zlib-rs",
+]
+
+[[package]]
 name = "rebuild-input"
 version = "0.1.0"
 dependencies = [
@@ -362,3 +370,9 @@ checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa76918995d776d9dd34d371030be228d021137449771493d56e29f77e4148ac"
