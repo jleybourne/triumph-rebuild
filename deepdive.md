@@ -1803,15 +1803,15 @@ code does) or **deferred** (with the reason). Items in `crates/sir`, `crates/d3d
 | 3 | deferred | `crates/sir` (`lift.rs`) |
 | 4 | fixed before this pass | the resolver binds the host's function when an override is listed but none is built (`runtime/src/lib.rs`, `HostResolver::resolve`) |
 | 5 | **fixed** `dfb5943` | `vfs::build()` checks every drive first (the overlay's would-be path, letter case ignored on Windows) and creates folders only after; test `v1_a_refused_overlay_creates_nothing` |
-| 6 | deferred | `crates/uma` (outside this lane's crates; the ring is not used by the title run yet) |
+| 6 | **fixed** `aaa2e14` (lane `deferred`) | hashes are pending until the scatter is queued ahead of the Signal, then committed (no CPU wait); a flush larger than a slot sends a slot's worth and carries the rest; a failed flush commits nothing and carries its pages; WARP test `a_flush_larger_than_a_slot_carries_the_rest_and_loses_nothing` |
 | 7 | deferred | `apps/rebuild/src/sampler.rs` and `crash.rs`: a change to what runs while a thread is suspended needs a title run to verify, and this lane runs no title |
 | 8 | deferred | `crates/d3d12x` |
-| 9 | deferred | `crates/runtime/src/fence.rs` (runtime work in flight; outside this lane's crates) |
+| 9 | **fixed** `aaa2e14` (lane `deferred`) | fence objects live in one reserved arena; `by_cell` is arithmetic plus one acquire load (no lock, no scan); every fence served is found (past 1M `CreateFence` fails); tests in `fence.rs` |
 | 10 | **fixed** `dfb5943` (in part) | `rebuild.exe` reads and checks `--config`, reports the settings and exits 3 ("does not run the title yet") instead of passing silently; running the title from it is C2 |
 | 11 | **fixed** `dfb5943` (in part) | the launcher's `title_source` uses `game.title_settings` before `REBUILD_TITLE_SETTINGS` (test `the_title_settings_setting_comes_before_the_variable`); the other keys wait for C2 (the layer reading `rebuild.toml`) and `runtime/src/drives.rs` |
 | 12 | **fixed** `dfb5943` | `Config::upscaler_mode()` / `upscaler_mode_name` give the upscaler's spelling (`dlaa` → `native-aa`); test checks every choice against `rebuild_upscale::Mode::parse` |
 | 13 | doc-corrected `dfb5943` | a comment at the push says nothing reads it until C2; the session records the id |
-| 14 | deferred | `crates/input` and C2 |
+| 14 | **fixed** `aaa2e14` (lane `deferred`, in part) | `Input::with_menu_key` and `menu_key_named` take every `menu.key` choice (config test checks each); handing the setting to the layer is C2 |
 | 15 | doc-corrected `dfb5943` | a comment above the three entries says the fallback is the layer's once C2 lands; only `upscaletest` reads the variables |
 | 16 | doc-corrected `dfb5943` | README table, "Running it" and badge, `secondary-agent.md` §8: 515 green, 12 ignored |
 | 17 | doc-corrected `dfb5943` | README: 30 options; `tasks.md` and `agents/launcher.md` say 18 was the count then |
@@ -1832,7 +1832,7 @@ code does) or **deferred** (with the reason). Items in `crates/sir`, `crates/d3d
 | 32 | doc-corrected `dfb5943` | `agents/shader.md`: both bugs marked fixed in PR #26 |
 | 33 | doc-corrected `dfb5943` | `agents/vfs.md` (`T:` emptied by the runtime), `agents/loader.md` (`prepare.rs`), `agents/files.md` |
 | 34 | doc-corrected `dfb5943` | round 5 and `resources` (#29) in `agents/secondary-agents-updates.md`; `agents/shaderexec.md` is on `master` now |
-| 35 | doc-corrected `dfb5943` (in part) | `agents/pipelines.md` names `ondemand`; `pool.rs`, `translate.rs` (`crates/pipelines`) and `xlist` tests deferred |
+| 35 | doc-corrected `dfb5943` (in part) | `agents/pipelines.md` names `ondemand`; `pool.rs`, `translate.rs` (`crates/pipelines`) deferred; the `xlist` test comment says 0x4f8 (`aaa2e14`, lane `deferred`) |
 | 36 | **fixed** `f3108d3` (in part) | the card lock folder follows `REBUILD_LEAD_DIR` (`rebuild_cardlock::agents_dir`); the `D:\victory-data` defaults are in `crates/pipelines` (deferred) |
 
 Also fixed in `f3108d3`: a stale `agents\CARD` no longer blocks card jobs. The lock (`crates/cardlock`, re-exported as
