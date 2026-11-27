@@ -243,6 +243,36 @@ impl Diff {
     }
 }
 
+/// The register space of our immediate samplers (static samplers decoded from the console words; the lead's
+/// `sir::lift::IMMEDIATE_SAMPLER_SPACE`).
+pub const OURS_IMMEDIATE_SAMPLER_SPACE: u32 = 100;
+/// The register space of our descriptor shadow table (`sir::lift::SHADOW_SPACE`, plan decision 9).
+pub const OURS_SHADOW_SPACE: u32 = 101;
+
+/// Bindings compared with two named reasons for differing (and nothing else):
+/// - our descriptor shadow table (space 101) has no counterpart in the oracle;
+/// - our immediate samplers sit in space 100, the oracle's at its own registers: they match when the oracle has
+///   as many sampler bindings (`res_type` 1) as we have immediate ones.
+pub fn bindings_match(ours: &[Binding], oracle: &[Binding]) -> bool {
+    let span = |b: &Binding| u64::from(b.upper.saturating_sub(b.lower)) + 1;
+    let immediate: u64 = ours.iter().filter(|b| b.space == OURS_IMMEDIATE_SAMPLER_SPACE).map(span).sum();
+    let mut a: Vec<Binding> = ours.iter().filter(|b| b.space != OURS_IMMEDIATE_SAMPLER_SPACE && b.space != OURS_SHADOW_SPACE).cloned().collect();
+    let mut b: Vec<Binding> = oracle.to_vec();
+    if immediate > 0 {
+        let oracle_samplers: u64 = b.iter().filter(|x| x.res_type == 1).map(span).sum();
+        let our_heap_samplers: u64 = a.iter().filter(|x| x.res_type == 1).map(span).sum();
+        if oracle_samplers != immediate + our_heap_samplers {
+            return false;
+        }
+        a.retain(|x| x.res_type != 1);
+        b.retain(|x| x.res_type != 1);
+    }
+    let key = |x: &Binding| (x.space, x.res_type, x.lower, x.upper, x.kind, x.flags);
+    a.sort_by_key(key);
+    b.sort_by_key(key);
+    a == b
+}
+
 pub fn compare(ours: &Summary, oracle: &Summary) -> Vec<Diff> {
     let mut d = Vec::new();
     if ours.stage != oracle.stage {
@@ -257,7 +287,7 @@ pub fn compare(ours: &Summary, oracle: &Summary) -> Vec<Diff> {
     if ours.sig_patch != oracle.sig_patch {
         d.push(Diff::SigPatch);
     }
-    if ours.bindings != oracle.bindings {
+    if !bindings_match(&ours.bindings, &oracle.bindings) {
         d.push(Diff::Bindings);
     }
     if ours.threads != oracle.threads {
