@@ -376,7 +376,14 @@ fn main() {
     }
     // lifted GFX10 forms (rebuild_sir::lift::check): each program over 64 lanes against the console's result
     let mut lift_runs = 0usize;
+    let mut lift_skipped = 0usize;
     for (k, case) in rebuild_sir::lift::check::cases().iter().enumerate() {
+        // WARP's f32 -> f16 conversion rounds toward zero (overflow to the largest finite): the checks that
+        // round to f16 run on the card only
+        if warp && case.half_nan {
+            lift_skipped += 1;
+            continue;
+        }
         let dxil = match compile(&dxc, &case.hlsl, &dir, 100_000 + k) {
             Ok(d) => d,
             Err(e) => {
@@ -412,7 +419,10 @@ fn main() {
         }
         lift_runs += 1;
     }
-    println!("lifted    {lift_runs} GFX10 checks (bit scans, perm, SDWA, buffer formats) × 64 lanes against the console's result");
+    println!("lifted    {lift_runs} GFX10 checks (bit scans, perm, SDWA, 16-bit and packed ops, carries, 64-bit, buffer formats) × 64 lanes against the console's result");
+    if lift_skipped > 0 {
+        println!("skipped   {lift_skipped} lifted checks that round to f16: WARP's f32 -> f16 conversion rounds toward zero (the card rounds to nearest even, as the console)");
+    }
     println!("ran       {agnostic} agnostic (wave32, one console lane per thread) + {doubled} doubled (two console lanes per thread, EXEC as data)");
     println!("branches  {host_branches} lowered to host branches (uniform condition, or no cross-lane op inside) · {predicated} predicated (EXEC as data)");
     println!("ops       {loads} loads, {stores} stores through the windows (mapped and unmapped pages, uniform and varying windows) · {halves} packed half-precision ops");

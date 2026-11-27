@@ -24,6 +24,8 @@ pub struct Case {
     /// a NaN result matches any NaN (the payload of an fp16 NaN widened to f32 is the device's: NVIDIA's
     /// `f16tof32` returns the canonical 0x7fffffff, WARP keeps the payload)
     pub nan_any: bool,
+    /// the outputs are f16 halves: a NaN half matches any NaN half
+    pub half_nan: bool,
     reference: Box<dyn Fn([u32; 3]) -> Vec<u32>>,
 }
 
@@ -39,6 +41,11 @@ impl Case {
         got == want
             || (self.ulp > 0 && (got as i32).wrapping_sub(want as i32).unsigned_abs() <= self.ulp)
             || (self.nan_any && nan(got) && nan(want))
+            || (self.half_nan && (0..2).all(|k| {
+                let (g, w) = (got >> (16 * k) & 0xffff, want >> (16 * k) & 0xffff);
+                let hnan = |x: u32| x & 0x7c00 == 0x7c00 && x & 0x3ff != 0;
+                g == w || (hnan(g) && hnan(w))
+            }))
     }
 }
 
@@ -75,6 +82,24 @@ fn vopc(n: &str, src0: u32, vsrc1: u32) -> u32 {
 fn vop3(n: &str, vdst: u32, s: [u32; 3]) -> [u32; 2] {
     [0x35 << 26 | op(Encoding::Vop3, n) << 16 | vdst, s[2] << 18 | s[1] << 9 | s[0]]
 }
+/// A two-word instruction from named fields of its layout (tag bits set, `op` from the name).
+fn build(layout: &Layout, e: Encoding, n: &str, fields: &[(&str, u32)]) -> Vec<u32> {
+    let mut w = vec![0u32; layout.words as usize];
+    let mut put = |word: u8, lo: u8, width: u8, v: u32| {
+        let m = (((1u64 << width) - 1) << lo) as u32;
+        w[word as usize] = (w[word as usize] & !m) | ((v << lo) & m);
+    };
+    for &(word, lo, width, v) in layout.tag {
+        put(word, lo, width, v);
+    }
+    let all = [("op", op(e, n))];
+    for (name, v) in all.iter().copied().chain(fields.iter().copied()) {
+        let f = layout.fields.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("no field {name}"));
+        put(f.word, f.lo, f.width, v);
+    }
+    w
+}
+
 fn word(layout: &Layout, fields: &[(&str, u32)]) -> u32 {
     fields.iter().fold(0, |w, (n, v)| w | v << layout.fields.iter().find(|f| f.name == *n).unwrap().lo)
 }
@@ -176,11 +201,49 @@ pub fn f16_to_f32(h: u32) -> u32 {
     (if s == 1 { -v } else { v }).to_bits()
 }
 
+/// f32 to f16, rounded to nearest even (overflow to infinity, denormals kept, NaN quiet).
+pub fn f32_to_f16(x: f32) -> u32 {
+    f64_to_f16(f64::from(x))
+}
+
+/// f64 to f16, rounded to nearest even, in one rounding.
+pub fn f64_to_f16(x: f64) -> u32 {
+    let sign = if x.is_sign_negative() { 0x8000 } else { 0 };
+    if x.is_nan() {
+        return 0x7e00;
+    }
+    let a = x.abs();
+    if a.is_infinite() {
+        return sign | 0x7c00;
+    }
+    if a == 0.0 {
+        return sign;
+    }
+    // quantise to the f16 grid at this magnitude (ulp 2^(e - 10), at least 2^-24), ties to even
+    let e = ((a.to_bits() >> 52) & 0x7ff) as i32 - 1023;
+    let ulp = 2f64.powi(e.max(-14) - 10);
+    let v = (a / ulp).round_ties_even() * ulp;
+    if v >= 65520.0 {
+        return sign | 0x7c00;
+    }
+    if v < 2f64.powi(-14) {
+        return sign | (v / 2f64.powi(-24)) as u32;
+    }
+    let e = ((v.to_bits() >> 52) & 0x7ff) as i32 - 1023;
+    let m = ((v / 2f64.powi(e) - 1.0) * 1024.0) as u32;
+    sign | ((e + 15) as u32) << 10 | m
+}
+
+fn h(x: u32) -> f64 {
+    f64::from(f32::from_bits(f16_to_f32(x & 0xffff)))
+}
+
 /// Every check.
 pub fn cases() -> Vec<Case> {
     let mut v = Vec::new();
     let mut add = |name: &str, hlsl: String, outputs: usize, ulp: u32, nan_any: bool, f: Box<dyn Fn([u32; 3]) -> Vec<u32>>| {
-        v.push(Case { name: name.into(), hlsl, outputs, ulp, nan_any, reference: f });
+        let half_nan = name.contains("f16");
+        v.push(Case { name: name.into(), hlsl, outputs, ulp, nan_any, half_nan, reference: f });
     };
     // bit scans, reverse, not, byte permute (selector from v2: every byte kind)
     let mut w = vec![
@@ -239,6 +302,99 @@ pub fn cases() -> Vec<Case> {
             vec![and, cvt, mov, add, sel]
         }),
     );
+    // 16-bit float: VOP2 add/mul, VOP3 sub with op_sel (v0's high half, written into v5's high half), max
+    let w = vec![
+        vop2("v_add_f16", 3, V, 1),
+        vop2("v_mul_f16", 4, V, 1),
+        vop1("v_mov_b32", 5, V + 2),
+    ];
+    let mut w = w;
+    w.extend(build(&enc::VOP3A, Encoding::Vop3, "v_sub_f16", &[("vdst", 5), ("opsel", 0b1001), ("src0", V), ("src1", V + 1)]));
+    w.extend(build(&enc::VOP3A, Encoding::Vop3, "v_sub_f16", &[("vdst", 6), ("src0", V), ("src1", V + 1), ("neg", 0b10)]));
+    add(
+        "f16 add, mul, sub with op_sel and neg",
+        program(&w, &[3, 4, 5, 6]),
+        4,
+        0,
+        true,
+        Box::new(|[a, b, c]| {
+            // v3, v4 and v6 start at 0: the result's high half is theirs, 0
+            vec![f64_to_f16(h(a) + h(b)), f64_to_f16(h(a) * h(b)), (c & 0xffff) | f64_to_f16(h(a >> 16) - h(b)) << 16, f64_to_f16(h(a) - -h(b))]
+        }),
+    );
+    // packed: add (default selects), mul with the halves swapped and the high half's operand negated, fma,
+    // and integer halves
+    let mut w = Vec::new();
+    w.extend(build(&enc::VOP3P, Encoding::Vop3p, "v_pk_add_f16", &[("vdst", 3), ("src0", V), ("src1", V + 1), ("opsel_hi", 3), ("opsel_hi2", 1)]));
+    w.extend(build(&enc::VOP3P, Encoding::Vop3p, "v_pk_mul_f16", &[("vdst", 4), ("src0", V), ("src1", V + 1), ("opsel", 0b001), ("opsel_hi", 0b10), ("opsel_hi2", 1), ("neg_hi", 0b010)]));
+    w.extend(build(&enc::VOP3P, Encoding::Vop3p, "v_pk_fma_f16", &[("vdst", 5), ("src0", V), ("src1", V + 1), ("src2", V + 2), ("opsel_hi", 3), ("opsel_hi2", 1)]));
+    w.extend(build(&enc::VOP3P, Encoding::Vop3p, "v_pk_add_u16", &[("vdst", 6), ("src0", V), ("src1", V + 1), ("opsel_hi", 3), ("opsel_hi2", 1)]));
+    w.extend(build(&enc::VOP3P, Encoding::Vop3p, "v_pk_lshlrev_b16", &[("vdst", 7), ("src0", V), ("src1", V + 1), ("opsel_hi", 3), ("opsel_hi2", 1)]));
+    w.extend(build(&enc::VOP3P, Encoding::Vop3p, "v_pk_max_i16", &[("vdst", 8), ("src0", V), ("src1", V + 1), ("opsel_hi", 3), ("opsel_hi2", 1)]));
+    w.extend(build(&enc::VOP3P, Encoding::Vop3p, "v_pk_mad_u16", &[("vdst", 9), ("src0", V), ("src1", V + 1), ("src2", V + 2), ("opsel_hi", 3), ("opsel_hi2", 1)]));
+    add(
+        "packed f16 and u16/i16",
+        program(&w, &[3, 4, 5, 6, 7, 8, 9]),
+        7,
+        0,
+        true,
+        Box::new(|[a, b, c]| {
+            let pk = |lo: u32, hi: u32| (lo & 0xffff) | (hi & 0xffff) << 16;
+            let s16 = |x: u32| i32::from(x as u16 as i16);
+            vec![
+                pk(f64_to_f16(h(a) + h(b)), f64_to_f16(h(a >> 16) + h(b >> 16))),
+                pk(f64_to_f16(h(a >> 16) * h(b)), f64_to_f16(h(a) * -h(b >> 16))),
+                pk(f64_to_f16(h(a).mul_add(h(b), h(c))), f64_to_f16(h(a >> 16).mul_add(h(b >> 16), h(c >> 16)))),
+                pk(a.wrapping_add(b), (a >> 16).wrapping_add(b >> 16)),
+                pk((b & 0xffff) << (a & 15), (b >> 16) << ((a >> 16) & 15)),
+                pk(s16(a).max(s16(b)) as u32, s16(a >> 16).max(s16(b >> 16)) as u32),
+                pk((a & 0xffff) * (b & 0xffff) + (c & 0xffff), (a >> 16) * (b >> 16) + (c >> 16)),
+            ]
+        }),
+    );
+    // v_cvt_pk_u8_f32 (halves of 0-255 to round to nearest even, and raw bits: NaN, infinities, huge), carry
+    // chains, a 64-bit shift and compare, v_mul_hi_i32
+    let mut w = vec![vop1("v_cvt_f32_ubyte0", 10, V), vop2("v_mul_f32", 10, 240, 10)];
+    w.extend(vop3("v_cvt_pk_u8_f32", 3, [V + 10, 128 + 2, V + 1]));
+    w.extend(vop3("v_cvt_pk_u8_f32", 4, [V, 128 + 1, V + 1]));
+    w.extend(build(&enc::VOP3B, Encoding::Vop3, "v_add_co_u32", &[("vdst", 5), ("sdst", 106), ("src0", V), ("src1", V + 1)]));
+    w.push(op(Encoding::Vop2, "v_add_co_ci_u32") << 25 | 6 << 17 | 2 << 9 | (V + 1));
+    w.extend(vop3("v_cndmask_b32", 7, [128, 129, 106]));
+    w.extend(build(&enc::VOP3B, Encoding::Vop3, "v_sub_co_u32", &[("vdst", 8), ("sdst", 106), ("src0", V), ("src1", V + 1)]));
+    w.extend(vop3("v_cndmask_b32", 9, [128, 129, 106]));
+    w.extend(vop3("v_lshlrev_b64", 11, [V + 2, V, 0]));
+    w.extend(build(&enc::VOP3A, Encoding::Vop3, "v_cmp_lt_i64", &[("vdst", 106), ("src0", V), ("src1", V + 1)]));
+    w.extend(vop3("v_cndmask_b32", 13, [128, 129, 106]));
+    w.extend(vop3("v_mul_hi_i32", 14, [V, V + 1, 0]));
+    add(
+        "cvt_pk_u8, carries, 64-bit shift and compare, mul_hi_i32",
+        program(&w, &[3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14]),
+        11,
+        0,
+        false,
+        Box::new(|[a, b, c]| {
+            let u8f = |x: f32| if x.is_nan() { 0 } else { x.round_ties_even().clamp(0.0, 255.0) as u32 };
+            let put = |old: u32, k: u32, x: u32| (old & !(0xff << (8 * k))) | x << (8 * k);
+            let s = u64::from(a) + u64::from(b);
+            let s2 = u64::from(b) + u64::from(c) + (s >> 32);
+            let x = (u64::from(b) << 32 | u64::from(a)) << (c & 63);
+            let p = (u64::from(b) << 32 | u64::from(a)) as i64;
+            let q = (u64::from(c) << 32 | u64::from(b)) as i64;
+            vec![
+                put(b, 2, u8f((a & 0xff) as f32 * 0.5)),
+                put(b, 1, u8f(f32::from_bits(a))),
+                s as u32,
+                s2 as u32,
+                (s2 >> 32) as u32,
+                a.wrapping_sub(b),
+                u32::from(a < b),
+                x as u32,
+                (x >> 32) as u32,
+                u32::from(p < q),
+                ((i64::from(a as i32) * i64::from(b as i32)) >> 32) as u32,
+            ]
+        }),
+    );
     // the buffer format unpack: every one-dword format, all four components of v0
     for code in 1..=61u32 {
         let Some(f) = fmt::buf_format(code) else { continue };
@@ -273,6 +429,18 @@ mod tests {
         let f = fmt::buf_format(56).unwrap(); // 8_8_8_8 unorm
         assert_eq!(unpack(&f, 0xff00_0080, 3), 1.0f32.to_bits());
         assert_eq!(unpack(&f, 0xff00_0080, 0), (128.0f32 / 255.0).to_bits());
-        assert_eq!(cases().len(), 2 + 61);
+        assert_eq!(f32_to_f16(1.0), 0x3c00);
+        assert_eq!(f32_to_f16(65504.0), 0x7bff);
+        assert_eq!(f32_to_f16(65520.0), 0x7c00);
+        assert_eq!(f32_to_f16(2f32.powi(-24)), 0x0001);
+        assert_eq!(f32_to_f16(2f32.powi(-25)), 0x0000); // a tie: to even (0)
+        assert_eq!(f32_to_f16(3.0 * 2f32.powi(-25)), 0x0002); // a tie: to even (2)
+        assert_eq!(f32_to_f16(1.0 + 2f32.powi(-11)), 0x3c00); // a tie: to even
+        assert_eq!(f32_to_f16(1.0 + 3.0 * 2f32.powi(-11)), 0x3c02);
+        assert_eq!(f32_to_f16(-2.0), 0xc000);
+        for k in 0..0x7c00u32 {
+            assert_eq!(f32_to_f16(f32::from_bits(f16_to_f32(k))), k, "{k:#x}");
+        }
+        assert_eq!(cases().len(), 5 + 61);
     }
 }

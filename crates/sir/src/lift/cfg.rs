@@ -634,6 +634,12 @@ impl Emit<'_, '_, '_> {
         match cond {
             Cond::Scc0 => "!scc".into(),
             Cond::Scc1 => "scc".into(),
+            // VCC holding data (written as a spare SGPR pair on every path): the branch tests the data
+            Cond::Vccz | Cond::Vccnz if self.l.f.written.contains(&106) => {
+                let hi = if self.l.wave64 && self.l.f.written.contains(&107) { " | s107" } else { "" };
+                let z = if cond == Cond::Vccz { "==" } else { "!=" };
+                format!("(s106{hi}) {z} 0u")
+            }
             Cond::Vccz => format!("!WaveActiveAnyTrue({})", self.l.mask_name(106)),
             Cond::Vccnz => format!("WaveActiveAnyTrue({})", self.l.mask_name(106)),
             Cond::Execz => "!WaveActiveAnyTrue(ex)".into(),

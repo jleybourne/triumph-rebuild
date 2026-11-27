@@ -109,6 +109,9 @@ uint sir_f2u(float x) { return isnan(x) ? 0 : (x >= 4294967295.0f ? 0xffffffff :
 struct SirCb { uint4 d[4096]; };
 uint sir_bfe_u(uint v, uint off, uint w) { off &= 31; w &= 31; return w == 0 ? 0 : (v >> off) & ((1u << w) - 1); }
 int sir_bfe_i(int v, uint off, uint w) { off &= 31; w &= 31; return w == 0 ? 0 : (v << (32 - off - w)) >> (32 - w); }
+// f32 to f16 bits, rounded to nearest even as the console's 16-bit ops round (a native conversion; HLSL's
+// f32tof16 rounding is the device's: WARP rounds toward zero and clamps overflow)
+uint sir_f16(float x) { return (uint)asuint16((float16_t)x); }
 // the dword at byte address a (any alignment) from the aligned dwords lo and hi that hold it
 uint sir_unaligned(uint lo, uint hi, uint a) { uint sh = (a & 3u) * 8u; return sh == 0u ? lo : (lo >> sh) | (hi << (32u - sh)); }
 // a V#'s dst_sel: 0 zero, 1 one, 4-7 channel x-w
@@ -151,6 +154,21 @@ fn inline_bits(code: u16) -> String {
         128..=192 => format!("{}u", code - 128),
         193..=208 => format!("{}u", (-(i32::from(code) - 192)) as u32),
         c => format!("asuint({})", inline_float(c).unwrap_or("0.0f")),
+    }
+}
+
+/// The f16 bit pattern of an inline float constant 240..248 (what 16-bit operations read).
+fn inline_f16(code: u16) -> u32 {
+    match code {
+        240 => 0x3800,
+        241 => 0xB800,
+        242 => 0x3C00,
+        243 => 0xBC00,
+        244 => 0x4000,
+        245 => 0xC000,
+        246 => 0x4400,
+        247 => 0xC400,
+        _ => 0x3118, // 1 / (2 pi)
     }
 }
 
@@ -271,6 +289,16 @@ impl Lifter<'_> {
                 self.out.sgprs.insert(124);
                 "s124".into()
             }
+            // VCC as data: only after data was written to it on every path here
+            Src::VccLo | Src::VccHi => {
+                let n = if enc::src(code) == Src::VccLo { 106 } else { 107 };
+                if !self.f.written.contains(&n) {
+                    self.why = Some("a lane mask read as data".into());
+                    return None;
+                }
+                self.out.sgprs.insert(n);
+                format!("s{n}")
+            }
             Src::Null => "0u".into(),
             _ => return None,
         })
@@ -324,6 +352,9 @@ impl Lifter<'_> {
     /// f32 otherwise; `neg` negates, `neg_hi` takes the absolute value; the result is f32 (`v_fma_mix_f32`) or
     /// f16 into the low or high half (`v_fma_mixlo_f16`, `v_fma_mixhi_f16`).
     fn vop3p(&mut self, name: &str, d: &Decoded) -> Option<()> {
+        if name.starts_with("v_pk_") {
+            return self.packed(name, d);
+        }
         if !matches!(name, "v_fma_mix_f32" | "v_fma_mixlo_f16" | "v_fma_mixhi_f16") {
             return None;
         }
@@ -363,6 +394,83 @@ impl Lifter<'_> {
             _ => format!("(v{v} & 0xffffu) | (f32tof16({r}) << 16)"),
         };
         self.vwrite_raw(v, e);
+        Some(())
+    }
+
+    /// Packed 16-bit ops (`v_pk_*`): each half computed on its own. Operand `i` of the low half is the half
+    /// `op_sel` bit `i` names, of the high half the one `op_sel_hi` names; `neg` / `neg_hi` negate a float
+    /// operand of the low / high half. f16 goes through f32 (exact operands, one rounding back to f16), as the
+    /// 16-bit ops do. Integer halves wrap; integer clamp is refused.
+    fn packed(&mut self, name: &str, d: &Decoded) -> Option<()> {
+        let op = name.strip_prefix("v_pk_")?;
+        let float = op.ends_with("_f16");
+        let n = match op {
+            "fma_f16" | "mad_u16" | "mad_i16" => 3,
+            "add_f16" | "mul_f16" | "max_f16" | "min_f16" | "add_u16" | "sub_u16" | "add_i16" | "sub_i16" | "mul_lo_u16" | "lshlrev_b16"
+            | "lshrrev_b16" | "ashrrev_i16" | "max_u16" | "min_u16" | "max_i16" | "min_i16" => 2,
+            _ => {
+                self.why = Some(name.into());
+                return None;
+            }
+        };
+        if !float && d.get("clamp")? == 1 {
+            self.why = Some("integer clamp".into());
+            return None;
+        }
+        let (opsel, hi) = (d.get("opsel")?, d.get("opsel_hi")? | d.get("opsel_hi2")? << 2);
+        let (neg, neg_hi) = (d.get("neg")?, d.get("neg_hi")?);
+        let mut raw = Vec::new();
+        for field in ["src0", "src1", "src2"].iter().take(n) {
+            let code = d.get(field)?;
+            raw.push(match enc::src(code) {
+                Src::Inline(c @ 240..=248) => format!("{}u", inline_f16(c)),
+                _ => self.src(code, d.literal)?,
+            });
+        }
+        let mut halves = Vec::new();
+        for h in 0..2u32 {
+            let (sel, ng) = if h == 0 { (opsel, neg) } else { (hi, neg_hi) };
+            let a: Vec<String> = (0..n)
+                .map(|i| {
+                    let x = if sel >> i & 1 == 1 { format!("({} >> 16)", raw[i]) } else { raw[i].clone() };
+                    if float {
+                        let f = format!("f16tof32({x})");
+                        if ng >> i & 1 == 1 { format!("(-{f})") } else { f }
+                    } else {
+                        format!("({x} & 0xffffu)")
+                    }
+                })
+                .collect();
+            let s = |x: &str| format!("(((int){x} << 16) >> 16)");
+            let e = match op {
+                "add_f16" => format!("{} + {}", a[0], a[1]),
+                "mul_f16" => format!("{} * {}", a[0], a[1]),
+                "fma_f16" => format!("mad({}, {}, {})", a[0], a[1], a[2]),
+                "max_f16" => format!("max({}, {})", a[0], a[1]),
+                "min_f16" => format!("min({}, {})", a[0], a[1]),
+                "add_u16" | "add_i16" => format!("{} + {}", a[0], a[1]),
+                "sub_u16" | "sub_i16" => format!("{} - {}", a[0], a[1]),
+                "mul_lo_u16" => format!("{} * {}", a[0], a[1]),
+                "mad_u16" => format!("{} * {} + {}", a[0], a[1], a[2]),
+                "mad_i16" => format!("(uint)({} * {} + {})", s(&a[0]), s(&a[1]), s(&a[2])),
+                "lshlrev_b16" => format!("{} << ({} & 15u)", a[1], a[0]),
+                "lshrrev_b16" => format!("{} >> ({} & 15u)", a[1], a[0]),
+                "ashrrev_i16" => format!("(uint)({} >> ({} & 15u))", s(&a[1]), a[0]),
+                "max_u16" => format!("max({}, {})", a[0], a[1]),
+                "min_u16" => format!("min({}, {})", a[0], a[1]),
+                "max_i16" => format!("(uint)max({}, {})", s(&a[0]), s(&a[1])),
+                "min_i16" => format!("(uint)min({}, {})", s(&a[0]), s(&a[1])),
+                _ => return None,
+            };
+            halves.push(if float {
+                let e = if d.get("clamp")? == 1 { format!("saturate({e})") } else { e };
+                format!("sir_f16({e})")
+            } else {
+                format!("(({e}) & 0xffffu)")
+            });
+        }
+        let v = d.get("vdst")? as u16;
+        self.vwrite_raw(v, format!("{} | ({} << 16)", halves[0], halves[1]));
         Some(())
     }
 
@@ -539,13 +647,115 @@ impl Lifter<'_> {
                 self.line(format!("{guard}sir_lds[(v{a} >> 2) + {}u] = {x};", o0 * m));
                 self.line(format!("{guard}sir_lds[(v{a} >> 2) + {}u] = {y};", o1 * m));
             }
-            "ds_add_u32" => {
+            // atomics, with the old value returned by the `_rtn` forms
+            n if lds_atomic(n).is_some() => {
+                let (f, rtn) = lds_atomic(n)?;
                 let x = data(self, "data0", 0)?;
-                self.line(format!("{guard}InterlockedAdd(sir_lds[(v{a} + {off}u) >> 2], {x});"));
+                let args = match n.trim_start_matches("ds_").split('_').next()? {
+                    "sub" => format!("0u - {x}"),
+                    "cmpst" => format!("{x}, {}", data(self, "data1", 0)?),
+                    _ => x,
+                };
+                self.line("{ uint o = 0;".into());
+                self.line(format!("  {guard}{f}(sir_lds[(v{a} + {off}u) >> 2], {args}, o);"));
+                if rtn {
+                    let vdst = d.get("vdst")? as u16;
+                    self.vwrite_raw(vdst, "(uint)o".into());
+                }
+                self.line("}".into());
             }
             _ => return None,
         }
         Some(())
+    }
+
+    /// `s_not_b64` / `s_not_b32`: of a lane mask, the per-lane complement (wave64 `_b64`, wave32 `_b32`);
+    /// of data, the bitwise one. SCC: any bit (lane) set.
+    fn s_not(&mut self, name: &str, d: &Decoded) -> Option<()> {
+        let (src, dst) = (d.get("ssrc0")?, d.get("sdst")?);
+        let wide = name.ends_with("_b64");
+        let mask = match enc::src(src) {
+            Src::ExecLo | Src::VccLo => true,
+            Src::Sgpr(n) => self.f.mask_cur.contains(&n),
+            _ => false,
+        };
+        if mask && wide == self.wave64 {
+            let m = self.mask_read(src)?;
+            self.line(format!("{{ bool r = !{m};"));
+            self.mask_write(dst, "r")?;
+            self.mask_scc("r");
+            self.line("}".into());
+            return Some(());
+        }
+        let n = if wide { 2 } else { 1 };
+        let xs: Option<Vec<String>> = (0..n).map(|k| self.src(src + k, None)).collect();
+        let xs = xs?;
+        self.line(format!("{{ uint r0 = ~{}, r1 = ~{};", xs[0], xs.get(1).map_or("0u", |s| s.as_str())));
+        self.line("  scc = (r0 | r1) != 0;".into());
+        self.swrite(dst, "r0".into())?;
+        if wide {
+            self.swrite(dst + 1, "r1".into())?;
+        }
+        self.line("}".into());
+        Some(())
+    }
+
+    /// A 16-bit operand in the low half of a `uint` expression (the high half is not cleared): a register's low
+    /// half, or its high half with VOP3 `op_sel` bit `i` (SDWA selects are already in `sir_a`/`sir_b`). Inline
+    /// float constants are their f16 bit patterns (the high half 0).
+    fn src16(&mut self, d: &Decoded, field: &str, i: u32) -> Option<String> {
+        if self.sdwa && (field == "src0" || field == "vsrc1") {
+            return Some(if field == "src0" { "sir_a" } else { "sir_b" }.into());
+        }
+        if self.dpp.is_some() && field == "src0" {
+            return Some("sir_dpp".into());
+        }
+        if field == "vsrc1" {
+            let v = d.get("vsrc1")? as u16;
+            self.out.vgprs.insert(v);
+            return Some(format!("v{v}"));
+        }
+        let code = d.get(field)?;
+        let x = match enc::src(code) {
+            Src::Inline(c @ 240..=248) => format!("{}u", inline_f16(c)),
+            _ => self.src(code, d.literal)?,
+        };
+        Some(if d.encoding == Encoding::Vop3 && d.get("opsel").is_some_and(|o| o >> i & 1 == 1) { format!("({x} >> 16)") } else { x })
+    }
+
+    /// An f16 operand as a float (exact), with abs/neg (VOP3, SDWA or DPP).
+    fn fsrc16(&mut self, d: &Decoded, field: &str, i: u32) -> Option<String> {
+        let mut e = format!("f16tof32({})", self.src16(d, field, i)?);
+        let modifiers = if self.sdwa && (field == "src0" || field == "vsrc1") {
+            Some(if field == "src0" { "src0" } else { "src1" })
+        } else if self.dpp.is_some() && field == "src0" {
+            Some("src0")
+        } else {
+            None
+        };
+        let (abs, neg) = match modifiers {
+            Some(k) => (d.get(&format!("{k}_abs")) == Some(1), d.get(&format!("{k}_neg")) == Some(1)),
+            None if d.encoding == Encoding::Vop3 => (d.get("abs")? >> i & 1 == 1, d.get("neg")? >> i & 1 == 1),
+            None => (false, false),
+        };
+        if abs {
+            e = format!("abs({e})");
+        }
+        if neg {
+            e = format!("(-{e})");
+        }
+        Some(e)
+    }
+
+    /// A 64-bit integer operand (a register pair, or an inline integer sign-extended) as a `uint64_t`.
+    fn src64(&mut self, code: u32) -> Option<String> {
+        let (lo, hi) = match enc::src(code) {
+            Src::Vgpr(_) | Src::Sgpr(_) => (self.src(code, None)?, self.src(code + 1, None)?),
+            Src::Inline(c @ 128..=192) => (format!("{}u", c - 128), "0u".to_string()),
+            Src::Inline(c @ 193..=208) => (format!("{}u", (-(i32::from(c) - 192)) as u32), "0xffffffffu".to_string()),
+            _ => return None,
+        };
+        Some(format!("(((uint64_t){hi} << 32) | (uint64_t){lo})"))
     }
 
     fn usrc(&mut self, d: &Decoded, field: &str) -> Option<String> {
@@ -574,6 +784,10 @@ impl Lifter<'_> {
     /// constants 0 and -1 (no lane, every lane).
     fn mask_read(&mut self, code: u32) -> Option<String> {
         match enc::src(code) {
+            Src::VccLo if self.f.may_written.contains(&106) => {
+                self.why = Some("VCC read as a lane mask after data was written to it".into());
+                None
+            }
             Src::VccLo => Some(self.mask_name(106)),
             Src::ExecLo => Some("ex".into()),
             Src::Sgpr(n) if self.f.mask_cur.contains(&n) => Some(self.mask_name(n)),
@@ -598,6 +812,10 @@ impl Lifter<'_> {
                 self.line(format!("ex = {e};"));
             }
             Src::VccLo => {
+                for n in [106, 107] {
+                    self.f.written.remove(&n);
+                    self.f.may_written.remove(&n);
+                }
                 let v = self.mask_name(106);
                 self.line(format!("{v} = {e};"));
             }
@@ -680,6 +898,37 @@ impl Lifter<'_> {
         self.vwrite(d, format!("asuint({e})"));
     }
 
+    /// Writes a 16-bit result (an f32 expression rounded to f16 with VOP3 clamp/omod when `float`, else the
+    /// low 16 bits of a `uint`) into the destination's low half, or its high half with VOP3 `op_sel` bit 3; the
+    /// other half is kept (GFX10). Under SDWA the 16 bits go to `sir_r` for the destination select.
+    fn vwrite16(&mut self, d: &Decoded, expr: String, float: bool) {
+        let mut e = expr;
+        if float {
+            if d.encoding == Encoding::Vop3 || self.sdwa {
+                match d.get("omod") {
+                    Some(1) => e = format!("({e}) * 2.0f"),
+                    Some(2) => e = format!("({e}) * 4.0f"),
+                    Some(3) => e = format!("({e}) * 0.5f"),
+                    _ => {}
+                }
+                if d.get("clamp") == Some(1) {
+                    e = format!("saturate({e})");
+                }
+            }
+            e = format!("sir_f16({e})");
+        } else {
+            e = format!("(({e}) & 0xffffu)");
+        }
+        let v = d.get("vdst").unwrap_or(0) as u16;
+        if self.sdwa {
+            self.vwrite_raw(v, e);
+        } else if d.encoding == Encoding::Vop3 && d.get("opsel").is_some_and(|o| o >> 3 & 1 == 1) {
+            self.vwrite_raw(v, format!("(v{v} & 0xffffu) | ({e} << 16)"));
+        } else {
+            self.vwrite_raw(v, format!("(v{v} & 0xffff0000u) | {e}"));
+        }
+    }
+
     fn vwrite(&mut self, d: &Decoded, expr: String) {
         let v = d.get("vdst").unwrap_or(0) as u16;
         self.vwrite_raw(v, expr);
@@ -709,6 +958,15 @@ impl Lifter<'_> {
             Src::M0 => {
                 self.out.sgprs.insert(124);
                 let _ = writeln!(self.out.body, "    s124 = {expr};");
+            }
+            // VCC as a spare SGPR pair (its lane mask is not current any more)
+            Src::VccLo | Src::VccHi => {
+                let s = if enc::src(n) == Src::VccLo { 106 } else { 107 };
+                self.out.sgprs.insert(s);
+                self.f.written.insert(s);
+                self.f.may_written.insert(s);
+                self.f.consts.remove(&s);
+                let _ = writeln!(self.out.body, "    s{s} = {expr};");
             }
             Src::Null => {}
             _ => return None,
@@ -953,6 +1211,68 @@ impl Lifter<'_> {
                 }
                 self.line("}".into());
                 Some(())
+            }
+            // s_waitcnt_vscnt / vmcnt / expcnt / lgkmcnt (SOPK): no effect on results
+            n if n.starts_with("s_waitcnt") => Some(()),
+            "s_not_b64" | "s_not_b32" => self.s_not(name, d),
+            "s_bfm_b32" => {
+                let (x, y) = (a(self)?, b(self)?);
+                self.swrite(sdst?, format!("((1u << ({x} & 31u)) - 1u) << ({y} & 31u)"))
+            }
+            "s_mul_hi_u32" | "s_mul_hi_i32" => {
+                let (x, y) = (a(self)?, b(self)?);
+                let e = if name.ends_with("u32") {
+                    format!("(uint)(((uint64_t){x} * (uint64_t){y}) >> 32)")
+                } else {
+                    format!("(uint)(((int64_t)(int){x} * (int64_t)(int){y}) >> 32)")
+                };
+                self.swrite(sdst?, e)
+            }
+            // add / subtract with SCC as the carry in and out
+            "s_addc_u32" | "s_subb_u32" => {
+                let (x, y) = (a(self)?, b(self)?);
+                let sign = if name == "s_addc_u32" { "+" } else { "-" };
+                self.line(format!("{{ uint64_t sir_s = (uint64_t){x} {sign} (uint64_t){y} {sign} (scc ? 1u : 0u);"));
+                self.line("  scc = (sir_s >> 32) != 0;".into());
+                self.swrite(sdst?, "(uint)sir_s".into())?;
+                self.line("}".into());
+                Some(())
+            }
+            // bit counts, scans and single-bit writes of data (a lane mask read here is refused as data)
+            "s_bcnt1_i32_b32" | "s_bcnt0_i32_b32" | "s_ff1_i32_b32" | "s_flbit_i32_b32" | "s_flbit_i32" | "s_abs_i32" | "s_sext_i32_i8"
+            | "s_sext_i32_i16" => {
+                let x = a(self)?;
+                let (e, scc) = match name {
+                    "s_bcnt1_i32_b32" => (format!("countbits({x})"), true),
+                    "s_bcnt0_i32_b32" => (format!("32u - countbits({x})"), true),
+                    "s_ff1_i32_b32" => (format!("firstbitlow({x})"), false),
+                    "s_flbit_i32_b32" => (format!("({x} == 0u ? 0xffffffffu : 31u - firstbithigh({x}))"), false),
+                    "s_flbit_i32" => (format!("(({x} == 0u || {x} == 0xffffffffu) ? 0xffffffffu : 31u - firstbithigh((int){x}))"), false),
+                    "s_abs_i32" => (format!("(uint)abs((int){x})"), true),
+                    "s_sext_i32_i8" => (format!("(uint)(((int){x} << 24) >> 24)"), false),
+                    _ => (format!("(uint)(((int){x} << 16) >> 16)"), false),
+                };
+                self.line(format!("{{ uint r = {e};"));
+                if scc {
+                    self.line("  scc = r != 0;".into());
+                }
+                self.swrite(sdst?, "r".into())?;
+                self.line("}".into());
+                Some(())
+            }
+            "s_bcnt1_i32_b64" => {
+                let src = d.get("ssrc0")?;
+                let (x, y) = (self.src(src, None)?, self.src(src + 1, None)?);
+                self.line(format!("{{ uint r = countbits({x}) + countbits({y});"));
+                self.line("  scc = r != 0;".into());
+                self.swrite(sdst?, "r".into())?;
+                self.line("}".into());
+                Some(())
+            }
+            "s_bitset0_b32" | "s_bitset1_b32" => {
+                let (k, x) = (a(self)?, self.usrc(d, "sdst")?);
+                let e = if name == "s_bitset1_b32" { format!("{x} | (1u << ({k} & 31u))") } else { format!("{x} & ~(1u << ({k} & 31u))") };
+                self.swrite(sdst?, e)
             }
             n if n.starts_with("s_cmp_") => {
                 let (x, y) = (a(self)?, b(self)?);
@@ -1395,6 +1715,108 @@ impl Lifter<'_> {
                 self.vwrite(d, e);
                 Some(())
             }
+            // 16-bit float, computed in f32 from exact f16 operands and rounded to f16 (exact for add, sub, mul)
+            "v_add_f16" | "v_sub_f16" | "v_subrev_f16" | "v_mul_f16" | "v_max_f16" | "v_min_f16" | "v_ldexp_f16" => {
+                let x = self.fsrc16(d, "src0", 0)?;
+                let y = self.fsrc16(d, if d.encoding == Encoding::Vop3 { "src1" } else { "vsrc1" }, 1)?;
+                let e = match name {
+                    "v_add_f16" => format!("{x} + {y}"),
+                    "v_sub_f16" => format!("{x} - {y}"),
+                    "v_subrev_f16" => format!("{y} - {x}"),
+                    "v_mul_f16" => format!("{x} * {y}"),
+                    "v_max_f16" => format!("max({x}, {y})"),
+                    "v_min_f16" => format!("min({x}, {y})"),
+                    // the exponent is a 16-bit signed integer operand
+                    _ => {
+                        let k = self.src16(d, if d.encoding == Encoding::Vop3 { "src1" } else { "vsrc1" }, 1)?;
+                        format!("ldexp({x}, (float)(((int){k} << 16) >> 16))")
+                    }
+                };
+                self.vwrite16(d, e, true);
+                Some(())
+            }
+            "v_fma_f16" | "v_mad_f16" | "v_fmac_f16" | "v_mac_f16" => {
+                let x = self.fsrc16(d, "src0", 0)?;
+                let y = self.fsrc16(d, if d.encoding == Encoding::Vop3 { "src1" } else { "vsrc1" }, 1)?;
+                let z = if name.contains("mac") {
+                    let v = d.get("vdst")? as u16;
+                    self.out.vgprs.insert(v);
+                    format!("f16tof32(v{v})")
+                } else {
+                    self.fsrc16(d, "src2", 2)?
+                };
+                self.vwrite16(d, format!("mad({x}, {y}, {z})"), true);
+                Some(())
+            }
+            "v_rcp_f16" | "v_sqrt_f16" | "v_rsq_f16" | "v_floor_f16" | "v_ceil_f16" | "v_trunc_f16" | "v_rndne_f16" | "v_fract_f16"
+            | "v_exp_f16" | "v_log_f16" | "v_sin_f16" | "v_cos_f16" => {
+                let x = self.fsrc16(d, "src0", 0)?;
+                let e = match name {
+                    "v_rcp_f16" => format!("rcp({x})"),
+                    "v_sqrt_f16" => format!("sqrt({x})"),
+                    "v_rsq_f16" => format!("rsqrt({x})"),
+                    "v_floor_f16" => format!("floor({x})"),
+                    "v_ceil_f16" => format!("ceil({x})"),
+                    "v_trunc_f16" => format!("trunc({x})"),
+                    "v_rndne_f16" => format!("round({x})"),
+                    "v_fract_f16" => format!("frac({x})"),
+                    "v_exp_f16" => format!("exp2({x})"),
+                    "v_log_f16" => format!("log2({x})"),
+                    "v_sin_f16" => format!("sin(({x}) * 6.2831853f)"),
+                    _ => format!("cos(({x}) * 6.2831853f)"),
+                };
+                self.vwrite16(d, e, true);
+                Some(())
+            }
+            // 64-bit shifts (VOP3): the shift amount from src0, the pair from src1
+            "v_lshlrev_b64" | "v_lshrrev_b64" | "v_ashrrev_i64" => {
+                let k = u0(self)?;
+                let x = self.src64(d.get("src1")?)?;
+                let e = match name {
+                    "v_lshlrev_b64" => format!("{x} << ({k} & 63u)"),
+                    "v_lshrrev_b64" => format!("{x} >> ({k} & 63u)"),
+                    _ => format!("(uint64_t)((int64_t){x} >> ({k} & 63u))"),
+                };
+                let v = d.get("vdst")? as u16;
+                self.line(format!("{{ uint64_t sir_s = {e};"));
+                self.vwrite_raw(v, "(uint)sir_s".into());
+                self.vwrite_raw(v + 1, "(uint)(sir_s >> 32)".into());
+                self.line("}".into());
+                Some(())
+            }
+            "v_mul_hi_i32" => {
+                let (x, y) = (u0(self)?, u1(self)?);
+                self.vwrite(d, format!("(uint)(((int64_t)(int){x} * (int64_t)(int){y}) >> 32)"));
+                Some(())
+            }
+            // byte S1 of the result is S0 as an unsigned byte (rounded to nearest even, saturated, NaN 0); the
+            // other bytes are S2's
+            "v_cvt_pk_u8_f32" => {
+                let (x, y, z) = (f0(self)?, u1(self)?, u2(self)?);
+                self.vwrite(d, format!("({z} & ~(0xffu << (({y} & 3u) * 8u))) | ((uint)clamp(round({x}), 0.0f, 255.0f) << (({y} & 3u) * 8u))"));
+                Some(())
+            }
+            // 32-bit add/sub with a carry (borrow) out to a lane mask, and in from one (`_ci`): VCC for VOP2,
+            // `sdst` / `src2` for VOP3
+            "v_add_co_u32" | "v_sub_co_u32" | "v_subrev_co_u32" | "v_add_co_ci_u32" | "v_sub_co_ci_u32" | "v_subrev_co_ci_u32" => {
+                if d.get("clamp") == Some(1) {
+                    self.why = Some("clamp".into());
+                    return None;
+                }
+                let (mut x, mut y) = (u0(self)?, u1(self)?);
+                if name.starts_with("v_subrev") {
+                    std::mem::swap(&mut x, &mut y);
+                }
+                let c = if name.contains("_ci_") { format!("({} ? 1u : 0u)", self.mask_src(d)?) } else { "0u".into() };
+                let sign = if name.starts_with("v_add") { "+" } else { "-" };
+                self.line(format!("{{ uint64_t sir_s = (uint64_t){x} {sign} (uint64_t){y} {sign} (uint64_t){c};"));
+                self.vwrite(d, "(uint)sir_s".into());
+                let dst = if d.encoding == Encoding::Vop3 { d.get("sdst")? } else { 106 };
+                let carry = if self.f.narrowed { "ex && (sir_s >> 32) != 0u" } else { "(sir_s >> 32) != 0u" };
+                self.mask_write(dst, carry)?;
+                self.line("}".into());
+                Some(())
+            }
             "v_cndmask_b32" => {
                 let (x, y) = (u0(self)?, u1(self)?);
                 let m = self.mask_src(d)?;
@@ -1442,6 +1864,26 @@ impl Lifter<'_> {
                     format!("asfloat(v{v})")
                 };
                 fcmp(op, &a, &b)?
+            }
+            "f16" if op == "class" => return None,
+            "f16" => {
+                let a = self.fsrc16(d, "src0", 0)?;
+                let b = self.fsrc16(d, if d.encoding == Encoding::Vop3 { "src1" } else { "vsrc1" }, 1)?;
+                fcmp(op, &a, &b)?
+            }
+            "u64" | "i64" => {
+                if self.sdwa || self.dpp.is_some() {
+                    return None;
+                }
+                let a = self.src64(d.get("src0")?)?;
+                let b = if d.encoding == Encoding::Vop3 { self.src64(d.get("src1")?)? } else { self.src64(256 + d.get("vsrc1")?)? };
+                let (o, _) = cmp_op(&format!("{op}_u32"))?;
+                let cast = if ty == "i64" { "(int64_t)" } else { "" };
+                match op {
+                    "t" => "true".into(),
+                    "f" => "false".into(),
+                    _ => format!("{cast}{a} {o} {cast}{b}"),
+                }
             }
             "u32" | "i32" => {
                 let a = self.usrc(d, "src0")?;
@@ -1501,6 +1943,24 @@ fn cmp_op(s: &str) -> Option<(&'static str, bool)> {
         },
         signed,
     ))
+}
+
+/// An LDS atomic: (the `Interlocked*` function, returns the old value).
+fn lds_atomic(n: &str) -> Option<(&'static str, bool)> {
+    let rtn = n.contains("_rtn_");
+    let f = match n.replace("_rtn", "").as_str() {
+        "ds_add_u32" | "ds_sub_u32" => "InterlockedAdd",
+        // (signed min/max would compile unsigned on the `uint` LDS array: not translated)
+        "ds_min_u32" => "InterlockedMin",
+        "ds_max_u32" => "InterlockedMax",
+        "ds_and_b32" => "InterlockedAnd",
+        "ds_or_b32" => "InterlockedOr",
+        "ds_xor_b32" => "InterlockedXor",
+        "ds_wrxchg_b32" if rtn => "InterlockedExchange",
+        "ds_cmpst_b32" if rtn => "InterlockedCompareExchange",
+        _ => return None,
+    };
+    Some((f, rtn))
 }
 
 /// Float compares: ordered (false on NaN) unless the name says unordered (`n*`, `u`).

@@ -231,6 +231,9 @@ impl Lifter<'_> {
         if name.contains("_format_") {
             return self.mubuf_typed(name, d);
         }
+        if name.starts_with("buffer_atomic_") {
+            return self.buffer_atomic(name, d);
+        }
         let store = name.starts_with("buffer_store_dword");
         let n: u16 = match name.trim_start_matches("buffer_load_").trim_start_matches("buffer_store_") {
             "dword" => 1,
@@ -372,6 +375,118 @@ impl Lifter<'_> {
             } else {
                 self.vwrite_raw(vdata + k, format!("{i} ? w.Load(a + {}u) : 0u", 4 * k));
             }
+        }
+        self.out.body.push_str("    }\n");
+        Some(())
+    }
+
+    /// `buffer_atomic_*` (32-bit) as `Interlocked*` on the buffer's raw UAV: a heap descriptor's own view, or the
+    /// window of a V# held as data. The address and range check are the loads' (an access out of range does
+    /// nothing and returns 0). `glc` returns the old value; `cmpswap` takes (new, compare) from `vdata`.
+    fn buffer_atomic(&mut self, name: &str, d: &Decoded) -> Option<()> {
+        let op = name.strip_prefix("buffer_atomic_")?;
+        let f = match op {
+            "add" | "sub" => "InterlockedAdd",
+            "smin" | "umin" => "InterlockedMin",
+            "smax" | "umax" => "InterlockedMax",
+            "and" => "InterlockedAnd",
+            "or" => "InterlockedOr",
+            "xor" => "InterlockedXor",
+            "swap" => "InterlockedExchange",
+            "cmpswap" => "InterlockedCompareExchange",
+            _ => {
+                self.why = Some(format!("buffer atomic {op}"));
+                return None;
+            }
+        };
+        if d.get("lds")? == 1 || d.get("tfe")? == 1 {
+            self.why = Some("lds or tfe".into());
+            return None;
+        }
+        let rsrc = (d.get("srsrc")? * 4) as u8;
+        let soff = self.usrc(d, "soffset")?;
+        let (idxen, offen) = (d.get("idxen")? == 1, d.get("offen")? == 1);
+        let vaddr = d.get("vaddr")? as u16;
+        let idx = if idxen {
+            self.out.vgprs.insert(vaddr);
+            format!("v{vaddr}")
+        } else {
+            "0u".into()
+        };
+        let voff = if offen {
+            let v = vaddr + u16::from(idxen);
+            self.out.vgprs.insert(v);
+            format!("v{v} + {}u", d.get("offset")?)
+        } else {
+            format!("{}u", d.get("offset")?)
+        };
+        let (head, inside) = match self.f.descs.get(&rsrc).copied() {
+            Some(res) if res.heap == Heap::Resource => {
+                let (sh, check) = if idxen {
+                    self.out.uses_shadow = true;
+                    (format!(" uint2 sh = sir_shadow.Load2(s{rsrc} * 16u);"), "sir_i < sh.y")
+                } else {
+                    (String::new(), "true")
+                };
+                let st = if idxen { "sh.x" } else { "0u" };
+                (
+                    format!("RWByteAddressBuffer w = ResourceDescriptorHeap[s{rsrc}];{sh} uint sir_i = {idx}, sir_o = {voff}; uint a = sir_i * {st} + sir_o + {soff};"),
+                    check.to_string(),
+                )
+            }
+            Some(_) => {
+                self.why = Some("not a resource descriptor".into());
+                return None;
+            }
+            None => {
+                let words: Option<Vec<String>> = (0..4u32).map(|k| self.src(u32::from(rsrc) + k, None)).collect();
+                let Some(w) = words else {
+                    self.why = Some("descriptor not traced".into());
+                    return None;
+                };
+                self.out.notes.insert("buffer access through a V# held as data: window addressing");
+                let w3 = self.f.consts.get(&(rsrc + 3)).copied();
+                let raw = "sir_o < sir_nr".to_string();
+                let structured = "(sir_i < sir_nr && sir_o < sir_st)".to_string();
+                let inside = match w3.map(|x| x >> 28 & 3) {
+                    Some(0) => structured,
+                    Some(1) => "sir_i < sir_nr".into(),
+                    Some(2) => raw,
+                    Some(_) => "true".into(),
+                    None => format!("(sir_ob == 3u || (sir_ob == 2u ? {raw} : (sir_ob == 1u ? sir_i < sir_nr : {structured})))"),
+                };
+                let ob = if w3.is_none() { format!(" uint sir_ob = ({} >> 28) & 3u;", w[3]) } else { String::new() };
+                (
+                    format!(
+                        "RWByteAddressBuffer w = ResourceDescriptorHeap[{}u + ({} & {}u)]; uint sir_st = ({} >> 16) & 0x3fffu, sir_nr = {}, sir_i = {idx}, sir_o = {voff}; uint a = {} + {soff} + sir_i * sir_st + sir_o;{ob}",
+                        super::WINDOW_HEAP_BASE,
+                        w[1],
+                        super::WINDOW_COUNT - 1,
+                        w[1],
+                        w[2],
+                        w[0]
+                    ),
+                    inside,
+                )
+            }
+        };
+        let vdata = d.get("vdata")? as u16;
+        self.out.vgprs.insert(vdata);
+        let signed = matches!(op, "smin" | "smax");
+        let v = |k: u16| if signed { format!("(int)v{}", vdata + k) } else { format!("v{}", vdata + k) };
+        let args = match op {
+            "sub" => format!("0u - v{vdata}"),
+            "cmpswap" => {
+                self.out.vgprs.insert(vdata + 1);
+                format!("{}, {}", v(1), v(0))
+            }
+            _ => v(0),
+        };
+        let ty = if signed { "int" } else { "uint" };
+        let guard = if self.f.narrowed { "ex && " } else { "" };
+        let _ = writeln!(self.out.body, "    {{ {head} {ty} o = 0; if ({guard}{inside}) w.{f}(a & ~3u, {args}, o);");
+        if d.get("glc")? == 1 {
+            self.vwrite_raw(vdata, "(uint)o".into());
         }
         self.out.body.push_str("    }\n");
         Some(())

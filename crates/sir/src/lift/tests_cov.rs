@@ -285,3 +285,113 @@ fn a_typed_access_with_no_index_and_no_offset_is_element_0() {
     assert!(l.body.contains("Buffer<float4> b = ResourceDescriptorHeap[s8]; float4 r = b[0u];"), "{}", l.body);
     compile(&l, "cov_typed0");
 }
+
+#[test]
+fn sixteen_bit_ops_keep_the_other_half_and_packed_ops_take_each_half() {
+    let p = program(&[
+        vopc("v_cmp_lt_f16", V + 0, 1),
+        vop2("v_add_f16", 2, 242, 1), // 1.0 (f16 0x3c00) + v1
+        build(&e::VOP3A, Encoding::Vop3, "v_mul_f16", &[("vdst", 3), ("src0", V), ("src1", V + 1), ("opsel", 0b1001)]),
+        vop1("v_rcp_f16", 4, V + 2),
+        build(&e::VOP3P, Encoding::Vop3p, "v_pk_add_f16", &[("vdst", 5), ("src0", V), ("src1", 240), ("opsel_hi", 3), ("opsel_hi2", 1)]),
+        build(&e::VOP3P, Encoding::Vop3p, "v_pk_mul_lo_u16", &[("vdst", 6), ("src0", V), ("src1", V + 1), ("opsel", 0b10), ("opsel_hi", 1)]),
+        vop3("v_lshlrev_b64", 8, [V + 2, V, 0], 0, 0, 0, 0),
+    ]);
+    let l = lift(&p);
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let b = &l.body;
+    assert!(b.contains("vcc = (f16tof32(v0) < f16tof32(v1));"), "{b}");
+    assert!(b.contains("v2 = (v2 & 0xffff0000u) | sir_f16(f16tof32(15360u) + f16tof32(v1));"), "{b}");
+    assert!(b.contains("v3 = (v3 & 0xffffu) | (sir_f16(f16tof32((v0 >> 16)) * f16tof32(v1)) << 16);"), "{b}");
+    // the inline 0.5 is f16 0x3800 in the low half: the high half reads 0
+    assert!(b.contains("v5 = sir_f16(f16tof32(v0) + f16tof32(14336u)) | (sir_f16(f16tof32((v0 >> 16)) + f16tof32((14336u >> 16))) << 16);"), "{b}");
+    assert!(b.contains("(((v0 & 0xffffu) * ((v1 >> 16) & 0xffffu)) & 0xffffu) | (((((v0 >> 16) & 0xffffu) * (v1 & 0xffffu)) & 0xffffu) << 16)"), "{b}");
+    assert!(b.contains("{ uint64_t sir_s = (((uint64_t)v1 << 32) | (uint64_t)v0) << (v2 & 63u);"), "{b}");
+    compile(&l, "cov_16bit");
+}
+
+#[test]
+fn carries_64_bit_compares_and_byte_packing() {
+    let p = program(&[
+        build(&e::VOP3B, Encoding::Vop3, "v_add_co_u32", &[("vdst", 2), ("sdst", 10), ("src0", V), ("src1", V + 1)]),
+        build(&e::VOP3B, Encoding::Vop3, "v_add_co_ci_u32", &[("vdst", 3), ("sdst", 106), ("src0", V), ("src1", 128), ("src2", 10)]),
+        build(&e::VOP3A, Encoding::Vop3, "v_cmp_ne_u64", &[("vdst", 12), ("src0", V), ("src1", 193)]),
+        vop3("v_cvt_pk_u8_f32", 4, [V + 0, 128 + 3, V + 1], 0, 0, 0, 0),
+        vop3("v_mul_hi_i32", 5, [V + 0, V + 1, 0], 0, 0, 0, 0),
+    ]);
+    let l = lift(&p);
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let b = &l.body;
+    assert!(b.contains("{ uint64_t sir_s = (uint64_t)v0 + (uint64_t)v1 + (uint64_t)0u;") && b.contains("m10 = (sir_s >> 32) != 0u;"), "{b}");
+    assert!(b.contains("(uint64_t)(m10 ? 1u : 0u);") && b.contains("vcc = (sir_s >> 32) != 0u;"), "{b}");
+    assert!(b.contains("m12 = ((((uint64_t)v1 << 32) | (uint64_t)v0) != (((uint64_t)0xffffffffu << 32) | (uint64_t)4294967295u));"), "{b}");
+    assert!(b.contains("(v1 & ~(0xffu << ((3u & 3u) * 8u))) | ((uint)clamp(round(asfloat(v0)), 0.0f, 255.0f) << ((3u & 3u) * 8u))"), "{b}");
+    compile(&l, "cov_carry");
+}
+
+#[test]
+fn scalar_bit_ops_carries_and_vcc_as_data() {
+    let p = program(&[
+        sop2("s_bfm_b32", 4, 128 + 5, 128 + 8),
+        sop2("s_add_u32", 5, 0, 1),
+        sop2("s_addc_u32", 6, 2, 3),
+        sop1("s_bcnt1_i32_b32", 7, 0),
+        sop1("s_flbit_i32_b32", 8, 0),
+        vec![0xB000_0000 | op(Encoding::Sopk, "s_movk_i32") << 23 | 9 << 16 | 3],
+        sop1("s_bitset1_b32", 9, 128 + 4),
+        sop2("s_add_u32", 106, 0, 128 + 1), // data in VCC
+        sop1("s_not_b32", 10, 106),
+    ]);
+    let l = lift(&p);
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let b = &l.body;
+    assert!(b.contains("s4 = ((1u << (5u & 31u)) - 1u) << (8u & 31u);"), "{b}");
+    assert!(b.contains("{ uint64_t sir_s = (uint64_t)s2 + (uint64_t)s3 + (scc ? 1u : 0u);") && b.contains("scc = (sir_s >> 32) != 0;"), "{b}");
+    assert!(b.contains("uint r = countbits(s0);") && b.contains("31u - firstbithigh(s0)"), "{b}");
+    assert!(b.contains("s9 = s9 | (1u << (4u & 31u));"), "{b}");
+    assert!(b.contains("s106 = r;") && b.contains("uint r0 = ~s106"), "{b}");
+    compile(&l, "cov_salu");
+    // VCC holding a lane mask, read as data: refused
+    let l = lift(&program(&[vopc("v_cmp_lt_u32", V + 0, 1), sop1("s_not_b32", 10, 106)]));
+    assert!(l.unsupported[0].1.contains("lane mask read as data"), "{:?}", l.unsupported);
+}
+
+#[test]
+fn buffer_and_lds_atomics() {
+    let (layout, used) = table();
+    let atomic = |name: &str, glc: u32, vdata: u32, srsrc: u32| {
+        build(&e::MUBUF, Encoding::Mubuf, name, &[("offen", 1), ("glc", glc), ("vaddr", 0), ("vdata", vdata), ("srsrc", srsrc), ("soffset", 128)])
+    };
+    let l = lifted(
+        &[
+            smem("s_load_dwordx4", 8, 0, 0),
+            atomic("buffer_atomic_add", 1, 4, 2),
+            atomic("buffer_atomic_smax", 0, 5, 2),
+            atomic("buffer_atomic_cmpswap", 1, 6, 2),
+            atomic("buffer_atomic_umin", 0, 8, 1), // through the window of s[4:7] (data)
+        ],
+        &layout,
+        &used,
+    );
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let b = &l.body;
+    assert!(b.contains("RWByteAddressBuffer w = ResourceDescriptorHeap[s8];") && b.contains("w.InterlockedAdd(a & ~3u, v4, o);"), "{b}");
+    assert!(b.contains("int o = 0; if (true) w.InterlockedMax(a & ~3u, (int)v5, o);"), "{b}");
+    assert!(b.contains("w.InterlockedCompareExchange(a & ~3u, v7, v6, o);") && b.contains("v6 = (uint)o;"), "{b}");
+    assert!(b.contains(&format!("ResourceDescriptorHeap[{WINDOW_HEAP_BASE}u + (s5 & 32767u)]")) && b.contains("w.InterlockedMin(a & ~3u, v8, o);"), "{b}");
+    compile(&l, "cov_buffer_atomics");
+
+    let io = rebuild_shader::native::ComputeIo { rsrc2: 0, threads: [64, 1, 1] };
+    let ds = |name: &str| build(&e::DS, Encoding::Ds, name, &[("addr", 0), ("data0", 1), ("data1", 2), ("vdst", 3), ("offset0", 8)]);
+    let p = program(&[ds("ds_max_u32"), ds("ds_or_rtn_b32"), ds("ds_cmpst_rtn_b32"), ds("ds_sub_u32")]);
+    let l = lift_stage(&p, Stage::Cs(io), None);
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let b = &l.body;
+    assert!(b.contains("InterlockedMax(sir_lds[(v0 + 8u) >> 2], v1, o);"), "{b}");
+    assert!(b.contains("InterlockedOr(sir_lds[(v0 + 8u) >> 2], v1, o);") && b.contains("v3 = (uint)o;"), "{b}");
+    assert!(b.contains("InterlockedCompareExchange(sir_lds[(v0 + 8u) >> 2], v1, v2, o);"), "{b}");
+    assert!(b.contains("InterlockedAdd(sir_lds[(v0 + 8u) >> 2], 0u - v1, o);"), "{b}");
+    // signed LDS min/max would compile unsigned on the uint array: refused
+    let l = lift_stage(&program(&[ds("ds_max_i32")]), Stage::Cs(io), None);
+    assert_eq!(l.unsupported.len(), 1);
+}
