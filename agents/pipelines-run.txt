@@ -1,0 +1,34 @@
+> pipelines build
+pipelines build — 2834 translated programs in D:\victory-data\pipelines-in
+immediate sampler words  2834 programs lifted again from the corpus in 909 ms (not library time)
+highest user dword read  vs Some(10) · ps Some(14) · cs Some(8) (root constants: 16 per stage)
+programs                 2834 in the library (cs 117 · ps 1791 · vs 926) · 0 refused
+bindings                 user data 2208 · shadow table 260 · immediate samplers 263
+own root signatures      37 distinct (stage, layout) serialized by the host in 2.8 ms · 0 refused (0 programs)
+library                  26 layouts · 10 compute roots · 72 vertex×pixel pairs · 82 root signatures (16 KB)
+file                     D:\victory-data\pipelines\library.bin (13.8 MB; DXIL 13.7 MB)
+build time               106 ms: read + bindings 65 ms · own roots 3 ms · library roots 3 ms · write 27 ms
+
+> pipelines load
+pipelines load — D:\victory-data\pipelines\library.bin
+  threads 1  verify false  best   5.71 ms  median   6.48 ms  (warm file cache)
+  threads 2  verify false  best   4.93 ms  median   5.53 ms  (warm file cache)
+  threads 4  verify false  best   5.06 ms  median   5.92 ms  (warm file cache)
+  threads 8  verify false  best   4.36 ms  median   5.45 ms  (warm file cache)
+  threads 1  verify true   best   8.98 ms  median  10.08 ms  (warm file cache)
+  threads 2  verify true   best   6.67 ms  median   6.83 ms  (warm file cache)
+  threads 4  verify true   best   6.26 ms  median   6.92 ms  (warm file cache)
+  threads 8  verify true   best   5.50 ms  median   6.33 ms  (warm file cache)
+  2834 programs, 13.8 MB · lookup hash → blobs 36 ns
+
+> pipelines check   (warm driver cache; the first, cold run: root signatures 82/0, compute 117/0 at 7.62 ms each, graphics 1374/0 at 2.17 ms each)
+pipelines check — 2834 programs · device luid 00000000:0000a95d · debug layer off
+root signatures   82 accepted · 0 refused · 0.3 ms (3.8 µs each)
+compute pipelines 117 created · 0 refused · 76.2 ms (0.65 ms each)
+graphics pipelines 1374 created · 0 refused · 417 pixel shaders with no linking vertex shader in the set · 202.0 ms (0.15 ms each)
+
+> pipelines check --debug
+pipelines check — 2834 programs · device luid 00000000:0000a95d · debug layer on
+root signatures   82 accepted · 0 refused · 0.8 ms (9.5 µs each)
+compute pipelines 117 created · 0 refused · 142.8 ms (1.22 ms each)
+graphics pipelines 1374 created · 0 refused · 417 pixel shaders with no linking vertex shader in the set · 544.4 ms (0.40 ms each)

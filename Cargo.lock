@@ -2150,6 +2150,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rebuild-pipelines"
+version = "0.1.0"
+dependencies = [
+ "rebuild-shader",
+ "rebuild-sir",
+ "windows",
+]
+
+[[package]]
 name = "rebuild-runtime"
 version = "0.1.0"
 dependencies = [
