@@ -181,6 +181,10 @@ struct Handles {
 pub struct Vfs {
     drives: Vec<Drive>,
     handles: Mutex<Handles>,
+    /// Overlay files the host will delete behind our back (delete-on-close, a delete disposition set
+    /// through a handle): settled by the next operation once the host file is gone.
+    pending: Mutex<Vec<ConsolePath>>,
+    has_pending: std::sync::atomic::AtomicBool,
 }
 
 /// `%APPDATA%\triumph-rebuild\overlay` (or `./overlay` without `APPDATA`).
@@ -246,7 +250,12 @@ impl VfsBuilder {
             }
             drives.push(Drive { letter, lower, overlay: RwLock::new(Overlay::open(&dir)?) });
         }
-        Ok(Vfs { drives, handles: Mutex::new(Handles::default()) })
+        Ok(Vfs {
+            drives,
+            handles: Mutex::new(Handles::default()),
+            pending: Mutex::new(Vec::new()),
+            has_pending: std::sync::atomic::AtomicBool::new(false),
+        })
     }
 }
 
@@ -387,6 +396,7 @@ impl Vfs {
 
     /// Where a console path lives on the host, and in which layer.
     pub fn resolve(&self, path: &str) -> Result<Resolved> {
+        self.settle();
         let (d, cp) = self.parse(path)?;
         let ov = read_lock(d);
         match Self::find(d, &ov, &cp) {
@@ -405,6 +415,7 @@ impl Vfs {
     // ---- V4: the handle API ------------------------------------------------------------------
 
     pub fn open(&self, path: &str, opts: OpenOptions) -> Result<Handle> {
+        self.settle();
         use Disposition::*;
         let (d, cp) = self.parse(path)?;
         if !opts.write && opts.disposition == OpenExisting {
@@ -516,6 +527,7 @@ impl Vfs {
 
     /// The merged listing of a directory, sorted by folded name.
     pub fn enumerate(&self, path: &str) -> Result<Vec<Entry>> {
+        self.settle();
         let (d, cp) = self.parse(path)?;
         let ov = read_lock(d);
         Self::list(d, &ov, &cp)
@@ -550,6 +562,7 @@ impl Vfs {
     // ---- V2: mutations, all into the overlay -------------------------------------------------
 
     pub fn delete(&self, path: &str) -> Result<()> {
+        self.settle();
         let (d, cp) = self.parse(path)?;
         let mut ov = write_lock(d);
         let found = Self::find(d, &ov, &cp).ok_or_else(|| Self::missing(d, &ov, &cp))?;
@@ -576,6 +589,7 @@ impl Vfs {
     }
 
     pub fn create_dir(&self, path: &str) -> Result<()> {
+        self.settle();
         let (d, cp) = self.parse(path)?;
         let mut ov = write_lock(d);
         Self::make_dir(d, &mut ov, &cp)
@@ -595,6 +609,7 @@ impl Vfs {
     }
 
     pub fn remove_dir(&self, path: &str) -> Result<()> {
+        self.settle();
         let (d, cp) = self.parse(path)?;
         if cp.is_root() {
             return Err(Error::DirectoryNotEmpty);
@@ -612,6 +627,7 @@ impl Vfs {
 
     /// Renames a file or directory on one drive. `replace` lets a file replace a file.
     pub fn rename(&self, from: &str, to: &str, replace: bool) -> Result<()> {
+        self.settle();
         let (d, src) = self.parse(from)?;
         let dst = ConsolePath::parse(to)?;
         if dst.drive != src.drive {
@@ -669,6 +685,149 @@ impl Vfs {
             ov.whiteout(&src.key())?;
         }
         Ok(())
+    }
+
+    // ---- changes the host makes behind our back (delete-on-close, handle renames) -------------
+
+    /// The file at `path` (in the overlay) will be deleted by the host when its last handle closes,
+    /// or already is: the next operation drops it from the index, and hides the layers below.
+    pub fn delete_pending(&self, path: &str) -> Result<()> {
+        let cp = ConsolePath::parse(path)?;
+        self.drive(cp.drive)?;
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).push(cp);
+        self.has_pending.store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    fn settle(&self) {
+        if !self.has_pending.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.retain(|cp| {
+            let Ok(d) = self.drive(cp.drive) else { return false };
+            let mut ov = write_lock(d);
+            let key = cp.key();
+            let Some(n) = ov.get(&key).cloned() else { return false };
+            if fs::symlink_metadata(&n.host).is_ok() {
+                return true; // still there: a handle is open
+            }
+            if n.is_dir {
+                ov.remove_tree(&key);
+            } else {
+                ov.remove(&key);
+            }
+            if Self::lower_has(d, cp) {
+                let _ = ov.whiteout(&key);
+            }
+            false
+        });
+        self.has_pending.store(!pending.is_empty(), std::sync::atomic::Ordering::Release);
+    }
+
+    /// The overlay host path a file at `path` would have, with its directories made in the overlay
+    /// (the file itself is not created or indexed): the target of a rename the host performs.
+    pub fn overlay_path_for(&self, path: &str) -> Result<PathBuf> {
+        self.settle();
+        let (d, cp) = self.parse(path)?;
+        if cp.is_root() {
+            return Err(Error::InvalidPath(path.to_owned()));
+        }
+        let mut ov = write_lock(d);
+        if let Some(n) = ov.get(&cp.key()) {
+            return Ok(n.host.clone());
+        }
+        Ok(Self::overlay_dir(d, &mut ov, &cp.parent())?.join(cp.parts.last().unwrap()))
+    }
+
+    /// Records a rename the host made of an overlay file or directory, from `from` to the host path
+    /// [`Vfs::overlay_path_for`] gave for `to`.
+    pub fn note_renamed(&self, from: &str, to: &str) -> Result<()> {
+        self.settle();
+        let (d, src) = self.parse(from)?;
+        let dst = ConsolePath::parse(to)?;
+        if dst.drive != src.drive {
+            return Err(Error::CrossDrive);
+        }
+        let mut ov = write_lock(d);
+        let (src_key, dst_key) = (src.key(), dst.key());
+        let node = ov.get(&src_key).cloned().ok_or(Error::NotFound)?;
+        let name = dst.parts.last().ok_or_else(|| Error::InvalidPath(to.to_owned()))?.clone();
+        let host = match ov.dir_host(&dst.parent().key()) {
+            Some(h) => h.join(&name),
+            None => return Err(Error::PathNotFound),
+        };
+        if node.is_dir {
+            ov.remove_tree(&src_key);
+            ov.remove_tree(&dst_key);
+            ov.insert(&dst_key, ONode { host: host.clone(), name, is_dir: true });
+            ov.index(&host, &dst_key)?;
+        } else {
+            ov.remove(&src_key);
+            ov.insert(&dst_key, ONode { host, name, is_dir: false });
+        }
+        ov.unwhiteout(&dst_key)?;
+        if Self::lower_has(d, &src) {
+            ov.whiteout(&src_key)?;
+        }
+        Ok(())
+    }
+
+    /// Records a file or directory the host created at the path [`Vfs::overlay_path_for`] gave
+    /// (a hard link, a copy).
+    pub fn note_created(&self, path: &str) -> Result<()> {
+        self.settle();
+        let (d, cp) = self.parse(path)?;
+        let name = cp.parts.last().ok_or_else(|| Error::InvalidPath(path.to_owned()))?.clone();
+        let mut ov = write_lock(d);
+        let host = Self::overlay_dir(d, &mut ov, &cp.parent())?.join(&name);
+        let is_dir = fs::metadata(&host)?.is_dir();
+        let key = cp.key();
+        ov.insert(&key, ONode { host: host.clone(), name, is_dir });
+        if is_dir {
+            ov.index(&host, &key)?;
+        }
+        ov.unwhiteout(&key)?;
+        Ok(())
+    }
+
+    /// The console path of a host path inside a drive's overlay (`None` elsewhere, such as the base).
+    pub fn console_path_of(&self, host: &Path) -> Option<String> {
+        fn plain(p: &Path) -> String {
+            let s = p.to_string_lossy();
+            let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+            s.trim_end_matches('\\').to_ascii_lowercase()
+        }
+        let want = fs::canonicalize(host).unwrap_or_else(|_| host.to_path_buf());
+        let want_plain = plain(&want);
+        let original = want.to_string_lossy().into_owned();
+        let original = original.strip_prefix(r"\\?\").unwrap_or(&original).to_owned();
+        for d in &self.drives {
+            let root = read_lock(d).dir_host("")?;
+            let root = plain(&fs::canonicalize(&root).unwrap_or(root));
+            if want_plain == root {
+                return Some(format!("{}:\\", d.letter));
+            }
+            if let Some(rest) = want_plain.strip_prefix(&format!("{root}\\")) {
+                // keep the disk's case
+                let rest = &original[original.len() - rest.len()..];
+                return Some(format!("{}:\\{rest}", d.letter));
+            }
+        }
+        None
+    }
+
+    /// Makes the directory at `path` exist in the overlay (so its own attributes or a write handle
+    /// land there, never below); returns its overlay host path.
+    pub fn materialize_dir(&self, path: &str) -> Result<PathBuf> {
+        self.settle();
+        let (d, cp) = self.parse(path)?;
+        let mut ov = write_lock(d);
+        let found = Self::find(d, &ov, &cp).ok_or_else(|| Self::missing(d, &ov, &cp))?;
+        if !found.is_dir {
+            return Err(Error::NotADirectory);
+        }
+        Self::overlay_dir(d, &mut ov, &cp)
     }
 }
 

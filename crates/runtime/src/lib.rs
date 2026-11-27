@@ -82,6 +82,27 @@ pub const OVERRIDES: &[(&str, &str)] = &[
     ("FindClose", "files"),
     ("SetFileAttributesW", "files"),
     ("GetTempPathW", "files"),
+    // F5: copies, links, handle changes and WER registrations name console paths too
+    ("CopyFile2", "files"),
+    ("CreateHardLinkW", "files"),
+    ("CreateSymbolicLinkW", "files"),
+    ("WerRegisterFile", "files"),
+    ("SetFileInformationByHandle", "files"),
+    // crt: the host ucrtbase's own fopen would call the host CreateFileW and miss the overlay; ours opens
+    // through the files core and hands the handle back to the same ucrtbase (_open_osfhandle, _fdopen)
+    ("fopen", "crt"),
+    ("_wfopen", "crt"),
+    ("_fsopen", "crt"),
+    ("_wfsopen", "crt"),
+    ("_open", "crt"),
+    ("_wopen", "crt"),
+    ("_wstat64", "crt"),
+    ("remove", "crt"),
+    ("_wremove", "crt"),
+    ("_wrename", "crt"),
+    ("_wrmdir", "crt"),
+    ("_wchdir", "crt"),
+    ("_wgetcwd", "crt"),
     // modules: the title's own DLLs, and every miss is a discovery entry
     ("GetProcAddress", "modules"),
     ("LoadLibraryExW", "modules"),

@@ -93,6 +93,35 @@ pub struct CREATEFILE2_EXTENDED_PARAMETERS {
     pub hTemplateFile: HANDLE,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct COPYFILE2_EXTENDED_PARAMETERS {
+    pub dwSize: u32,
+    pub dwCopyFlags: u32,
+    pub pfCancel: *mut i32,
+    pub pProgressRoutine: *mut c_void,
+    pub pvCallbackContext: *mut c_void,
+}
+
+/// `HRESULT_FROM_WIN32`.
+pub fn hresult(code: u32) -> i32 {
+    if code == 0 {
+        0
+    } else {
+        ((code & 0xFFFF) | 0x8007_0000) as i32
+    }
+}
+
+/// A host path in the plain `C:\…` form when it fits in `MAX_PATH`, else the `\\?\` form. Some host
+/// functions (DOS wildcards, the CRT) treat the two forms differently.
+pub fn host_path_plain(p: &std::path::Path) -> Vec<u16> {
+    let mut w = host_path(p);
+    if w.len() < 250 && w.starts_with(&[92, 92, 63, 92]) && w.get(5) == Some(&58) {
+        w.drain(..4);
+    }
+    w
+}
+
 #[link(name = "kernel32")]
 extern "system" {
     pub fn GetLastError() -> u32;
@@ -155,6 +184,15 @@ extern "system" {
     pub fn GetDiskFreeSpaceExW(dir: *const u16, avail: *mut u64, total: *mut u64, free: *mut u64) -> BOOL;
     pub fn GetCurrentDirectoryW(len: u32, buf: *mut u16) -> u32;
     pub fn SetCurrentDirectoryW(name: *const u16) -> BOOL;
+    pub fn LoadLibraryExW(name: *const u16, file: HANDLE, flags: u32) -> *mut c_void;
+    pub fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+    pub fn GetFinalPathNameByHandleW(h: HANDLE, buf: *mut u16, len: u32, flags: u32) -> u32;
+    pub fn SetFileInformationByHandle(h: HANDLE, class: i32, info: *const c_void, size: u32) -> BOOL;
+    pub fn CopyFile2(from: *const u16, to: *const u16, params: *const COPYFILE2_EXTENDED_PARAMETERS) -> i32;
+    pub fn CreateHardLinkW(new: *const u16, existing: *const u16, sa: *const c_void) -> BOOL;
+    pub fn CreateSymbolicLinkW(link: *const u16, target: *const u16, flags: u32) -> u8;
+    pub fn SetFilePointerEx(h: HANDLE, distance: i64, new: *mut i64, method: u32) -> BOOL;
+    pub fn SetEndOfFile(h: HANDLE) -> BOOL;
     pub fn MultiByteToWideChar(cp: u32, flags: u32, s: *const u8, n: i32, w: *mut u16, wn: i32) -> i32;
     pub fn WideCharToMultiByte(
         cp: u32,

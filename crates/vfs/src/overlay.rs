@@ -45,7 +45,7 @@ impl Overlay {
         Ok(overlay)
     }
 
-    fn index(&mut self, host: &Path, key: &str) -> io::Result<()> {
+    pub(crate) fn index(&mut self, host: &Path, key: &str) -> io::Result<()> {
         for entry in fs::read_dir(host)? {
             let entry = entry?;
             let Ok(name) = entry.file_name().into_string() else { continue };
@@ -84,6 +84,14 @@ impl Overlay {
         if let Some(set) = self.children.get_mut(parent) {
             set.remove(name);
         }
+    }
+
+    /// Removes `key` and everything indexed below it.
+    pub fn remove_tree(&mut self, key: &str) {
+        let below = format!("{key}/");
+        self.entries.retain(|k, _| !k.starts_with(&below));
+        self.children.retain(|k, _| k != key && !k.starts_with(&below));
+        self.remove(key);
     }
 
     /// Children of the directory at `key`, as (folded name, node).

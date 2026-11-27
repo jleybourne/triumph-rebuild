@@ -439,7 +439,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_merged_lanes_bind_audio_19_dstorage_1_xg_2_files_27() {
+    fn the_merged_lanes_bind_audio_19_dstorage_1_xg_2_files_32_crt_13() {
         let audio = [
             ("acphal.dll", "AcpHalCreate"), ("acphal.dll", "AcpHalAllocateShapeContexts"), ("acphal.dll", "AcpHalReleaseShapeContexts"),
             ("acphal.dll", "ApuAlloc"), ("acphal.dll", "ApuFree"), ("acphal.dll", "ApuCreateHeap"), ("acphal.dll", "ApuIsVirtualAddressValid"),
@@ -458,6 +458,12 @@ mod tests {
         let files: Vec<&str> = crate::OVERRIDES.iter().filter(|(_, w)| *w == "files").map(|(f, _)| *f).collect();
         assert_eq!(files, rebuild_winfiles::FUNCTIONS, "the runtime's files list is the files crate's, in order");
         for f in files {
+            assert_eq!(crate::modules::override_export(f), rebuild_winfiles::override_export(f), "{f}");
+        }
+        let crt: Vec<&str> = crate::OVERRIDES.iter().filter(|(_, w)| *w == "crt").map(|(f, _)| *f).collect();
+        assert_eq!(crt, rebuild_winfiles::crt::CRT_FUNCTIONS, "the runtime's crt list is the files crate's, in order");
+        for f in crt {
+            assert!(crate::modules::override_export(f).is_some(), "{f}");
             assert_eq!(crate::modules::override_export(f), rebuild_winfiles::override_export(f), "{f}");
         }
     }
