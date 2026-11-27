@@ -259,11 +259,50 @@ struct App {
     toasts: Vec<Toast>,
     dialog: Option<Dialog>,
     started: f64,
+    /// The background's own clock: it only advances while ambient motion is on (window focused and
+    /// visible, no game running), so an idle or backgrounded launcher draws nothing new.
+    scene_t: f32,
+    last_now: f64,
+    /// Minimise the launcher when the game starts, and bring it back when the game exits, so it costs
+    /// the game nothing while it runs.
+    minimise_on_launch: bool,
+    minimised_for_game: bool,
     rounded: bool,
     fixture: bool,
     shots: Option<Shots>,
     /// tests: a lock file that always exists, so no D3D12 device is ever created
     lock_override: Option<PathBuf>,
+}
+
+/// What the launcher is doing that needs frames without input.
+#[derive(Clone, Copy, Default)]
+struct RepaintNeeds {
+    screenshots: bool,
+    ambient: bool,
+    toasts: bool,
+    check_pending: bool,
+    game_running: bool,
+    minimised: bool,
+}
+
+/// Idle is the default: with nothing moving, the launcher waits for input (an hour is "never" to egui;
+/// any event wakes it). Motion is drawn at 30 fps, which is plenty for slow drift; a running game's log
+/// is read four times a second, or once a second while the launcher is minimised.
+fn repaint_after(n: RepaintNeeds) -> Duration {
+    if n.screenshots {
+        return Duration::from_millis(16);
+    }
+    let mut d = Duration::from_secs(3600);
+    if n.ambient || n.toasts {
+        d = d.min(Duration::from_millis(33));
+    }
+    if n.check_pending {
+        d = d.min(Duration::from_millis(100));
+    }
+    if n.game_running {
+        d = d.min(Duration::from_millis(if n.minimised { 1000 } else { 250 }));
+    }
+    d
 }
 
 fn group_title(g: &str) -> (&'static str, String) {
@@ -347,6 +386,10 @@ impl App {
             toasts,
             dialog: None,
             started: -1.0,
+            scene_t: 0.0,
+            last_now: -1.0,
+            minimise_on_launch: std::env::var_os("REBUILD_LAUNCHER_STAY_OPEN").is_none(),
+            minimised_for_game: false,
             rounded: false,
             fixture,
             lock_override: None,
@@ -607,6 +650,34 @@ impl App {
         }
     }
 
+    /// When the next frame is needed if nothing else asks (input, and egui's own hover and page
+    /// animations, request their frames themselves).
+    fn next_repaint(&self, ambient: bool, minimised: bool) -> Duration {
+        repaint_after(RepaintNeeds {
+            screenshots: self.shots.is_some(),
+            ambient,
+            toasts: !self.toasts.is_empty(),
+            check_pending: self.check_rx.is_some(),
+            game_running: self.running.is_some(),
+            minimised,
+        })
+    }
+
+    /// Get out of the game's way while it runs: minimise on start, come back when it exits.
+    fn game_window_state(&mut self, ctx: &egui::Context) {
+        if self.shots.is_some() || !self.minimise_on_launch {
+            return;
+        }
+        if self.running.is_some() && !self.minimised_for_game {
+            self.minimised_for_game = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+        } else if self.running.is_none() && self.minimised_for_game {
+            self.minimised_for_game = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+    }
+
     fn set_tab(&mut self, ctx: &egui::Context, t: Tab) {
         if self.tab != t {
             self.tab = t;
@@ -795,10 +866,24 @@ impl App {
         self.poll(now);
         self.keys(ctx);
         self.shots_step(ctx);
-        ctx.request_repaint_after(Duration::from_millis(16));
+
+        // Ambient motion (the drifting background and hero) only while someone can see it and no game
+        // is running. Otherwise the scene clock stands still and nothing is redrawn until input arrives.
+        let (focused, minimised) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.focused.unwrap_or(true), v.minimized.unwrap_or(false))
+        });
+        let ambient = self.shots.is_some() || (focused && !minimised && self.running.is_none());
+        let dt = if self.last_now < 0.0 { 0.0 } else { (now - self.last_now).clamp(0.0, 0.1) };
+        self.last_now = now;
+        if ambient {
+            self.scene_t += dt as f32;
+        }
+        self.game_window_state(ctx);
+        ctx.request_repaint_after(self.next_repaint(ambient, minimised));
 
         let screen = ctx.screen_rect();
-        let t = (now - self.started) as f32;
+        let t = self.scene_t;
         let bg = ctx.layer_painter(egui::LayerId::background());
         // a soft, slow gradient; no texture anywhere
         background::paint(&bg, screen, t * 0.5, 0.8);
@@ -2030,7 +2115,16 @@ impl App {
                                 ui.painter().circle_filled(c, 26.0, alpha(th::ACCENT, 0.12 + 0.1 * h));
                                 ui.painter().text(c, Align2::CENTER_CENTER, icon::PLUS, th::icon(24.0), th::ACCENT);
                                 ui.painter().text(c + Vec2::new(0.0, 46.0), Align2::CENTER_CENTER, "Add a game", th::semibold(15.0), th::TEXT);
-                                ui.painter().text(c + Vec2::new(0.0, 68.0), Align2::CENTER_CENTER, "Pick its folder; the launcher checks what it is", th::regular(12.5), th::TEXT_2);
+                                // wraps and centres inside the dashed outline at any tile width (U6)
+                                let mut job = egui::text::LayoutJob::simple(
+                                    "Pick its folder; the launcher checks what it is".to_owned(),
+                                    th::regular(12.5),
+                                    th::TEXT_2,
+                                    (b.width() - 2.0 * th::S3).max(60.0),
+                                );
+                                job.halign = egui::Align::Center;
+                                let galley = ui.painter().layout_job(job);
+                                ui.painter().galley(Pos2::new(c.x, c.y + 60.0), galley, th::TEXT_2);
                                 w::focus_ring(ui, &resp, r, th::R_MD);
                                 resp
                             });
@@ -2401,5 +2495,41 @@ mod type_check {
             }
         });
         assert!(bad.is_empty(), "{bad:#?}");
+    }
+}
+
+#[cfg(test)]
+mod idle {
+    use super::{repaint_after, RepaintNeeds};
+    use std::time::Duration;
+
+    #[test]
+    fn an_idle_launcher_asks_for_no_frames() {
+        assert!(repaint_after(RepaintNeeds::default()) >= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn unfocused_or_minimised_stops_ambient_motion() {
+        // ambient is false whenever the window is unfocused or minimised (see `frame`)
+        let n = RepaintNeeds { ambient: false, ..Default::default() };
+        assert!(repaint_after(n) >= Duration::from_secs(60));
+        let n = RepaintNeeds { ambient: true, ..Default::default() };
+        assert_eq!(repaint_after(n), Duration::from_millis(33));
+    }
+
+    #[test]
+    fn a_running_game_is_polled_slowly_and_more_slowly_when_minimised() {
+        let n = RepaintNeeds { game_running: true, ..Default::default() };
+        assert_eq!(repaint_after(n), Duration::from_millis(250));
+        let n = RepaintNeeds { game_running: true, minimised: true, ..Default::default() };
+        assert_eq!(repaint_after(n), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn toasts_and_screenshots_get_their_frames() {
+        let n = RepaintNeeds { toasts: true, ..Default::default() };
+        assert_eq!(repaint_after(n), Duration::from_millis(33));
+        let n = RepaintNeeds { screenshots: true, ..Default::default() };
+        assert_eq!(repaint_after(n), Duration::from_millis(16));
     }
 }
