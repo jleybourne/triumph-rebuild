@@ -2082,6 +2082,7 @@ name = "rebuild"
 version = "0.1.0"
 dependencies = [
  "rebuild-d3d12x",
+ "rebuild-dstorage",
  "rebuild-loader",
  "rebuild-pipelines",
  "rebuild-runtime",
@@ -2129,6 +2130,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rebuild-ffx"
+version = "0.1.0"
+dependencies = [
+ "rebuild-d3d12x",
+ "rebuild-pipelines",
+ "rebuild-upscale",
+ "rebuild-xlist",
+ "windows",
+]
+
+[[package]]
 name = "rebuild-gdk"
 version = "0.1.0"
 
@@ -2168,6 +2180,7 @@ version = "0.1.0"
 dependencies = [
  "rebuild-shader",
  "rebuild-sir",
+ "rebuild-xlist",
  "windows",
 ]
 
@@ -2175,9 +2188,11 @@ dependencies = [
 name = "rebuild-runtime"
 version = "0.1.0"
 dependencies = [
+ "png 0.17.16",
  "rebuild-audio",
  "rebuild-d3d12x",
  "rebuild-dstorage",
+ "rebuild-ffx",
  "rebuild-gdk",
  "rebuild-loader",
  "rebuild-pipelines",

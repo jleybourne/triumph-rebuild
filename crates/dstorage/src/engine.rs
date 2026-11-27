@@ -369,6 +369,14 @@ impl Engine {
     /// untouched by anyone else until a status entry enqueued after it reports completion, or the
     /// queue is closed.
     pub unsafe fn enqueue_request(&self, queue: QueueId, request: Request) {
+        // REBUILD_TRACE_FILES: the first 3,000 requests as the title made them
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if trace_on() && N.fetch_add(1, Ordering::Relaxed) < 3000 {
+            eprintln!(
+                "dsreq     file {:#x} offset {:#x} size {:#x} dest {:#x} options {:#x} intermediate {:#x}",
+                request.source as usize, request.offset, request.source_size, request.destination_size, request.options, request.intermediate_size
+            );
+        }
         self.enqueue(queue, Command::Read(request));
     }
 

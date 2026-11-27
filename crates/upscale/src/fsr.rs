@@ -133,9 +133,15 @@ const STATE_UNORDERED_ACCESS: u32 = 1 << 1;
 const STATE_PIXEL_COMPUTE_READ: u32 = (1 << 3) | (1 << 2);
 
 fn surface_format(f: DXGI_FORMAT) -> Result<u32, String> {
-    Ok(match f {
+    Ok(match crate::typed(f) {
+        DXGI_FORMAT_R32G32B32A32_FLOAT => 3,
         DXGI_FORMAT_R16G16B16A16_FLOAT => 4,
+        DXGI_FORMAT_R8G8B8A8_UNORM => 10,
+        DXGI_FORMAT_B8G8R8A8_UNORM => 14,
+        DXGI_FORMAT_R11G11B10_FLOAT => 16,
+        DXGI_FORMAT_R10G10B10A2_UNORM => 17,
         DXGI_FORMAT_R16G16_FLOAT => 18,
+        DXGI_FORMAT_R16_FLOAT => 21,
         DXGI_FORMAT_R32_FLOAT => 28,
         _ => return Err(format!("FSR backend: format {f:?} not mapped")),
     })

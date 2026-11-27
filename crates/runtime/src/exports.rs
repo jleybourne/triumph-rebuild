@@ -345,6 +345,8 @@ pub fn override_export(name: &str) -> Option<u64> {
         "VirtualFree" => VirtualFree as *const (),
         "GetCommandLineA" => GetCommandLineA as *const (),
         "GetCommandLineW" => GetCommandLineW as *const (),
+        // the console's device type (registry OEM\ConsoleMode)
+        other if other.starts_with("Reg") => return crate::registry::export(other).or_else(|| rebuild_winfiles::override_export(other)),
         // files: console drives through the overlay file system (lane `files`, PR #12)
         other => return rebuild_winfiles::override_export(other),
     };
@@ -441,14 +443,52 @@ unsafe extern "system" fn serialize_versioned_root_signature(desc: *const u8, bl
         CONSOLE_ROOT_FLAGS.fetch_or(flags & !HOST_ROOT_FLAGS, std::sync::atomic::Ordering::Relaxed);
         copy[0x28..0x2c].copy_from_slice(&(flags & HOST_ROOT_FLAGS).to_le_bytes());
     }
-    unsafe { host(copy.as_ptr(), blob, errors) }
+    // ask for the host's error text ourselves, so a refusal can be named even when the title passes no `errors`
+    let mut own_errors: *mut c_void = std::ptr::null_mut();
+    let errs = if errors.is_null() { &mut own_errors as *mut *mut c_void } else { errors };
+    let hr = unsafe { host(copy.as_ptr(), blob, errs) };
+    if hr < 0 {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+            let version = u32::from_le_bytes(copy[0..4].try_into().unwrap());
+            let params = u32::from_le_bytes(copy[8..12].try_into().unwrap());
+            let samplers = u32::from_le_bytes(copy[0x18..0x1c].try_into().unwrap());
+            let mut text = String::new();
+            let e = unsafe { *errs };
+            if !e.is_null() {
+                // ID3DBlob: GetBufferPointer (slot 3), GetBufferSize (slot 4)
+                unsafe {
+                    let vt = *(e as *const *const usize);
+                    let ptr: unsafe extern "system" fn(*mut c_void) -> *const u8 = std::mem::transmute(*vt.add(3));
+                    let len: unsafe extern "system" fn(*mut c_void) -> usize = std::mem::transmute(*vt.add(4));
+                    text = String::from_utf8_lossy(std::slice::from_raw_parts(ptr(e), len(e))).trim_end_matches('\0').trim().to_string();
+                }
+            }
+            eprintln!("rootsig   serialize refused {hr:#x}: version {version}, {params} parameters, {samplers} static samplers, flags {flags:#x}: {text}");
+        }
+    }
+    if !own_errors.is_null() {
+        // release our own error blob (IUnknown::Release, slot 2)
+        unsafe {
+            let vt = *(own_errors as *const *const usize);
+            let release: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(*vt.add(2));
+            release(own_errors);
+        }
+    }
+    hr
 }
 
 /// Our implementation of a console-only function, by DLL and name.
 /// The console-only DLLs we serve: `LoadLibrary` of these never reaches the host, even where the host
 /// has a DLL of the same name (the PC's own `xgameruntime.dll` would take console GUIDs).
 pub const CONSOLE_DLLS: &[&str] =
-    &["d3d12_xs.dll", "xmem.dll", "acphal.dll", "xapu.dll", "chad.dll", "xcrdapi.dll", "xg_xs.dll", "xgameruntime.dll"];
+    &["d3d12_xs.dll", "xmem.dll", "acphal.dll", "xapu.dll", "chad.dll", "xcrdapi.dll", "xg_xs.dll", "xgameruntime.dll", "amd_fidelityfx_loader_xbox.dll", "amd_fidelityfx_upscaler_xbox.dll"];
+
+/// Title DLLs served from here instead of mapped (lane `ffx`): AMD's FidelityFX loader and upscaler for
+/// Xbox, whose upscale is console code. `REBUILD_FFX=title` maps the title's own again.
+pub fn replaces_title_dll(dll: &str) -> bool {
+    rebuild_ffx::enabled() && rebuild_ffx::DLLS.iter().any(|d| d.eq_ignore_ascii_case(dll))
+}
 
 pub fn is_console_dll(dll: &str) -> bool {
     CONSOLE_DLLS.iter().any(|d| d.eq_ignore_ascii_case(dll))
@@ -478,6 +518,7 @@ pub fn console_export(dll: &str, name: &str) -> Option<u64> {
         }
         "xg_xs.dll" => return crate::xg::export(name),
         "xgameruntime.dll" => return rebuild_gdk::runtime::get_proc(name).map(|f| f as usize as u64),
+        "amd_fidelityfx_loader_xbox.dll" | "amd_fidelityfx_upscaler_xbox.dll" => return rebuild_ffx::export(name),
         _ => return None,
     }
     let f: usize = match name {
@@ -578,6 +619,18 @@ mod tests {
             assert!(crate::modules::override_export(f).is_some(), "{f}");
             assert_eq!(crate::modules::override_export(f), rebuild_winfiles::override_export(f), "{f}");
         }
+    }
+
+    #[test]
+    fn the_fidelityfx_dlls_are_ours() {
+        for dll in ["amd_fidelityfx_loader_xbox.dll", "AMD_FidelityFX_Upscaler_Xbox.dll"] {
+            assert!(is_console_dll(dll));
+            for n in ["ffxCreateContext", "ffxDestroyContext", "ffxDispatch", "ffxQuery", "ffxConfigure"] {
+                assert_eq!(console_export(dll, n), rebuild_ffx::export(n), "{dll}!{n}");
+            }
+        }
+        assert_eq!(replaces_title_dll("amd_fidelityfx_loader_xbox.dll"), rebuild_ffx::enabled());
+        assert!(!replaces_title_dll("bink2scarlett.dll"));
     }
 
     #[test]

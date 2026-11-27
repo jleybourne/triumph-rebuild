@@ -2,8 +2,8 @@
 //! table counts the calls to each slot and keeps their first three integer arguments. It answers
 //! every interface id with itself, so one object is an allocator or any version of a list.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use windows::core::{Interface, GUID, HRESULT};
 use windows::Win32::Graphics::Direct3D12::*;
@@ -20,6 +20,12 @@ pub struct Fake {
     refs: AtomicU32,
     pub calls: [AtomicU64; SLOTS],
     pub args: [[AtomicU64; 3]; SLOTS],
+    /// the last call's first three integer arguments
+    pub last: [[AtomicU64; 3]; SLOTS],
+    /// `Set{Compute,Graphics}Root32BitConstants`: (host slot, parameter, the words, offset), every call while
+    /// `keep_words` (off for the benches: a lock and a vector are not the host's cost)
+    pub words: Mutex<Vec<(usize, u32, Vec<u32>, u32)>>,
+    pub keep_words: AtomicBool,
 }
 
 impl Fake {
@@ -29,6 +35,9 @@ impl Fake {
             refs: AtomicU32::new(1),
             calls: [const { AtomicU64::new(0) }; SLOTS],
             args: [const { [const { AtomicU64::new(0) }; 3] }; SLOTS],
+            last: [const { [const { AtomicU64::new(0) }; 3] }; SLOTS],
+            words: Mutex::new(Vec::new()),
+            keep_words: AtomicBool::new(false),
         });
         Box::into_raw(f).cast()
     }
@@ -44,6 +53,10 @@ impl Fake {
 
     pub fn arg(&self, slot: usize, i: usize) -> u64 {
         self.args[slot][i].load(Ordering::Relaxed)
+    }
+
+    pub fn last(&self, slot: usize, i: usize) -> u64 {
+        self.last[slot][i].load(Ordering::Relaxed)
     }
 }
 
@@ -71,7 +84,21 @@ unsafe extern "system" fn slot<const N: usize>(this: Raw, a: u64, b: u64, c: u64
         f.args[N][1].store(b, Ordering::Relaxed);
         f.args[N][2].store(c, Ordering::Relaxed);
     }
+    f.last[N][0].store(a, Ordering::Relaxed);
+    f.last[N][1].store(b, Ordering::Relaxed);
+    f.last[N][2].store(c, Ordering::Relaxed);
     0
+}
+
+/// `Set*Root32BitConstants(param, count, data, offset)`: counted, and the words kept.
+unsafe extern "system" fn constants<const N: usize>(this: Raw, param: u32, n: u32, data: *const u32, offset: u32) {
+    unsafe { slot::<N>(this, param.into(), n.into(), data as u64) };
+    let f = unsafe { &*this.cast::<Fake>() };
+    if !f.keep_words.load(Ordering::Relaxed) {
+        return;
+    }
+    let w = if data.is_null() { Vec::new() } else { unsafe { std::slice::from_raw_parts(data, n as usize) }.to_vec() };
+    f.words.lock().unwrap().push((N, param, w, offset));
 }
 
 macro_rules! table {
@@ -89,6 +116,8 @@ static TABLE: std::sync::LazyLock<Vec<Fp>> = std::sync::LazyLock::new(|| {
     t[0] = Fp(qi as *const ());
     t[1] = Fp(add_ref as *const ());
     t[2] = Fp(release as *const ());
+    t[host::SET_COMPUTE_ROOT_CONSTANTS] = Fp(constants::<{ host::SET_COMPUTE_ROOT_CONSTANTS }> as *const ());
+    t[host::SET_GRAPHICS_ROOT_CONSTANTS] = Fp(constants::<{ host::SET_GRAPHICS_ROOT_CONSTANTS }> as *const ());
     t
 });
 
@@ -97,15 +126,22 @@ static TABLE: std::sync::LazyLock<Vec<Fp>> = std::sync::LazyLock::new(|| {
 pub mod host {
     pub const CLOSE: usize = 9;
     pub const RESET: usize = 10;
+    pub const DRAW_INSTANCED: usize = 12;
     pub const DRAW_INDEXED: usize = 13;
     pub const DISPATCH: usize = 14;
     pub const COPY_BUFFER_REGION: usize = 15;
     pub const SET_PIPELINE_STATE: usize = 25;
     pub const RESOURCE_BARRIER: usize = 26;
     pub const SET_DESCRIPTOR_HEAPS: usize = 28;
+    pub const SET_COMPUTE_ROOT_SIGNATURE: usize = 29;
     pub const SET_GRAPHICS_ROOT_SIGNATURE: usize = 30;
+    pub const SET_COMPUTE_ROOT_TABLE: usize = 31;
     pub const SET_GRAPHICS_ROOT_TABLE: usize = 32;
+    pub const SET_COMPUTE_ROOT_CONSTANTS: usize = 35;
+    pub const SET_GRAPHICS_ROOT_CONSTANTS: usize = 36;
     pub const SET_GRAPHICS_ROOT_CBV: usize = 38;
+    pub const SET_COMPUTE_ROOT_SRV: usize = 39;
+    pub const SET_GRAPHICS_ROOT_SRV: usize = 40;
     pub const OM_SET_RENDER_TARGETS: usize = 46;
     pub const CLEAR_RTV: usize = 48;
     pub const EXECUTE_INDIRECT: usize = 59;
@@ -116,6 +152,8 @@ pub mod host {
 #[derive(Default)]
 pub struct FakeBackend {
     pub lists: AtomicUsize,
+    /// lists it makes keep the root-constant words they are given
+    pub keep_words: bool,
 }
 
 impl Backend for FakeBackend {
@@ -124,7 +162,9 @@ impl Backend for FakeBackend {
     }
     fn list(&self, _kind: u32, _allocator: &ID3D12CommandAllocator) -> windows::core::Result<ID3D12GraphicsCommandList> {
         self.lists.fetch_add(1, Ordering::Relaxed);
-        Ok(unsafe { ID3D12GraphicsCommandList::from_raw(Fake::new()) })
+        let f = Fake::new();
+        Fake::of(f).keep_words.store(self.keep_words, Ordering::Relaxed);
+        Ok(unsafe { ID3D12GraphicsCommandList::from_raw(f) })
     }
     fn upload(&self, bytes: u64) -> windows::core::Result<UploadChunk> {
         let mut keep = vec![0u8; bytes as usize].into_boxed_slice();
@@ -138,6 +178,11 @@ impl Backend for FakeBackend {
 
 pub fn backend() -> Arc<FakeBackend> {
     Arc::new(FakeBackend::default())
+}
+
+/// A backend whose lists keep the root-constant words they are given.
+pub fn backend_keeping_words() -> Arc<FakeBackend> {
+    Arc::new(FakeBackend { keep_words: true, ..Default::default() })
 }
 
 /// The stand-in behind a list's current host list.

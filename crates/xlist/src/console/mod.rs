@@ -51,7 +51,7 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
 
 pub use alloc::{create_allocator, host_allocator, upload_range};
-pub use list::{create_list, host_list, segments, stats, HostList, ListStats, Segment};
+pub use list::{create_list, forget_bound_state, host_list, segments, stats, sync_descriptors, HostList, ListStats, Segment};
 pub use slots::{allocator_slots, list_slots, traps, Returns, SlotInfo, SlotKind, Trap, ALLOCATOR_SLOTS, LIST_SLOTS};
 
 /// A COM or console object pointer, borrowed: never released through this.
@@ -75,6 +75,81 @@ pub struct HostPipeline {
     pub root_signature: Raw,
     /// Compute pipeline (root arguments go to the compute root).
     pub compute: bool,
+    /// How its programs' user data is made from the title's root arguments (`docs/design/root-seam.md`).
+    /// `Some`: `root_signature` is the program library's root, and the title's root arguments are kept as
+    /// console state and written in the library's layout at each draw or dispatch that follows a change.
+    /// `None`: the title's root arguments go to the host list by the title's parameter numbers.
+    pub user: Option<&'static UserMap>,
+}
+
+/// User-data dwords a translated program's root constants carry (`rebuild_pipelines::layout::USER_DATA_DWORDS`).
+pub const USER_DWORDS: usize = 16;
+
+/// Where one user-data dword of a translated program comes from: one of the title's root arguments, as the
+/// console's hardware would have loaded it into the program's user SGPRs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum UserSource {
+    /// Nothing the title sets: 0 (a dynamic-resource heap base, an immediate sampler, a dword past a parameter).
+    #[default]
+    Zero,
+    /// Root constant `dword` of the title's root parameter `slot`.
+    Constant { slot: u8, dword: u8 },
+    /// The descriptor table at `slot`: the byte offset of its first descriptor from the start of the bound heap
+    /// that holds it (console bytes: 32 a view, 16 a sampler). The program divides by the console's size to
+    /// get the heap index it reads with `ResourceDescriptorHeap[]` / `SamplerDescriptorHeap[]`; `bytes` of the
+    /// table are what its descriptors span, synced before submission.
+    Table { slot: u8, bytes: u32 },
+    /// The low or high half of the console GPU address of the root CBV, SRV or UAV at `slot` (console
+    /// addresses are the translated program's window addresses, so the address goes in as it is).
+    AddressLo { slot: u8 },
+    AddressHi { slot: u8 },
+}
+
+impl UserSource {
+    /// The title's root parameter it reads, if any.
+    pub fn slot(&self) -> Option<u8> {
+        match *self {
+            UserSource::Zero => None,
+            UserSource::Constant { slot, .. } | UserSource::Table { slot, .. } | UserSource::AddressLo { slot } | UserSource::AddressHi { slot } => Some(slot),
+        }
+    }
+}
+
+/// One stage's user data: the library root parameter holding it and the source of each dword.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct StageUserData {
+    /// The library root signature's root-constant parameter (`rebuild_pipelines::layout::param`).
+    pub param: u32,
+    /// Dwords to write (the highest the program reads, plus one); 0 writes nothing.
+    pub dwords: u32,
+    pub src: [UserSource; USER_DWORDS],
+}
+
+/// A translated pipeline's user data, per stage: compute has one (its CS), graphics two (VS, then PS).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct UserMap {
+    pub stages: [StageUserData; 2],
+    pub stage_count: u32,
+    /// The library root signature's root SRV for the descriptor shadow table (`t0, space101`).
+    pub shadow_param: u32,
+    /// Bit `s`: some stage reads the title's root parameter `s` (a change to any other is not a change).
+    pub slots: u64,
+}
+
+impl UserMap {
+    /// A map with `stages` (one for compute, two for graphics) and the library parameters of each.
+    pub fn new(stages: &[StageUserData], shadow_param: u32) -> UserMap {
+        let mut m = UserMap { shadow_param, stage_count: stages.len().min(2) as u32, ..Default::default() };
+        for (i, s) in stages.iter().take(2).enumerate() {
+            m.stages[i] = *s;
+            for src in &s.src[..(s.dwords as usize).min(USER_DWORDS)] {
+                if let Some(slot) = src.slot() {
+                    m.slots |= 1 << (slot & 63);
+                }
+            }
+        }
+        m
+    }
 }
 
 /// What a console pipeline is on the host. The lead's device implements it; the list asks once
@@ -96,6 +171,9 @@ pub struct HeapBinding {
     pub console_stride: u32,
     pub host_base: u64,
     pub host_stride: u32,
+    /// GPU address of the heap's descriptor shadow table (16 bytes per console index, bound at
+    /// `t0, space101` for translated programs); 0 for a heap without one (samplers).
+    pub shadow_va: u64,
 }
 
 impl HeapBinding {
@@ -241,6 +319,12 @@ pub trait ListHost: PipelineSource + Send + Sync {
         let n = if write.bytes == 8 { 2 } else { 1 };
         unsafe { (list.vtable().WriteBufferImmediate)(list.as_raw(), n, p.as_ptr(), m.as_ptr()) };
         true
+    }
+    /// Bring the host mirror of console descriptor memory `start..start + len` up to date with its bytes (the
+    /// title copies descriptor records as plain bytes), before a submission reads it. Returns the slots looked
+    /// at. Called by [`sync_descriptors`] over the tables a list's translated programs read.
+    fn sync_descriptors(&self, _start: u64, _len: u64) -> u32 {
+        0
     }
     /// A memory wait was recorded (once per call, at record time).
     fn memory_wait(&self, _wait: &MemoryWait) -> WaitAction {

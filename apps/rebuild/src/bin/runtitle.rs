@@ -17,6 +17,10 @@
 mod sampler;
 #[path = "../crash.rs"]
 mod crash;
+#[path = "../watch.rs"]
+mod watch;
+#[path = "../patch.rs"]
+mod patch;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -65,10 +69,12 @@ fn write_summary(outcome: &str, detail: &str) {
     let elapsed = unsafe { STARTED }.map(|s| s.elapsed().as_secs_f64()).unwrap_or(0.0);
     let limits = rebuild_runtime::limits::get();
     let text = format!(
-        "[summary]\noutcome = \"{outcome}\"\ndetail = \"{}\"\nseconds = {elapsed:.3}\nmeasured_from = \"title_start\"\n\
+        "[summary]\noutcome = \"{outcome}\"\ndetail = \"{}\"\nseconds = {elapsed:.3}\n{}\
          [title]\nbudget_mib = {}\nbudget_used_mib = {}\n\
          [limits]\nram_mb = {}\nvram_mb = {}\ncpu_cores = {}\ncpu_rate = {}\n",
         detail.replace('\\', "\\\\").replace('"', "\\\""),
+        // the frame keys (avg_fps, low1_fps, frame_ms, gpu_ms, frames, measured_from) from the present's counters
+        rebuild_runtime::framelog::summary_keys(false),
         rebuild_runtime::budget::limit() >> 20,
         rebuild_runtime::budget::used() >> 20,
         limits.ram_mb,
@@ -96,6 +102,13 @@ fn device_report() {
         return;
     }
     println!("{}", rebuild_runtime::pipeline::report());
+    match rebuild_dstorage::stats() {
+        Some(d) => println!(
+            "dstorage  {} reads, {} failed, {} MiB in, {} MiB out, {} zlib, {} bcpack refused, {} staging waits",
+            d.reads, d.failed, d.bytes_in >> 20, d.bytes_out >> 20, d.zlib_reads, d.bcpack_refused, d.staging_waits
+        ),
+        None => println!("dstorage  the title has not asked for DirectStorage"),
+    }
     let t = rebuild_runtime::device::traps();
     println!("device    {} slots called that are not written yet (first call, ms after the device):", t.len());
     for (off, name, n, ms) in t {
@@ -139,6 +152,10 @@ fn device_report() {
     let p = rebuild_runtime::cpu::patched();
     if p > 0 {
         println!("cpu       {p} clwb sites patched to NOPs (the host CPU has no clwb)");
+    }
+    let w = rebuild_runtime::cpu::wait_hints();
+    if w > 0 {
+        println!("cpu       {w} monitorx/mwaitx sites patched (AMD-only wait hints)");
     }
     let (z, ze) = rebuild_runtime::cpu::clzero();
     if z + ze > 0 {
@@ -287,7 +304,11 @@ fn main() {
         return;
     }
     crash::install(title.images.iter().map(|l| (l.name.clone(), l.base, l.image.size_of_image as u64)).collect());
+    // REBUILD_PATCH: diagnostic code patches, before the title runs
+    patch::apply(&title.images.iter().map(|l| (l.name.clone(), l.base, l.image.size_of_image as u64)).collect::<Vec<_>>());
     crash::on_fatal(device_report);
+    // REBUILD_WATCH: who writes an address (hardware watchpoint on every thread)
+    watch::install();
     // console CPU instructions the host lacks (clwb), patched where the title uses them; first in the handler line
     rebuild_runtime::cpu::install();
     // the title's code assumes its TLS block is slot 0 (an exe's): give it slot 0 before any thread runs

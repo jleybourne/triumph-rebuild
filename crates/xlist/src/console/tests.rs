@@ -55,7 +55,7 @@ const MEM_HOST: u64 = 0x7_0000_0000;
 
 impl PipelineSource for TestHost {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
-        (console != BAD).then_some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: 0x5160 as Raw, compute: false })
+        (console != BAD).then_some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: 0x5160 as Raw, compute: false, user: None })
     }
 }
 
@@ -64,7 +64,7 @@ impl ListHost for TestHost {
         (console != BAD).then_some((console as usize ^ 0x1_0000) as Raw)
     }
     fn descriptor_heap(&self, console: Raw) -> Option<HeapBinding> {
-        (console == HEAP).then_some(HeapBinding { heap: 0x4EA9 as Raw, console_base: 0x1000_0000, console_bytes: 1 << 20, console_stride: 32, host_base: 0x9_0000_0000, host_stride: 64 })
+        (console == HEAP).then_some(HeapBinding { heap: 0x4EA9 as Raw, console_base: 0x1000_0000, console_bytes: 1 << 20, console_stride: 32, host_base: 0x9_0000_0000, host_stride: 64, shadow_va: 0 })
     }
     fn cpu_descriptor(&self, console: usize) -> Option<usize> {
         (console != 0xBAD).then_some(console + 0x100)
@@ -427,6 +427,34 @@ fn a_pipeline_with_no_host_object_drops_its_draws_and_never_reuses_the_one_befor
     release(l);
 }
 
+#[test]
+fn after_outside_commands_the_titles_rebinds_are_applied_not_elided() {
+    let h = Arc::new(TestHost::default());
+    let (l, _a, _backend) = fake_list(h.clone());
+    type Draw = unsafe extern "system" fn(Raw, u32, u32, u32, i32, u32);
+    let bind = || unsafe {
+        method::<unsafe extern "system" fn(Raw, u32, *const Raw)>(l, 0x100)(l, 1, &HEAP);
+        method::<unsafe extern "system" fn(Raw, Raw)>(l, 0xc8)(l, 0xAAA0 as Raw);
+        method::<unsafe extern "system" fn(Raw, u32, u64)>(l, 0x120)(l, 0, 0x1000_0000 + 3 * 32);
+    };
+    bind();
+    let f = fake::host_of(l);
+    assert_eq!((f.count(host::SET_DESCRIPTOR_HEAPS), f.count(host::SET_PIPELINE_STATE), f.count(host::SET_GRAPHICS_ROOT_TABLE)), (1, 1, 1));
+    // the upscale records into the host list, then the list forgets: the heaps are bound again at once
+    assert!(forget_bound_state(l));
+    assert_eq!(f.count(host::SET_DESCRIPTOR_HEAPS), 2);
+    // a draw before the title binds a pipeline is dropped, not run with the upscale's pipeline
+    unsafe { method::<Draw>(l, 0x68)(l, 3, 1, 0, 0, 0) };
+    assert_eq!(f.count(host::DRAW_INDEXED), 0);
+    // the title's re-binds (identical to before) reach the host list
+    bind();
+    unsafe { method::<Draw>(l, 0x68)(l, 3, 1, 0, 0, 0) };
+    assert_eq!(f.count(host::SET_DESCRIPTOR_HEAPS), 2, "the heaps were already re-bound: this one repeats");
+    assert_eq!((f.count(host::SET_PIPELINE_STATE), f.count(host::SET_GRAPHICS_ROOT_TABLE), f.count(host::DRAW_INDEXED)), (2, 2, 1));
+    assert!(!forget_bound_state(std::ptr::null_mut()));
+    release(l);
+}
+
 fn rebuild_xlist_stats(l: Raw) -> crate::console::ListStats {
     crate::console::list::stats(l).expect("our list")
 }
@@ -487,10 +515,50 @@ fn a_memory_wait_cuts_the_list_and_the_state_follows() {
 /// Build 0 (b)'s (4,500 draws, ~20,300 calls), each call through the console table.
 #[test]
 fn our_cost_per_draw_on_the_stand_in() {
+    let per_draw = stand_in_cost(None, "title layout");
+    assert!(per_draw < 0.43, "ours alone {per_draw:.3} µs a draw: over the 0.43 µs class");
+}
+
+/// The bench frame's root arguments as a translated pipeline pair reads them: the vertex stage both tables,
+/// the root CBV's address and the four constants; the pixel stage a table and two constants.
+fn bench_user_map() -> &'static UserMap {
+    use UserSource::*;
+    static M: std::sync::OnceLock<UserMap> = std::sync::OnceLock::new();
+    M.get_or_init(|| {
+        let mut vs = StageUserData { param: 0, dwords: 8, ..Default::default() };
+        vs.src[..8].copy_from_slice(&[
+            Table { slot: 0, bytes: 64 },
+            Table { slot: 1, bytes: 32 },
+            AddressLo { slot: 2 },
+            AddressHi { slot: 2 },
+            Constant { slot: 3, dword: 0 },
+            Constant { slot: 3, dword: 1 },
+            Constant { slot: 3, dword: 2 },
+            Constant { slot: 3, dword: 3 },
+        ]);
+        let mut ps = StageUserData { param: 1, dwords: 4, ..Default::default() };
+        ps.src[..4].copy_from_slice(&[Table { slot: 1, bytes: 32 }, Zero, Constant { slot: 3, dword: 0 }, Constant { slot: 3, dword: 1 }]);
+        UserMap::new(&[vs, ps], 2)
+    })
+}
+
+/// The same frame with every pipeline translated: the title's root arguments kept as console state and
+/// written in the library layout at each draw after a change (the root seam, `docs/design/root-seam.md`).
+#[test]
+fn our_cost_per_draw_through_the_root_seam() {
+    let per_draw = stand_in_cost(Some(bench_user_map()), "library layout");
+    assert!(per_draw < 1.0, "ours alone {per_draw:.3} µs a draw through the root seam: over 1 µs");
+}
+
+/// The bench frame recorded 20 times on the stand-in; the best µs a draw.
+fn stand_in_cost(user: Option<&'static UserMap>, what: &str) -> f64 {
     let shape = crate::frame::Shape::default();
     let lay = crate::frame::layout(&shape);
     let frame = crate::frame::frame(&shape, &lay, 1);
-    let h = Arc::new(BenchHost::for_layout(&lay, None));
+    let mut host = BenchHost::for_layout(&lay, None);
+    host.user = user;
+    host.heap.shadow_va = 0xA_0000_0000;
+    let h = Arc::new(host);
     let backend = fake::backend();
     let a = alloc::create_on(0, backend, h).unwrap();
     let l = create_list(0, a, std::ptr::null_mut()).unwrap();
@@ -505,8 +573,220 @@ fn our_cost_per_draw_on_the_stand_in() {
         calls = frame.iter().map(|c| c.len()).sum::<usize>();
     }
     let per_draw = best * 1e6 / shape.draws as f64;
-    println!("stand-in: {calls} calls, {} draws: {:.3} ms a frame, {per_draw:.4} µs a draw, {:.4} µs a call", shape.draws, best * 1e3, best * 1e6 / calls as f64);
-    assert!(per_draw < 0.43, "ours alone {per_draw:.3} µs a draw: over the 0.43 µs class");
+    let st = rebuild_xlist_stats(l);
+    println!(
+        "stand-in, {what}: {calls} calls, {} draws: {:.3} ms a frame, {per_draw:.4} µs a draw, {:.4} µs a call; last list: {} user-data writes, {} shadow binds",
+        shape.draws,
+        best * 1e3,
+        best * 1e6 / calls as f64,
+        st.user_sets,
+        st.shadow_sets
+    );
+    if user.is_some() {
+        assert!(st.user_sets > 0 && st.shadow_sets > 0, "{st:?}");
+    }
+    assert_eq!(release(l), 0);
+    assert_eq!(release(a), 0);
+    per_draw
+}
+
+// ---- the root seam: the title's root arguments in the program library's layout ----
+
+const SEAM_GFX: Raw = 0x6A00 as Raw;
+const SEAM_CS: Raw = 0x6C00 as Raw;
+const SEAM_OTHER_GFX: Raw = 0x6B00 as Raw;
+const LIB_GFX_ROOT: Raw = 0x7100 as Raw;
+const LIB_CS_ROOT: Raw = 0x7200 as Raw;
+const TITLE_ROOT: Raw = 0x7300 as Raw;
+const SEAM_BASE: u64 = 0x1000_0000;
+const SEAM_SAMPLERS: Raw = 0xD100 as Raw;
+const SAMPLER_BASE: u64 = 0x3000_0000;
+const SHADOW: u64 = 0xA_BC00_0000;
+
+#[derive(Default)]
+struct SeamHost {
+    synced: Mutex<Vec<(u64, u64)>>,
+}
+
+fn seam_maps() -> (&'static UserMap, &'static UserMap) {
+    use UserSource::*;
+    static M: std::sync::OnceLock<(UserMap, UserMap)> = std::sync::OnceLock::new();
+    let (g, c) = M.get_or_init(|| {
+        // the vertex stage: constant 1 of slot 3, the view table at slot 1, the root CBV at slot 2; the pixel
+        // stage: constant 0 of slot 3, the sampler table at slot 4
+        let mut vs = StageUserData { param: 0, dwords: 5, ..Default::default() };
+        vs.src[..5].copy_from_slice(&[Constant { slot: 3, dword: 1 }, Table { slot: 1, bytes: 96 }, AddressLo { slot: 2 }, AddressHi { slot: 2 }, Zero]);
+        let mut ps = StageUserData { param: 1, dwords: 3, ..Default::default() };
+        ps.src[..3].copy_from_slice(&[Constant { slot: 3, dword: 0 }, Zero, Table { slot: 4, bytes: 16 }]);
+        let gfx = UserMap::new(&[vs, ps], 2);
+        // compute: a table at dword 4 and a constant at 5, as the console's CS user SGPRs s4, s5 hold them
+        let mut cs = StageUserData { param: 0, dwords: 6, ..Default::default() };
+        cs.src[4] = Table { slot: 0, bytes: 32 };
+        cs.src[5] = Constant { slot: 1, dword: 0 };
+        (gfx, UserMap::new(&[cs], 1))
+    });
+    (g, c)
+}
+
+impl PipelineSource for SeamHost {
+    fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
+        let (g, c) = seam_maps();
+        match console {
+            SEAM_GFX | SEAM_OTHER_GFX => Some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: LIB_GFX_ROOT, compute: false, user: Some(g) }),
+            SEAM_CS => Some(HostPipeline { pso: 0x8000_6C00 as Raw, root_signature: LIB_CS_ROOT, compute: true, user: Some(c) }),
+            _ => None,
+        }
+    }
+}
+
+impl ListHost for SeamHost {
+    fn root_signature(&self, console: Raw) -> Option<Raw> {
+        (console == TITLE_ROOT).then_some(0x7301 as Raw)
+    }
+    fn resource(&self, console: Raw) -> Option<Raw> {
+        Some(console)
+    }
+    fn descriptor_heap(&self, console: Raw) -> Option<HeapBinding> {
+        match console {
+            HEAP => Some(HeapBinding { heap: 0x4EA9 as Raw, console_base: SEAM_BASE, console_bytes: 1 << 20, console_stride: 32, host_base: 0x9_0000_0000, host_stride: 64, shadow_va: SHADOW }),
+            SEAM_SAMPLERS => Some(HeapBinding { heap: 0x4EAA as Raw, console_base: SAMPLER_BASE, console_bytes: 1 << 16, console_stride: 16, host_base: 0x9_1000_0000, host_stride: 32, shadow_va: 0 }),
+            _ => None,
+        }
+    }
+    fn cpu_descriptor(&self, console: usize) -> Option<usize> {
+        Some(console)
+    }
+    fn memory(&self, _va: u64) -> Option<MemoryRange> {
+        None
+    }
+    fn sync_descriptors(&self, start: u64, len: u64) -> u32 {
+        self.synced.lock().unwrap().push((start, len));
+        (len / 32) as u32
+    }
+}
+
+type SetRaw = unsafe extern "system" fn(Raw, Raw);
+type SetTable = unsafe extern "system" fn(Raw, u32, u64);
+type SetConsts = unsafe extern "system" fn(Raw, u32, u32, *const u32, u32);
+type Draw4 = unsafe extern "system" fn(Raw, u32, u32, u32, u32);
+type Dispatch3 = unsafe extern "system" fn(Raw, u32, u32, u32);
+
+/// The root-constant writes a host list received since `from`: (host slot, parameter, words).
+fn words_since(f: &Fake, from: usize) -> Vec<(usize, u32, Vec<u32>)> {
+    f.words.lock().unwrap()[from..].iter().map(|(s, p, w, o)| {
+        assert_eq!(*o, 0, "written from dword 0");
+        (*s, *p, w.clone())
+    }).collect()
+}
+
+#[test]
+fn a_titles_root_constants_and_tables_land_in_the_library_layout() {
+    let h = Arc::new(SeamHost::default());
+    let backend = fake::backend_keeping_words();
+    let a = alloc::create_on(0, backend, h.clone()).unwrap();
+    let l = create_list(0, a, std::ptr::null_mut()).unwrap();
+    let f = fake::host_of(l);
+    let (gfx, _) = seam_maps();
+    unsafe {
+        method::<unsafe extern "system" fn(Raw, u32, *const Raw)>(l, 0x100)(l, 2, [HEAP, SEAM_SAMPLERS].as_ptr());
+        // the title's own root signature, then the translated pipeline: the host keeps the library's
+        method::<SetRaw>(l, 0x110)(l, TITLE_ROOT);
+        method::<SetRaw>(l, 0xc8)(l, SEAM_GFX);
+        // the title's arguments by its own parameter numbers
+        method::<SetTable>(l, 0x120)(l, 1, SEAM_BASE + 5 * 32);
+        method::<SetTable>(l, 0x150)(l, 2, 0x12_3456_7890);
+        method::<SetTable>(l, 0x120)(l, 4, SAMPLER_BASE + 3 * 16);
+        method::<SetConsts>(l, 0x140)(l, 3, 3, [11u32, 22, 33].as_ptr(), 0);
+        method::<Draw4>(l, 0x60)(l, 3, 1, 0, 0);
+    }
+    // nothing reached the host list by the title's numbers
+    for slot in [host::SET_GRAPHICS_ROOT_TABLE, host::SET_GRAPHICS_ROOT_CBV, 34] {
+        assert_eq!(f.count(slot), 0, "host slot {slot}: a title argument forwarded in the title's layout");
+    }
+    assert_eq!(f.count(host::SET_GRAPHICS_ROOT_SIGNATURE), 2, "the title's, then the library's");
+    assert_eq!(f.last(host::SET_GRAPHICS_ROOT_SIGNATURE, 0), LIB_GFX_ROOT as u64, "the library root signature is the one bound");
+    // the user data: VS [constant 1, view table offset, CBV address lo, hi, 0], PS [constant 0, 0, sampler offset]
+    assert_eq!(
+        words_since(f, 0),
+        vec![
+            (host::SET_GRAPHICS_ROOT_CONSTANTS, 0, vec![22, 5 * 32, 0x3456_7890, 0x12, 0]),
+            (host::SET_GRAPHICS_ROOT_CONSTANTS, 1, vec![11, 0, 3 * 16]),
+        ]
+    );
+    // the shadow table of the view heap at the library's parameter 2
+    assert_eq!((f.count(host::SET_GRAPHICS_ROOT_SRV), f.last(host::SET_GRAPHICS_ROOT_SRV, 0), f.last(host::SET_GRAPHICS_ROOT_SRV, 1)), (1, 2, SHADOW));
+    assert_eq!(f.count(host::DRAW_INSTANCED), 1);
+
+    unsafe {
+        // a draw with nothing changed writes nothing
+        method::<Draw4>(l, 0x60)(l, 3, 1, 0, 0);
+        assert_eq!(words_since(f, 2), vec![]);
+        // a parameter no stage reads changes nothing either
+        method::<SetConsts>(l, 0x140)(l, 7, 1, [5u32].as_ptr(), 0);
+        method::<Draw4>(l, 0x60)(l, 3, 1, 0, 0);
+        assert_eq!(words_since(f, 2), vec![]);
+        // constant 0 only: the pixel stage's words alone are written again
+        method::<SetConsts>(l, 0x140)(l, 3, 1, [99u32].as_ptr(), 0);
+        method::<Draw4>(l, 0x60)(l, 3, 1, 0, 0);
+        assert_eq!(words_since(f, 2), vec![(host::SET_GRAPHICS_ROOT_CONSTANTS, 1, vec![99, 0, 48])]);
+        // another translated pipeline on the same library root: the arguments live on, nothing to write
+        method::<SetRaw>(l, 0xc8)(l, SEAM_OTHER_GFX);
+        method::<Draw4>(l, 0x60)(l, 3, 1, 0, 0);
+        assert_eq!(words_since(f, 3), vec![]);
+        // the title's root signature again: its arguments end, so unset ones read 0 (counted)
+        method::<SetRaw>(l, 0x110)(l, 0x7400 as Raw);
+        method::<SetTable>(l, 0x120)(l, 1, SEAM_BASE + 9 * 32);
+        method::<Draw4>(l, 0x60)(l, 3, 1, 0, 0);
+        assert_eq!(
+            words_since(f, 3),
+            vec![(host::SET_GRAPHICS_ROOT_CONSTANTS, 0, vec![0, 9 * 32, 0, 0, 0]), (host::SET_GRAPHICS_ROOT_CONSTANTS, 1, vec![0, 0, 0])]
+        );
+    }
+    assert_eq!(f.count(host::SET_GRAPHICS_ROOT_TABLE), 0);
+    let st = rebuild_xlist_stats(l);
+    assert_eq!((st.user_sets, st.shadow_sets, st.draws), (5, 1, 6));
+    assert!(st.user_unset >= 4, "{st:?}");
+    assert_eq!(gfx.slots, 0b11110, "the slots the map reads");
+
+    // before submission: the tables the programs read are synced (views 5..8 and 9..12 of the view heap, one
+    // sampler)
+    assert_eq!(sync_descriptors(l), 7 + 0);
+    let synced = h.synced.lock().unwrap().clone();
+    assert_eq!(synced, vec![(SEAM_BASE + 5 * 32, 7 * 32), (SAMPLER_BASE + 3 * 16, 16)]);
+    assert_eq!(release(l), 0);
+    assert_eq!(release(a), 0);
+}
+
+#[test]
+fn a_dispatch_writes_the_compute_layout_and_a_cut_writes_it_again() {
+    let h = Arc::new(SeamHost::default());
+    let backend = fake::backend_keeping_words();
+    let a = alloc::create_on(0, backend, h).unwrap();
+    let l = create_list(0, a, std::ptr::null_mut()).unwrap();
+    unsafe {
+        method::<unsafe extern "system" fn(Raw, u32, *const Raw)>(l, 0x100)(l, 1, &HEAP);
+        method::<SetRaw>(l, 0xc8)(l, SEAM_CS);
+        method::<SetTable>(l, 0x118)(l, 0, SEAM_BASE + 64);
+        method::<unsafe extern "system" fn(Raw, u32, u32, u32)>(l, 0x128)(l, 1, 16, 0);
+        method::<Dispatch3>(l, 0x70)(l, 1, 1, 1);
+    }
+    let first = fake::host_of(l);
+    assert_eq!(words_since(first, 0), vec![(host::SET_COMPUTE_ROOT_CONSTANTS, 0, vec![0, 0, 0, 0, 64, 16])]);
+    assert_eq!((first.count(host::SET_COMPUTE_ROOT_SRV), first.last(host::SET_COMPUTE_ROOT_SRV, 0), first.last(host::SET_COMPUTE_ROOT_SRV, 1)), (1, 1, SHADOW));
+    assert_eq!((first.count(host::SET_COMPUTE_ROOT_TABLE), first.count(33)), (0, 0), "nothing in the title's layout");
+    assert_eq!(first.last(host::SET_COMPUTE_ROOT_SIGNATURE, 0), LIB_CS_ROOT as u64);
+    unsafe {
+        // a memory wait cuts the list: the new host list gets the root signature, and the next dispatch the
+        // user data and shadow table again, without the title setting anything
+        method::<unsafe extern "system" fn(Raw, u64, u32, u64)>(l, 0x248)(l, MEM, 7, 1);
+        method::<Dispatch3>(l, 0x70)(l, 1, 1, 1);
+    }
+    let second = fake::host_of(l);
+    assert!(!std::ptr::eq(first, second), "a second host list");
+    assert_eq!(second.count(host::SET_COMPUTE_ROOT_SIGNATURE), 1);
+    assert_eq!(words_since(second, 0), vec![(host::SET_COMPUTE_ROOT_CONSTANTS, 0, vec![0, 0, 0, 0, 64, 16])]);
+    assert_eq!(second.count(host::SET_COMPUTE_ROOT_SRV), 1);
+    assert_eq!(second.count(host::DISPATCH), 1);
     assert_eq!(release(l), 0);
     assert_eq!(release(a), 0);
 }
@@ -530,6 +810,7 @@ struct BenchHost {
     target_raw: Vec<usize>,
     rtv: usize,
     indirect: usize,
+    user: Option<&'static UserMap>,
 }
 unsafe impl Send for BenchHost {}
 unsafe impl Sync for BenchHost {}
@@ -549,6 +830,7 @@ impl BenchHost {
                 console_stride: 32,
                 host_base: setup.map_or(0x9_0000_0000, |s| s.heap_gpu_start()),
                 host_stride: setup.map_or(32, |s| s.view_increment()),
+                shadow_va: 0,
             },
             memory: MemoryRange {
                 console: lay.memory_base,
@@ -561,6 +843,7 @@ impl BenchHost {
             target_raw: (0..lay.barrier_targets.len()).map(|i| setup.map_or(0x4000 + i, |s| s.target_raw(i) as usize)).collect(),
             rtv: setup.map_or(0xC100, |s| s.rtv_cpu()),
             indirect: setup.map_or(0x5160, |s| s.indirect_raw() as usize),
+            user: None,
         }
     }
 }
@@ -568,7 +851,7 @@ impl BenchHost {
 impl PipelineSource for BenchHost {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
         let i = self.pipelines.get(console as u64)?;
-        Some(HostPipeline { pso: self.pso[i as usize] as Raw, root_signature: self.root as Raw, compute: false })
+        Some(HostPipeline { pso: self.pso[i as usize] as Raw, root_signature: self.root as Raw, compute: false, user: self.user })
     }
 }
 

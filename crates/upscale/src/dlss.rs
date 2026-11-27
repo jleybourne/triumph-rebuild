@@ -492,7 +492,7 @@ fn resource(r: &ID3D12Resource, state: D3D12_RESOURCE_STATES) -> Resource {
         state: state.0 as u32,
         width: d.Width as u32,
         height: d.Height,
-        native_format: d.Format.0 as u32,
+        native_format: crate::typed(d.Format).0 as u32,
         mip_levels: d.MipLevels as u32,
         array_layers: d.DepthOrArraySize as u32,
         gpu_virtual_address: 0,
