@@ -48,6 +48,13 @@ pub fn install(d: &Drives) -> Result<Arc<Vfs>, String> {
         .build()
         .map_err(|e| format!("drives: {e}"))?;
     let vfs = Arc::new(vfs);
+    // the GDK's persistent local storage is the S: drive; its used space is the host folder behind it
+    let profile = rebuild_gdk::profile::Profile {
+        storage_drive: STORAGE,
+        storage_host: Some(d.overlay.join(STORAGE.to_string())),
+        ..rebuild_gdk::profile::Profile::default()
+    };
+    rebuild_gdk::profile::configure(profile)?;
     rebuild_winfiles::install(rebuild_winfiles::Files::new(vfs.clone(), r"G:\"));
     let config = rebuild_dstorage::Config { pages: Some(Arc::new(PhysicalPages)), ..Default::default() };
     // a second install in one process keeps the first engine (tests install more than once)
