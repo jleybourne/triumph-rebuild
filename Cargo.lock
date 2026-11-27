@@ -52,7 +52,6 @@ dependencies = [
 name = "rebuild"
 version = "0.1.0"
 dependencies = [
- "rebuild-loader",
  "rebuild-sir",
  "rebuild-uma",
  "rebuild-xlist",
@@ -67,8 +66,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "rebuild-loader"
+name = "rebuild-input"
 version = "0.1.0"
+dependencies = [
+ "windows",
+]
 
 [[package]]
 name = "rebuild-sir"
