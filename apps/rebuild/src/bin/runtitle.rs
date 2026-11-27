@@ -65,7 +65,8 @@ fn write_summary(outcome: &str, detail: &str) {
     let elapsed = unsafe { STARTED }.map(|s| s.elapsed().as_secs_f64()).unwrap_or(0.0);
     let limits = rebuild_runtime::limits::get();
     let text = format!(
-        "outcome = \"{outcome}\"\ndetail = \"{}\"\nseconds = {elapsed:.3}\ntitle_budget_mib = {}\ntitle_budget_used_mib = {}\n\
+        "[summary]\noutcome = \"{outcome}\"\ndetail = \"{}\"\nseconds = {elapsed:.3}\nmeasured_from = \"title_start\"\n\
+         [title]\nbudget_mib = {}\nbudget_used_mib = {}\n\
          [limits]\nram_mb = {}\nvram_mb = {}\ncpu_cores = {}\ncpu_rate = {}\n",
         detail.replace('\\', "\\\\").replace('"', "\\\""),
         rebuild_runtime::budget::limit() >> 20,
