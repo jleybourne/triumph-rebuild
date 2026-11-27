@@ -46,6 +46,10 @@ The owner's rules, in their own words:
 - **The title's folder** is read-only, through `REBUILD_GAME_DIR` (the path is `game_dir` in
   `D:\Developer\fxceless-victory\victory.toml`). Never commit game bytes or that path. Prepared image copies live
   in `%LOCALAPPDATA%\triumph-rebuild\images`.
+- **Shader corpus copy:** `D:\victory-data\shaders.rpf` (SHA-256 `0BC1634594E51CA8E7EF5F2BC6F5B32B081CE779AC094D686DE08ECB75DC24A8`),
+  copied once with the owner's OK. All shader work reads this copy, never the game folder.
+- **Game folder:** `data\ttdb\ui\ttdb_ui.ttpf` was overwritten by a helper (2026-11-27); the owner is re-dumping it.
+  Don't run the title until it is back, then make the folder read-only (`attrib +R /S`, owner OK given).
 - **The fork** (design and data only): `git -C D:\Developer\fxceless-victory show triumph/main:<path>`. GPU
   design: `crates/victory-gpu/src/*.rs`; loader: `crates/victory-loader/src/*.rs`; console DLLs:
   `crates/victory-hle/src/modules/*.rs`; findings: `CLAUDE.md`, `ROADBLOCK.md`, `docs/`.
