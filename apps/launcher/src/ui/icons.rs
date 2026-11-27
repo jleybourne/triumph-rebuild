@@ -53,12 +53,34 @@ pub const WARNING_CIRCLE: &str = p::WARNING_CIRCLE;
 pub const WRENCH: &str = p::WRENCH;
 pub const X: &str = p::X;
 pub const X_CIRCLE: &str = p::X_CIRCLE;
+pub const SUN: &str = p::SUN;
+pub const MOON: &str = p::MOON;
+pub const MAGNIFYING_GLASS: &str = p::MAGNIFYING_GLASS;
+pub const CAMERA: &str = p::CAMERA;
+pub const COPY: &str = p::COPY;
+pub const ARROW_SQUARE_OUT: &str = p::ARROW_SQUARE_OUT;
+pub const BUG: &str = p::BUG;
+pub const CHART_LINE: &str = p::CHART_LINE;
+pub const TIMER: &str = p::TIMER;
+pub const LIST_CHECKS: &str = p::LIST_CHECKS;
+pub const EXPORT: &str = p::EXPORT;
 
 /// Icons that appear inside text (pills, fix lines), drawn with the text font: Inter must not have a
 /// glyph of its own at these code points. Every other icon is drawn alone with `theme::icon`.
 pub const INLINE: &[&str] = &[WARNING, CHECK, X_CIRCLE, WRENCH, SHIELD_CHECK, WARNING_CIRCLE];
 
 pub const ALL: &[(&str, &str)] = &[
+    ("SUN", SUN),
+    ("MOON", MOON),
+    ("MAGNIFYING_GLASS", MAGNIFYING_GLASS),
+    ("CAMERA", CAMERA),
+    ("COPY", COPY),
+    ("ARROW_SQUARE_OUT", ARROW_SQUARE_OUT),
+    ("BUG", BUG),
+    ("CHART_LINE", CHART_LINE),
+    ("TIMER", TIMER),
+    ("LIST_CHECKS", LIST_CHECKS),
+    ("EXPORT", EXPORT),
     ("ARROWS_CLOCKWISE", ARROWS_CLOCKWISE),
     ("ARROW_COUNTER_CLOCKWISE", ARROW_COUNTER_CLOCKWISE),
     ("CARET_DOUBLE_LEFT", CARET_DOUBLE_LEFT),

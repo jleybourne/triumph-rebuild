@@ -10,16 +10,26 @@
 //! - [`library`]: more than one game, each with its own data folder; detectors
 //! - [`store`]: per-game settings saved safely: explicit values kept, unknown keys kept, `.bak` recovery
 //! - [`gamemeta`]: the title's name and key art from its package, read-only, for the Play hero
+//! - [`session`]: a folder per launch, `session.toml`, retention (L6)
+//! - [`frameline`]: the frame line and `summary.toml`, read; the matrix CSV (L6)
+//! - [`runs`]: the test matrix run plan (L6)
+//! - [`verify`]: the game folder read-only check, metadata only (L6)
+//! - [`prefs`]: launcher-wide preferences (the theme) (L6)
 
+pub mod frameline;
 pub mod gamemeta;
 pub mod home;
 pub mod library;
 pub mod model;
 pub mod mods;
 pub mod play;
+pub mod prefs;
+pub mod runs;
+pub mod session;
 pub mod store;
 pub mod syscheck;
 pub mod title;
+pub mod verify;
 
 /// FNV-1a 64 over a file's bytes: enough to prove a file was not touched.
 pub fn hash_file(path: &std::path::Path) -> std::io::Result<u64> {

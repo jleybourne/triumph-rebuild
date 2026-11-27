@@ -17,6 +17,7 @@ egui/eframe 0.31 (glow). No network crate, no telemetry, no browser engine.
 | — | **library**: more than one game; detector trait; add / remove / switch | ✅ | `library::tests` (3): add, switch, persistence across a restart, per-game isolation (B byte-identical after A changes), a game update keeps settings, unsupported folders (wrong family, no exe, empty, missing) say why and add nothing, remove leaves the game folder's tree hash (contents + `fs::metadata` size and mtime) unchanged, re-add restores or sets aside |
 | — | **per-game store**: never replaced or lost | ✅ | `store::tests` (3): explicit values survive a change of default, unknown keys and a newer schema survive a round trip, a cut-short file is recovered from `.bak` |
 | — | **look**: own dark theme, Inter, Phosphor, borderless window | ✅ | `type_check` (a pangram in every text style: no blank or missing glyph), `icons` (every icon has a Phosphor glyph; inline icons not shadowed by Inter), `smoke` (the whole flow headless, no panic) |
+| L6 | **redesign** (owner-approved Direction B): top bar, dark and light themes, every screen (Play, Running, Profiles, Settings, Runs & test matrix, Mods, Diagnostics, Library), **session diagnostics** with retention | ✅ | `session::tests` (5: UTC stamps, `session.toml` written at launch and on exit and parsed, retention deletes old / keeps recent / 0 keeps all / never the running one / only session folders, delete refuses anything else, crashes and captures listed), `frameline::tests` (4), `runs::tests` (2), `verify::tests` (1), `prefs::tests` (theme round trip), `model::tests` (every entry under exactly one pill; search; pending changes), `config` (retention and theme entries), `tests/launch.rs` (a launch in a session: `REBUILD_SESSION_DIR`, frame line inside it, `summary.toml` and a crash report from `fake-layer`), `smoke` (every section and the Running view in **both themes**, settings pills and search, an old session pruned on restart and a recent one kept, the theme saved launcher-wide and never an unsaved change), `type_check` (the approved palettes, contrast ≥ 4.5 for muted text and chips), `idle` (unchanged: 0 frames when idle) |
 
 ## Measured
 
@@ -63,73 +64,60 @@ title settings.xml SHA-256 before = after = 2f8d9deb…c0d1 (copy written to a t
   Today one: `GdkPackage` (MicrosoftGame.config naming an executable with `TargetDeviceFamily="Scarlett"`
   that exists). Nothing title-specific is in source; names come from the game's own files at run time.
 
-## Visual design (owner request, 2026-11-27)
+## Visual design: L6, Direction B (owner-approved 2026-11-27)
 
-The target is a top-tier commercial game launcher: dark, cinematic, confident; nothing that reads as a
-default egui app. All colours, radii, spacing and type live as named tokens in `apps/launcher/src/ui/theme.rs`.
+Flat panels under a top bar, in **dark and light**; no moving background (the earlier glass, glow and drifting
+gradient are gone, so the launcher draws nothing while idle). All colours, radii, spacing and type are tokens in
+`apps/launcher/src/ui/theme.rs`; colours are functions of the current theme (`th::p()`), switched by `th::set_dark`.
 
 ### Tokens
 
-| token | value | use |
-|:--|:--|:--|
-| `BG_BASE` | `#07080C` | window base, under everything |
-| `BG_SIDEBAR` | `#0A0C11` @ 92 % | sidebar |
-| `GLASS` | `#0C0E14` @ 80 % | cards, over the animated background |
-| `SURFACE_2` | `#161A23` | inputs, rows, raised controls |
-| `SURFACE_3` | `#1D2230` | hover |
-| `HAIRLINE` | white @ 7 % | 1 px borders |
-| `HAIRLINE_HI` | white @ 12 % | top highlight on glass, focus |
-| `TEXT` | `#F2F4F8` | primary text |
-| `TEXT_2` | `#B6BCCA` | secondary text, help |
-| `TEXT_3` | `#8C93A5` | captions, registry keys |
-| `ACCENT` | `#7C6CFF` | the one accent (violet) |
-| `ACCENT_2` | `#4F8BFF` | gradient partner on primary actions only |
-| `SUCCESS` | `#3DDC97` | pass, live |
-| `WARNING` | `#FFB547` | experimental, skipped |
-| `DANGER` | `#FF5C6C` | fail, refusals, close hover |
-| radii | 8 · 10 · 14 · pill | small controls · inputs/buttons · cards/panels · pills |
-| spacing | 8 px grid: 8 · 16 · 24 · 32 · 48 | every margin and gap |
-| shadow | 0 8 24 black @ 45 % | cards; primary button glow is `ACCENT` @ 40 % |
-| motion | 120 ms hover · 180 ms press/toggle · 320 ms page · 40 ms stagger, cubic-out | |
+| token | dark | light | use |
+|:--|:--|:--|:--|
+| `bg` | `#0E1014` | `#F5F6F8` | window |
+| `header` | `#12151B` | `#FFFFFF` | top bar, save bar |
+| `panel` | `#151A23` | `#FFFFFF` | cards |
+| `control` / `control_hi` | `#1B212C` / `#232A37` | `#F2F4F7` / `#E8ECF1` | inputs, quiet buttons / hover |
+| `line` / `line_hi` | `#262C37` / `#363E4C` | `#DCE1E8` / `#C3CAD5` | hairlines / hover, focus |
+| `text` / `text_2` / `muted` | `#E8EAED` / `#B8BEC8` / `#8C95A3` | `#14171C` / `#363D48` / `#5B6472` | primary / secondary / captions, keys, "—" |
+| `accent` | `#3D7BFF` | `#2F6BEB` | Launch, the active section's underline, selection |
+| `ok` on `ok_bg` | `#9BE3B0` on `#17321F` | `#1D6B36` on `#E3F5E8` | Live, Ready, passes |
+| `warn` on `warn_bg` | `#F5C36B` on `#2E2714` | `#7A4F00` on `#FFF2D6` | Experimental, VRAM "Build 5", warnings |
+| `danger` | `#FF8A8A` | `#B42318` | failures, crash reports |
+| radii | 6 · 8 · 10 · pill | | chips · controls · cards · status pill |
 
-Type: **Inter 3.019** (OFL-1.1, static Regular / Medium / SemiBold / Bold, in `apps/launcher/assets/fonts`),
-mono **Hack** (egui's bundled face) for paths and logs, icons **Phosphor** (MIT, `egui-phosphor`) in their own
-font family (Inter has glyphs at six Phosphor code points; Phosphor has blank Latin glyphs, so neither can
-lead a shared family). Credits in `CREDITS.md`. No grain or texture anywhere.
-
-| style | face | size | tracking |
-|:--|:--|--:|--:|
-| display (hero title) | Inter Bold | 40 | −1.0 |
-| numerals (stats) | Inter Bold | 36 | −0.8 |
-| h1 (page title) | Inter SemiBold | 26 | −0.4 |
-| h2 (card title) | Inter SemiBold | 16 | −0.1 |
-| body | Inter Regular | 14 | 0 |
-| small (help) | Inter Regular | 12.5 | 0 |
-| caption / pill | Inter SemiBold | 10.5 | +0.6, upper case |
-| mono | Hack | 12.5 | 0 |
+Type: **Inter 3.019** (Regular / Medium / SemiBold / Bold; headings Bold 22, card titles SemiBold 15, body 13.5,
+small 12.5, captions SemiBold 10.5 upper case), **Hack** for paths, keys and logs, **Phosphor** icons in their own family.
 
 ### Screens
 
 | screen | contents |
 |:--|:--|
-| window | borderless; our own 40 px title bar (drag, minimise, maximise, close in theme); DWM rounded corners on Windows 11; edge resize; 600 ms fade-in splash |
-| sidebar | logo mark and "Triumph Launcher"; the selected game's chip (opens the library); 9 items (icon + label) with a sliding accent indicator; collapses to icons (animated width); profile chip at the bottom |
-| Library | game cards (art, name, supported pill, truncated path, Play / Select / Remove) in an equal-height grid, a dashed Add tile; add dialog (supported, or not supported yet with the reason; restore previous settings); remove dialog (keep or delete the launcher's data) |
-| Play | full-bleed hero: run-time key art from the game folder (its `MicrosoftGame.config` splash image, read-only) with a slow drift, else an animated gradient glow; the title's name in display type; system-ready pill with glow; the large gradient **Launch** button; stat numerals (last fps, VRAM, driver); first-run setup card; the console panel with the frame-line tail |
-| Display & upscaler, Title settings, Features, Diagnostics | page header; one glass card per registry group; a row per setting: label, help text, `LIVE` / `RESTART` pill, amber `EXPERIMENTAL` pill, the generated control (switch, slider, segmented control or dropdown, path field with Browse), a reset button when changed, refusal reasons in red |
-| Diagnostics | also the system check as an animated checklist (skeleton rows while it runs, then pass/fail marks pop in, staggered, with a fix line each) |
-| Mods | reorderable cards with drag handles, enable switches, conflict badges per mod, and a contested-files card naming the winner; friendly empty state |
-| Profiles | profile cards (load), save-as, stable-only switch, import / export; empty state |
-| About | wordmark, licences and credits, where every file lives |
-| overlays | toasts (saved, applied, launched, errors), bottom-right, fade and slide |
+| top bar | logo and "Triumph Rebuild"; Play · Profiles · Settings · Runs · Mods · Diagnostics (active underlined in the accent; `Ctrl+1…6`); status pill "Ready" / "Running · `<profile>` · mm:ss" (with the matrix's n/total); theme switch (sun / moon); minimise, maximise, close. The bar is the drag area |
+| Play | header band: "Ready to launch", the game's name ("Change game" opens the library), "Profile: … · output · upscaler · limits or no limits", **Launch**, the profile dropdown (built-ins and yours), Test matrix; cards Last run (the newest session's average fps, or "—"), Target (30 fps vs the 7.6 baseline), GPU (name, VRAM, driver from the check), System check (warnings, e.g. "DLSS DLL not set → FSR") |
+| Running | tiles fps, frame time (budget 33.3 ms, amber when over), draws (+dropped), resolution (internal → output, upscaler); the frame-time graph (last 120 s, dashed line at 33.3 ms); where the frame goes (upload, list translation, GPU, upscaler, waiting: bars as shares of the frame, "—" until the frame line carries them); the frame line; Capture frame (`capture.request` in the session); Stop |
+| Profiles | hardware tiers as cards (purpose, chips for output, upscaler and each limit; VRAM chips amber "Build 5"); stress tests in their own row; your profiles; "Limits in force" for the selected card (or what is in force now) with Use, Save a copy, Export .toml; save current as, Import .toml, Stable only |
+| Settings | search over label, key and help; pills Display & upscaler · Hardware limits · Title settings · Memory & shaders · In-game menu · Diagnostics · Files & paths · Launcher (every file or folder setting is under Files & paths); a row per setting with help, a Live / Restart / Experimental badge, the generated control and reset; the save bar "N changes · M take effect on next launch", Discard, Save to profile (also writes the active user profile's file) |
+| Runs | test matrix: profile checkboxes, run length 60 s / 3 min / 10 min, measure from title start / after loading, "Run N profiles" (each its own session, one after another; the launcher stays minimised); the last matrix side by side (avg fps, 1% low, frame ms, GPU ms, upload ms, vs 30 fps) with Export CSV; every run with Compare (two or more side by side), Log, open folder, delete |
+| Mods | load order with switches, up / down, conflict and "wins" chips; conflicts with the winner; "your saves and settings" (the write overlay, open); game folder read-only check, **Verify now** (metadata only, on a thread) |
+| Diagnostics | system check with Run again; crash reports (View, Copy for a bug report: launcher version, profile, limits, changed settings, the report); logs in tabs (frame line, `session.toml`, `summary.toml`) for any session; frame captures; the D3D12 debug layer switch and the retention setting; the session list; the proof-binary runner; About (where things live, credits) |
+| Library | game cards (Play, Select, Remove) and an Add tile; add and remove dialogs as before |
 
-Keyboard: `Ctrl+1…9` pages, `Ctrl+S` save, `Ctrl+Enter` launch, `F5` system check, `Tab` / `Shift+Tab`
-through every control (all custom widgets take focus and draw a focus ring), `Space` / `Enter` activate.
+Keyboard: `Ctrl+1…6` sections, `Ctrl+S` save, `Ctrl+Enter` launch, `F5` system check; every custom control takes
+focus and draws a focus ring.
+
+### Session diagnostics
+
+A folder per launch, `games\<id>\sessions\<UTC stamp>-<profile>\`, passed to the child as `REBUILD_SESSION_DIR`,
+with `REBUILD_FRAME_LOG` = `<session>\frame-line.log`. The launcher writes `session.toml` ([session] at launch with
+every effective setting and the limits in force; [end] with the exit status). Retention `diagnostics.retention_days`
+(default 14, 0 = forever): pruned at start for every game and after each run. The full contract (files, variables,
+`summary.toml`, the frame-line fields) is in `docs/design/launcher.md`, "L6 built".
 
 ## Screenshots (outside git)
 
-`rebuild-launcher --shots <dir> --size WxH` renders 14 pages from a fixture (placeholder names "Your title",
-"Second title", demo data, labelled "SCREENSHOT FIXTURE · DEMO DATA" in the title bar). With `REBUILD_GAME_DIR`
+`rebuild-launcher --shots <dir> --size WxH` renders every screen in both themes (18 PNGs) from a fixture (placeholder names "Your title",
+"Second title", demo data including demo sessions and a demo matrix, labelled "SCREENSHOT FIXTURE · DEMO DATA" in the top bar). With `REBUILD_GAME_DIR`
 set, the first game points at that folder read-only, so its key art appears at run time.
 
 | pass | folder | notes |
@@ -139,6 +127,7 @@ set, the first game points at that folder read-only, so its key art appears at r
 | 3 | `D:\victory-data\launcher-shots\pass-3` | grain gone; Phosphor-first fonts broke body text |
 | 3b | `D:\victory-data\launcher-shots\pass-3b\{1280x800,1920x1080}` | text and icons fixed, hero scrim; the display is at 150 %, so 1280x800 is 1920x1200 px |
 | 4 | `D:\victory-data\launcher-shots\pass-4\{1280x800,1920x1080}` | card hairline dropped, a top scrim behind the window controls on Play, caret up/down for mod order, equal card baselines on hover |
+| 5 | `D:\victory-data\launcher-shots\pass-5-l6` | L6: Direction B top bar, `dark-*` and `light-*` for Play, Running, Profiles, Settings, Runs, Mods, Diagnostics, Library (no D3D12 device: run with `REBUILD_MEASURE_LOCK`) |
 
 ## For the lead
 
@@ -175,6 +164,20 @@ set, the first game points at that folder read-only, so its key art appears at r
 7. The launcher honours the measurement lock through `REBUILD_MEASURE_LOCK=<file>` (no D3D12 device while it
    exists); on the dev machine set it to `D:\Developer\triumph-rebuild\agents\MEASURING`.
 
+8. **L6, for the layer and `runtitle` (the session contract, `docs/design/launcher.md` "L6 built"):** read
+   `REBUILD_SESSION_DIR`; write `frame-line.log` (already `REBUILD_FRAME_LOG`), `summary.toml` at exit
+   (`[summary]` avg_fps, low1_fps, frame_ms, gpu_ms, upload_ms, frames, seconds, measured_from), `crash-*.txt` per
+   crash, and captures into `captures/`; watch for `capture.request` and delete it after capturing. For matrix runs
+   honour `REBUILD_RUN_SECONDS` (write the summary and exit) and `REBUILD_MEASURE_FROM` (`title_start` /
+   `after_loading`). Frame-line fields the Running view reads: `fps`, `ms`, `gpu`, `draws`, `dropped`, `upload`,
+   `xlate`, `upscale`, `wait`, and `internal -> output upscaler`; any missing one shows "—".
+9. **L6 registry entries added** in `crates/config` (owner-approved): `diagnostics.retention_days` (int 0-3650,
+   default 14, Live) and `launcher.theme` (dark / light, default dark, Live; the launcher saves it launcher-wide in
+   `<app home>\launcher.toml`, so it is the same for every game).
+10. When `diagnostics.frame_log_path` is set, the launcher tails that path instead of `<session>\frame-line.log` and
+    still passes `REBUILD_FRAME_LOG` = that path; a matrix run clears it so each run's frame line stays in its session.
+
 ## Next
 
 - C2 (lead): `rebuild.exe --config`; then the Play tab launches the real layer.
+- Layer side of the session contract (item 8): until it lands, sessions hold `session.toml` and whatever the frame line writes; summaries are averaged from the frame line.
