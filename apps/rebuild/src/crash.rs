@@ -510,3 +510,8 @@ pub fn chain(out: &mut Line, ctx: &windows::Win32::System::Diagnostics::Debug::C
     let mut c = *ctx;
     unwind_into(&mut out.0, &mut c, frames);
 }
+
+/// The title exe's base, once images are installed.
+pub fn title_base() -> Option<u64> {
+    IMAGES.get().and_then(|v| v.iter().find(|i| i.0.ends_with(".exe"))).map(|i| i.1)
+}

@@ -102,6 +102,13 @@ fn device_report() {
         return;
     }
     println!("{}", rebuild_runtime::pipeline::report());
+    match rebuild_dstorage::stats() {
+        Some(d) => println!(
+            "dstorage  {} reads, {} failed, {} MiB in, {} MiB out, {} zlib, {} bcpack refused, {} staging waits",
+            d.reads, d.failed, d.bytes_in >> 20, d.bytes_out >> 20, d.zlib_reads, d.bcpack_refused, d.staging_waits
+        ),
+        None => println!("dstorage  the title has not asked for DirectStorage"),
+    }
     let t = rebuild_runtime::device::traps();
     println!("device    {} slots called that are not written yet (first call, ms after the device):", t.len());
     for (off, name, n, ms) in t {
@@ -145,6 +152,10 @@ fn device_report() {
     let p = rebuild_runtime::cpu::patched();
     if p > 0 {
         println!("cpu       {p} clwb sites patched to NOPs (the host CPU has no clwb)");
+    }
+    let w = rebuild_runtime::cpu::wait_hints();
+    if w > 0 {
+        println!("cpu       {w} monitorx/mwaitx sites patched (AMD-only wait hints)");
     }
     let (z, ze) = rebuild_runtime::cpu::clzero();
     if z + ze > 0 {

@@ -37,7 +37,7 @@ use std::ffi::{c_char, c_void};
 pub use bcpack::Decoder;
 pub use capture::Capture;
 pub use cache::Cache;
-pub use com::{install, DStorageGetFactory, OwnedFactory};
+pub use com::{install, stats, DStorageGetFactory, OwnedFactory};
 pub use engine::{BcPack, Config, Engine, Pages, Stats, StatusArray};
 
 /// `HRESULT`.

@@ -86,6 +86,16 @@ unsafe extern "system" fn handler(p: *mut EXCEPTION_POINTERS) -> i32 {
     let rip = rec.ExceptionAddress as usize;
     // SAFETY: the faulting instruction's bytes are mapped (the CPU just fetched them); 15 bytes is the x86 maximum
     let bytes = unsafe { std::slice::from_raw_parts(rip as *const u8, 15) };
+    // monitorx / mwaitx (AMD only): a wait hint on an address; the code re-checks its condition after, so
+    // monitorx becomes NOPs and mwaitx a `pause` (a spin): same result, the host has neither
+    if let Some(with) = wait_hint_patch(&bytes[..3]) {
+        return if unsafe { write_code(rip, &with) } {
+            WAIT_HINTS.fetch_add(1, Ordering::Relaxed);
+            EXCEPTION_CONTINUE_EXECUTION
+        } else {
+            EXCEPTION_CONTINUE_SEARCH
+        };
+    }
     if bytes[..3] == CLZERO {
         let ctx = unsafe { &mut *(*p).ContextRecord };
         return match unsafe { patch_clzero(rip) } {
@@ -116,6 +126,21 @@ unsafe extern "system" fn handler(p: *mut EXCEPTION_POINTERS) -> i32 {
 }
 
 const CLZERO: [u8; 3] = [0x0f, 0x01, 0xfc];
+static WAIT_HINTS: AtomicU32 = AtomicU32::new(0);
+
+/// `monitorx`/`mwaitx` sites patched.
+pub fn wait_hints() -> u32 {
+    WAIT_HINTS.load(Ordering::Relaxed)
+}
+
+/// The replacement for an AMD wait hint: `monitorx` (0F 01 FA) → NOPs, `mwaitx` (0F 01 FB) → `pause; nop`.
+pub fn wait_hint_patch(code: &[u8]) -> Option<[u8; 3]> {
+    match code {
+        [0x0f, 0x01, 0xfa] => Some([0x90, 0x90, 0x90]),
+        [0x0f, 0x01, 0xfb] => Some([0xf3, 0x90, 0x90]),
+        _ => None,
+    }
+}
 static CLZERO_PATCHED: AtomicU32 = AtomicU32::new(0);
 static CLZERO_EMULATED: AtomicU32 = AtomicU32::new(0);
 /// stub pages: (base, bytes used)
@@ -375,6 +400,13 @@ mod tests {
         unsafe {
             let _ = VirtualFree(page as *mut c_void, 0, MEM_RELEASE);
         }
+    }
+
+    #[test]
+    fn amd_wait_hints_become_nops_and_a_pause() {
+        assert_eq!(wait_hint_patch(&[0x0f, 0x01, 0xfa]), Some([0x90; 3]), "monitorx");
+        assert_eq!(wait_hint_patch(&[0x0f, 0x01, 0xfb]), Some([0xf3, 0x90, 0x90]), "mwaitx");
+        assert_eq!(wait_hint_patch(&[0x0f, 0x01, 0xfc]), None, "clzero is not a hint");
     }
 
     #[test]

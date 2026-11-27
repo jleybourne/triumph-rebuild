@@ -32,7 +32,15 @@ struct Ctx(CONTEXT);
 
 /// Start watching if `REBUILD_WATCH` names an address. Call before the title runs.
 pub fn install() {
-    let Some(a) = std::env::var("REBUILD_WATCH").ok().and_then(|s| u64::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()) else {
+    // an absolute address, or `exe+0x...` (the title image moves between runs), or a preferred address 0x14...
+    let Some(a) = std::env::var("REBUILD_WATCH").ok().and_then(|s| {
+        let s = s.trim().to_ascii_lowercase();
+        let hex = |t: &str| u64::from_str_radix(t.trim_start_matches("0x"), 16).ok();
+        match s.strip_prefix("exe+") {
+            Some(off) => Some(crate::crash::title_base()? + hex(off)?),
+            None => hex(&s).map(|v| if (0x1_4000_0000..0x1_5000_0000).contains(&v) { crate::crash::title_base().map_or(v, |b| b + v - 0x1_4000_0000) } else { v }),
+        }
+    }) else {
         return;
     };
     ADDRESS.store(a & !7, Ordering::Relaxed);
