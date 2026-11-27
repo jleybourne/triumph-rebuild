@@ -6,7 +6,8 @@
 //! A console compute program is known by its hash (the first 8 bytes of the BLAKE3 of its DXBC container, as
 //! the census and the program library name it). Creation returns at once with a console object: the pool in
 //! `crates/pipelines` builds the host pipeline on a worker (`agents/pipelines.md`, "For the lead"). A program
-//! the library does not hold (the BVH builder's own, embedded in `xboxbvhbuilder.dll`) is offered to
+//! the library does not hold (the BVH builder's own, embedded in `xboxbvhbuilder.dll`; vertex and pixel programs
+//! outside `shaders.rpf`, such as the loading screen's first draw) is offered to
 //! `rebuild_pipelines::ondemand`: the worker that creates its pipeline translates it (lift, HLSL, DXC) and
 //! caches the DXIL on disk for the next session. A program that cannot be translated still gives the title a
 //! valid object; the lists drop its dispatches (`ListStats::skipped`) and the run's report names it. The same
@@ -394,7 +395,13 @@ fn request(parsed: Result<Parsed, Refusal>, mem: &Capture) -> Made {
     let pool = pool();
     let mut all = pool.is_some();
     for (h, stage) in wanted.into_iter().filter(|w| w.0 != 0) {
-        if pool.and_then(|p| p.creator().programs().library().get(h, stage)).is_none() {
+        // in the library, or offered for translation on a worker (vertex and pixel programs outside shaders.rpf,
+        // embedded elsewhere, as compute ones are): the pool makes it either way
+        let offered = pool.and_then(|p| match mem.program_bytes(h) {
+            Some(b) => p.creator().programs().offer(h, stage, b),
+            None => p.creator().programs().library().get(h, stage).map(|_| rebuild_pipelines::pso::Source::Library),
+        });
+        if offered.is_none() {
             all = false;
             *MISSING.lock().unwrap_or_else(|e| e.into_inner()).entry(h).or_insert(0) += 1;
         }

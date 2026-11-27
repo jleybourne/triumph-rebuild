@@ -54,6 +54,8 @@ fn wide(s: &str) -> Vec<u16> {
 enum RootKey {
     Library(u8, u32, u32),
     Own(StageLayout),
+    /// a graphics pair with a program outside the library: (vertex, pixel) layouts
+    OwnGraphics(StageLayout, StageLayout),
 }
 
 /// Where a program comes from.
@@ -175,20 +177,64 @@ impl Programs {
         Ok((Code::OnDemand(p), root))
     }
 
-    /// (vertex bytecode, pixel bytecode, root signature) of a graphics pair.
-    pub fn graphics(&self, vs: u64, ps: Option<u64>) -> Result<(&[u8], Option<&[u8]>, ID3D12RootSignature), String> {
-        let v = self.lib.get(vs, Stage::Vs).ok_or_else(|| format!("vs {vs:016x} is not in the program library"))?;
+    /// The title created a program of `stage` from `bytes`: where it will come from (`None`: nowhere). As
+    /// [`Programs::offer_compute`], for any stage (vertex and pixel programs outside `shaders.rpf` too).
+    pub fn offer(&self, h: u64, stage: Stage, bytes: &[u8]) -> Option<Source> {
+        if self.lib.get(h, stage).is_some() {
+            return Some(Source::Library);
+        }
+        self.ondemand.as_ref().map(|od| {
+            od.offer(h, bytes);
+            Source::OnDemand
+        })
+    }
+
+    /// A program of `stage` outside the library, translated on demand (on this thread if not ready).
+    fn on_demand(&self, h: u64, stage: Stage) -> Result<Arc<ondemand::Program>, String> {
+        let od = self.ondemand.as_ref().ok_or_else(|| format!("{} {h:016x} is not in the program library", stage.name()))?;
+        let p = od.get(h)?;
+        if p.stage != stage {
+            return Err(format!("{h:016x} is a {} program, not {}", p.stage.name(), stage.name()));
+        }
+        Ok(p)
+    }
+
+    /// (vertex bytecode, pixel bytecode, root signature) of a graphics pair: from the library, else (either
+    /// program missing there) translated on demand, with a root signature from the two programs' layouts.
+    pub fn graphics(&self, vs: u64, ps: Option<u64>) -> Result<(Code<'_>, Option<Code<'_>>, ID3D12RootSignature), String> {
         let ud = self.lib.user_dwords();
-        match ps {
-            Some(ps) => {
-                let p = self.lib.get(ps, Stage::Ps).ok_or_else(|| format!("ps {ps:016x} is not in the program library"))?;
+        let v = self.lib.get(vs, Stage::Vs);
+        let p = ps.map(|ps| self.lib.get(ps, Stage::Ps));
+        match (v, p) {
+            (Some(v), Some(Some(p))) => {
                 let blob = self.lib.graphics_root(&v, &p);
                 let root = self.root(RootKey::Library(1, v.layout, p.layout), blob, || RootDesc::graphics(&self.layout(v.layout), &self.layout(p.layout), ud))?;
-                Ok((v.dxil, Some(p.dxil), root))
+                Ok((Code::Library(v.dxil), Some(Code::Library(p.dxil)), root))
             }
-            None => {
+            (Some(v), None) => {
                 let root = self.root(RootKey::Library(2, v.layout, 0), None, || RootDesc::graphics(&self.layout(v.layout), &StageLayout::default(), ud))?;
-                Ok((v.dxil, None, root))
+                Ok((Code::Library(v.dxil), None, root))
+            }
+            (v, p) => {
+                let (vc, vl) = match v {
+                    Some(e) => (Code::Library(e.dxil), self.layout(e.layout)),
+                    None => {
+                        let o = self.on_demand(vs, Stage::Vs)?;
+                        let l = o.layout.clone();
+                        (Code::OnDemand(o), l)
+                    }
+                };
+                let (pc, pl) = match (ps, p.flatten()) {
+                    (None, _) => (None, StageLayout::default()),
+                    (Some(_), Some(e)) => (Some(Code::Library(e.dxil)), self.layout(e.layout)),
+                    (Some(ps), None) => {
+                        let o = self.on_demand(ps, Stage::Ps)?;
+                        let l = o.layout.clone();
+                        (Some(Code::OnDemand(o)), l)
+                    }
+                };
+                let root = self.root(RootKey::OwnGraphics(vl.clone(), pl.clone()), None, || RootDesc::graphics(&vl, &pl, ud))?;
+                Ok((vc, pc, root))
             }
         }
     }
@@ -689,7 +735,7 @@ impl Creator for PsoCreator {
             Desc::Graphics { vs, ps, state } => {
                 let (v, p, root) = self.programs.graphics(*vs, *ps)?;
                 let gs = if state.topology == RECT_TOPOLOGY_TYPE {
-                    match self.programs.rect.get(v, p) {
+                    match self.programs.rect.get(&v, p.as_deref()) {
                         Ok(gs) => Some(gs),
                         Err(e) => {
                             if let Some(c) = &self.cache {
@@ -701,7 +747,7 @@ impl Creator for PsoCreator {
                 } else {
                     None
                 };
-                let r = with_graphics_desc(&root, v, p, gs.as_deref(), state, |d| {
+                let r = with_graphics_desc(&root, &v, p.as_deref(), gs.as_deref(), state, |d| {
                     if let Some(p) = self.from_cache(key, |c| c.load_graphics(key, d)) {
                         return Ok(p);
                     }
@@ -914,6 +960,41 @@ mod tests {
         assert_eq!((s.created, s.refused), (2, 0));
         drop(pool);
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// A vertex and a pixel program absent from the library (the loading screen's first draw uses two that are not
+    /// in `shaders.rpf`): offered at creation, translated on demand, given a root signature from their layouts.
+    #[test]
+    fn graphics_programs_outside_the_library_are_translated_on_demand() {
+        let Some((device, _card)) = device() else { return };
+        let d = dir("ondemand-gfx");
+        let Some(cs) = tiny_cs(&d) else { return };
+        let rpf = std::env::var_os("REBUILD_SHADERS").map_or_else(|| PathBuf::from(r"D:\victory-data\shaders.rpf"), PathBuf::from);
+        let Ok(rpf) = std::fs::read(&rpf) else {
+            eprintln!("skipped: no corpus copy at {}", rpf.display());
+            return;
+        };
+        let out = std::env::var_os("REBUILD_TRANSLATE_OUT").map_or_else(|| PathBuf::from(r"D:\victory-data\translate"), PathBuf::from);
+        let pick = |stage: Stage| {
+            let agnostic = |h: u64| std::fs::read_to_string(out.join(format!("{h:016x}.{}.hlsl", stage.name()))).is_ok_and(|s| !s.contains("[WaveSize("));
+            crate::translate::stage_containers(&rpf, stage, 1, |h| out.join(format!("{h:016x}.{}.dxil", stage.name())).exists() && agnostic(h)).pop()
+        };
+        let (Some((vs, vb)), Some((ps, pb))) = (pick(Stage::Vs), pick(Stage::Ps)) else {
+            eprintln!("skipped: no translated vertex and pixel programs in {}", out.display());
+            return;
+        };
+        let p = programs(&device, &d, cs).with_ondemand(OnDemand::new(Some(d.join("ondemand"))));
+        assert_eq!(p.offer(vs, Stage::Vs, &vb), Some(Source::OnDemand));
+        assert_eq!(p.offer(ps, Stage::Ps, &pb), Some(Source::OnDemand));
+        assert_eq!(p.offer(1, Stage::Cs, &[]), Some(Source::Library));
+        let (v, f, _root) = p.graphics(vs, Some(ps)).unwrap_or_else(|e| panic!("{vs:016x} + {ps:016x}: {e}"));
+        assert!(matches!(v, Code::OnDemand(_)) && matches!(f, Some(Code::OnDemand(_))));
+        assert_eq!(&v[..4], b"DXBC");
+        assert_eq!(&f.as_deref().unwrap()[..4], b"DXBC");
+        // the vertex program alone, and the wrong stage for a hash
+        assert!(p.graphics(vs, None).is_ok());
+        assert!(p.graphics(ps, None).err().unwrap().contains("not vs"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Compute programs absent from a tiny library: offered as the title creates them, translated on a pool
