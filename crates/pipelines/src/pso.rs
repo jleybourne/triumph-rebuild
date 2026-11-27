@@ -1,7 +1,9 @@
 //! Host pipelines: a [`Desc`] made into an `ID3D12PipelineState`, through a persistent `ID3D12PipelineLibrary1`.
 //!
 //! - [`Programs`]: the program library ([`crate::library`]) on a device: bytecode by hash, and root signatures
-//!   created once per layout (or layout pair) from the library's serialized blobs.
+//!   created once per layout (or layout pair) from the library's serialized blobs. Compute programs the library
+//!   does not hold come from [`OnDemand`] when it is attached ([`Programs::with_ondemand`]): translated on the
+//!   worker that creates the pipeline.
 //! - [`PsoCache`]: the pipeline library file. Loaded at start; every pipeline created is stored under its
 //!   [`Key`]; written on exit and periodically. A library the driver refuses (a driver update, another GPU, a
 //!   damaged file) is logged and replaced by an empty one, never trusted in part.
@@ -18,7 +20,7 @@ use std::ffi::CString;
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use rebuild_shader::blake3;
@@ -28,6 +30,7 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 
 use crate::layout::{Param, RootDesc, StageLayout, Visibility};
 use crate::library::Library;
+use crate::ondemand::{self, OnDemand};
 use crate::pool::Creator;
 use crate::state::{Desc, GraphicsState, Key};
 use crate::Stage;
@@ -45,11 +48,42 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
 
+/// A root signature's identity: a library one by (kind, layout, layout), or an on-demand program's by its layout.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum RootKey {
+    Library(u8, u32, u32),
+    Own(StageLayout),
+}
+
+/// Where a program comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    Library,
+    OnDemand,
+}
+
+/// A program's bytecode: in the library, or translated on demand.
+pub enum Code<'a> {
+    Library(&'a [u8]),
+    OnDemand(Arc<ondemand::Program>),
+}
+
+impl std::ops::Deref for Code<'_> {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Code::Library(b) => b,
+            Code::OnDemand(p) => &p.dxil,
+        }
+    }
+}
+
 /// The program library on a device.
 pub struct Programs {
     lib: Library,
+    ondemand: Option<OnDemand>,
     device: ID3D12Device,
-    roots: RwLock<HashMap<(u8, u32, u32), ID3D12RootSignature>>,
+    roots: RwLock<HashMap<RootKey, ID3D12RootSignature>>,
     /// Bench only: an extra root constant at `b<salt>, space900`, so every root signature is new to the
     /// driver's own shader cache (a cold measurement without deleting the driver's cache).
     salt: Option<u32>,
@@ -57,14 +91,37 @@ pub struct Programs {
 
 impl Programs {
     pub fn new(device: &ID3D12Device, lib: Library, salt: Option<u32>) -> Programs {
-        Programs { lib, device: device.clone(), roots: RwLock::default(), salt }
+        Programs { lib, ondemand: None, device: device.clone(), roots: RwLock::default(), salt }
+    }
+
+    /// Compute programs the library does not hold are translated on demand.
+    pub fn with_ondemand(mut self, od: OnDemand) -> Programs {
+        self.ondemand = Some(od);
+        self
     }
 
     pub fn library(&self) -> &Library {
         &self.lib
     }
 
-    fn root(&self, k: (u8, u32, u32), blob: Option<&[u8]>, desc: impl FnOnce() -> RootDesc) -> Result<ID3D12RootSignature, String> {
+    pub fn ondemand(&self) -> Option<&OnDemand> {
+        self.ondemand.as_ref()
+    }
+
+    /// The title created compute program `cs` from `bytes`: where its pipeline's program will come from
+    /// (`None`: nowhere, do not request it). A library lookup, then for a program outside it one hash lookup
+    /// (its container copied the first time); never translates.
+    pub fn offer_compute(&self, cs: u64, bytes: &[u8]) -> Option<Source> {
+        if self.lib.get(cs, Stage::Cs).is_some() {
+            return Some(Source::Library);
+        }
+        self.ondemand.as_ref().map(|od| {
+            od.offer(cs, bytes);
+            Source::OnDemand
+        })
+    }
+
+    fn root(&self, k: RootKey, blob: Option<&[u8]>, desc: impl FnOnce() -> RootDesc) -> Result<ID3D12RootSignature, String> {
         if let Some(r) = self.roots.read().unwrap().get(&k) {
             return Ok(r.clone());
         }
@@ -88,12 +145,21 @@ impl Programs {
         self.lib.layout(i).unwrap_or_default()
     }
 
-    /// (bytecode, root signature) of a compute program.
-    pub fn compute(&self, cs: u64) -> Result<(&[u8], ID3D12RootSignature), String> {
-        let e = self.lib.get(cs, Stage::Cs).ok_or_else(|| format!("cs {cs:016x} is not in the program library"))?;
+    /// (bytecode, root signature) of a compute program: from the library, else translated on demand (on this
+    /// thread if it is not ready: call it from a pool worker).
+    pub fn compute(&self, cs: u64) -> Result<(Code<'_>, ID3D12RootSignature), String> {
         let ud = self.lib.user_dwords();
-        let root = self.root((0, e.layout, 0), e.root, || RootDesc::compute(&self.layout(e.layout), ud))?;
-        Ok((e.dxil, root))
+        if let Some(e) = self.lib.get(cs, Stage::Cs) {
+            let root = self.root(RootKey::Library(0, e.layout, 0), e.root, || RootDesc::compute(&self.layout(e.layout), ud))?;
+            return Ok((Code::Library(e.dxil), root));
+        }
+        let od = self.ondemand.as_ref().ok_or_else(|| format!("cs {cs:016x} is not in the program library"))?;
+        let p = od.get(cs)?;
+        if p.stage != Stage::Cs {
+            return Err(format!("{cs:016x} is a {} program, not compute", p.stage.name()));
+        }
+        let root = self.root(RootKey::Own(p.layout.clone()), None, || RootDesc::compute(&p.layout, ud))?;
+        Ok((Code::OnDemand(p), root))
     }
 
     /// (vertex bytecode, pixel bytecode, root signature) of a graphics pair.
@@ -104,11 +170,11 @@ impl Programs {
             Some(ps) => {
                 let p = self.lib.get(ps, Stage::Ps).ok_or_else(|| format!("ps {ps:016x} is not in the program library"))?;
                 let blob = self.lib.graphics_root(&v, &p);
-                let root = self.root((1, v.layout, p.layout), blob, || RootDesc::graphics(&self.layout(v.layout), &self.layout(p.layout), ud))?;
+                let root = self.root(RootKey::Library(1, v.layout, p.layout), blob, || RootDesc::graphics(&self.layout(v.layout), &self.layout(p.layout), ud))?;
                 Ok((v.dxil, Some(p.dxil), root))
             }
             None => {
-                let root = self.root((2, v.layout, 0), None, || RootDesc::graphics(&self.layout(v.layout), &StageLayout::default(), ud))?;
+                let root = self.root(RootKey::Library(2, v.layout, 0), None, || RootDesc::graphics(&self.layout(v.layout), &StageLayout::default(), ud))?;
                 Ok((v.dxil, None, root))
             }
         }
@@ -585,7 +651,7 @@ impl Creator for PsoCreator {
         match desc {
             Desc::Compute { cs } => {
                 let (code, root) = self.programs.compute(*cs)?;
-                with_compute_desc(&root, code, |d| {
+                with_compute_desc(&root, &code, |d| {
                     if let Some(p) = self.from_cache(key, |c| c.load_compute(key, d)) {
                         return Ok(p);
                     }
@@ -639,6 +705,7 @@ pub fn default_cache_path() -> PathBuf {
 mod tests {
     use super::*;
     use crate::library::{self, Input};
+    use crate::ondemand::OnDemand;
 
     const LOCK: &str = r"D:\Developer\triumph-rebuild\agents\MEASURING";
 
@@ -791,6 +858,68 @@ mod tests {
         let s = pool.creator().stats().compute;
         assert_eq!((s.created, s.refused), (2, 0));
         drop(pool);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Compute programs absent from a tiny library: offered as the title creates them, translated on a pool
+    /// worker, a real pipeline on the GPU; the next session (a fresh pool, nothing offered: a prewarm from the
+    /// session record) takes them from the disk cache with no DXC call.
+    #[test]
+    fn programs_outside_the_library_are_translated_on_demand() {
+        let Some(device) = device() else { return };
+        let d = dir("ondemand");
+        let Some(cs) = tiny_cs(&d) else { return };
+        let rpf = std::env::var_os("REBUILD_SHADERS").map_or_else(|| PathBuf::from(r"D:\victory-data\shaders.rpf"), PathBuf::from);
+        let Ok(rpf) = std::fs::read(&rpf) else {
+            eprintln!("skipped: no corpus copy at {}", rpf.display());
+            return;
+        };
+        let out = std::env::var_os("REBUILD_TRANSLATE_OUT").map_or_else(|| PathBuf::from(r"D:\victory-data\translate"), PathBuf::from);
+        // compute programs translate v1 compiled (so DXC accepts them), none of them in the tiny library
+        let progs = crate::translate::compute_containers(&rpf, 3, |h| out.join(format!("{h:016x}.cs.dxil")).exists());
+        if progs.is_empty() {
+            eprintln!("skipped: no translate v1 compute output in {}", out.display());
+            return;
+        }
+        let od_dir = d.join("ondemand");
+        let session = |offer: bool| {
+            let p = programs(&device, &d, cs.clone()).with_ondemand(OnDemand::new(Some(od_dir.clone())));
+            let pool = crate::pool::Pool::new(PsoCreator::new(&device, p, None), 2);
+            let hs: Vec<_> = progs
+                .iter()
+                .map(|(h, bytes)| {
+                    if offer {
+                        assert_eq!(pool.creator().programs().offer_compute(*h, bytes), Some(Source::OnDemand));
+                    }
+                    let desc = Desc::Compute { cs: *h };
+                    if offer { pool.request(Key::of(&desc), desc) } else { pool.prewarm(Key::of(&desc), desc) }
+                })
+                .collect();
+            for (h, (cs, _)) in hs.iter().zip(&progs) {
+                pool.wait(*h).unwrap_or_else(|e| panic!("{cs:016x}: {e}"));
+                let (code, _root) = pool.creator().programs().compute(*cs).unwrap();
+                assert_eq!(&code[..4], b"DXBC");
+            }
+            // the library's own programs are unaffected
+            assert_eq!(pool.creator().programs().offer_compute(1, &[]), Some(Source::Library));
+            let s = pool.creator().programs().ondemand().unwrap().stats();
+            assert_eq!(pool.creator().stats().compute.created, progs.len() as u64);
+            eprintln!(
+                "on demand: {} programs · translated {} (lift {:.2} ms, dxc {:.1} ms each) · from disk {} (disk {:.2} ms each) · PSO {:.2} ms each",
+                progs.len(),
+                s.translated,
+                s.lift.as_secs_f64() * 1e3 / progs.len() as f64,
+                s.dxc.as_secs_f64() * 1e3 / s.translated.max(1) as f64,
+                s.from_disk,
+                s.disk.as_secs_f64() * 1e3 / progs.len() as f64,
+                pool.creator().stats().compute.create_ms()
+            );
+            s
+        };
+        let cold = session(true);
+        assert_eq!((cold.offered, cold.translated, cold.from_disk, cold.failed), (progs.len() as u64, progs.len() as u64, 0, 0));
+        let warm = session(false);
+        assert_eq!((warm.offered, warm.translated, warm.from_disk, warm.failed), (0, 0, progs.len() as u64, 0), "the second session calls no DXC");
         std::fs::remove_dir_all(&d).unwrap();
     }
 }
