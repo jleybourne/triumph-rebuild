@@ -14,7 +14,7 @@ and becomes the number that counts.
 | track | progress | | note |
 |---|---|--:|---|
 | **Build 5 · first frame** | `██████████░░░░░░░░░░` | 50 % | frame 1 presented and captured; frame 2 blocked by a null program binding |
-| shaders compiled (v0 set) | `████████████████████` | 2,834 / 2,881 | pixel 1,791 · vertex 926 · compute 117 |
+| shaders compiled (every class) | `███████░░░░░░░░░░░░░` | 9,415 / 25,694 | pixel 7,840 · vertex 987 · compute 588 · of them wave-wide 1,892 ([wave64](runs/build4-wave64.md)) |
 | shaders counted | `░░░░░░░░░░░░░░░░░░░░` | 0 / 25,694 | counted once execution matches the oracle |
 | runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
 | launcher | `██████████████░░░░░░` | 5 / 7 | C2 and L5 left · not part of the 59 % |

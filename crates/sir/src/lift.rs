@@ -49,6 +49,8 @@ pub struct Lifted {
     pub uses_shadow: bool,
     /// LDS is read or written (`groupshared uint sir_lds[]`).
     pub uses_lds: bool,
+    /// How console lanes map to host lanes ([`wave::Wave`]).
+    pub wave: wave::Wave,
 }
 
 /// The register space of the descriptor shadow table: per heap index, 16 bytes the runtime writes from the
@@ -131,6 +133,9 @@ fn inline_bits(code: u16) -> String {
 pub mod cfg;
 pub mod io;
 pub mod res;
+pub mod wave;
+pub mod wavegen;
+pub use wave::Wave;
 pub use io::{cs_program, ps_program, vs_program, PsStage, Stage, VsStage};
 pub use res::Bindings;
 
@@ -191,6 +196,15 @@ struct Lifter<'a> {
     scc_live: bool,
     /// inside a DPP instruction: src0 reads `sir_dpp`; VALU writes also need `sir_dv` when set
     dpp: Option<bool>,
+    /// how console lanes map to host lanes
+    wave: wave::Wave,
+    /// EXEC is narrower than every lane at entry (a doubled compute group whose size is no multiple of 64)
+    entry_narrowed: bool,
+    /// this instruction's statements that run once, before and after its per-lane part ([`wave`])
+    pre: String,
+    post: String,
+    /// a counter for temporaries' names
+    tmp: u32,
 }
 
 /// What an operand reads, as a `uint` expression; `None` if not translated yet.
@@ -202,6 +216,9 @@ impl Lifter<'_> {
                     return None; // a descriptor word read as data
                 }
                 if self.f.stale.contains(&n) {
+                    if let Some(e) = self.mask_as_data(code) {
+                        return Some(e);
+                    }
                     self.why = Some("a lane mask read as data".into());
                     return None;
                 }
@@ -222,6 +239,7 @@ impl Lifter<'_> {
                 "s124".into()
             }
             Src::Null => "0u".into(),
+            Src::VccLo | Src::VccHi | Src::ExecLo | Src::ExecHi => return self.mask_as_data(code),
             _ => return None,
         })
     }
@@ -441,7 +459,10 @@ impl Lifter<'_> {
             Src::Inline(193) => Some("true".into()),
             // a pair set to a constant as data (a loop's exit mask starts at 0)
             Src::Sgpr(n) if self.const_mask(n).is_some() => Some(self.const_mask(n)?.into()),
-            Src::Sgpr(_) => {
+            Src::Sgpr(n) => {
+                if let Some(e) = self.data_as_mask(n) {
+                    return Some(e);
+                }
                 self.why = Some("lane mask not traced".into());
                 None
             }
@@ -477,9 +498,15 @@ impl Lifter<'_> {
         let hi = if self.wave64 { n.saturating_add(1) } else { n };
         for s in [n, hi] {
             self.wrote(s);
-            self.f.stale.insert(s);
+            if matches!(self.wave, wave::Wave::Agnostic | wave::Wave::TwoWave) {
+                self.f.stale.insert(s);
+            }
         }
         self.f.mask_cur.insert(n);
+        if self.wave != wave::Wave::Agnostic {
+            // the pair's data stays current too (its ballot, after the write; unused ones cost nothing)
+            self.mask_data(n);
+        }
     }
 
     /// An SGPR (pair in wave64) holding the constant 0 or -1 as data, as a lane mask.
@@ -505,13 +532,23 @@ impl Lifter<'_> {
         self.f.table_of.remove(&s);
         self.f.stale.remove(&s);
         self.f.mask_cur.remove(&s);
-        self.f.mask_cur.remove(&s.wrapping_sub(1));
+        // in wave64 a mask is a pair: writing its high SGPR ends it too (in wave32 a mask is one SGPR)
+        if self.wave64 {
+            self.f.mask_cur.remove(&s.wrapping_sub(1));
+        }
     }
 
     /// SCC after a lane-mask op: is any lane's bit set (only computed when something reads it).
     fn mask_scc(&mut self, e: &str) {
         if self.scc_live {
-            self.line(format!("scc = WaveActiveAnyTrue({e});"));
+            if self.wave == wave::Wave::Doubled {
+                self.line(format!("sir_any = {e};"));
+                self.post.push_str("    scc = WaveActiveAnyTrue(sir_any_0 || sir_any_1);\n");
+            } else if self.wave == wave::Wave::TwoWave {
+                self.line(format!("scc = sir_any2({e});"));
+            } else {
+                self.line(format!("scc = WaveActiveAnyTrue({e});"));
+            }
         }
     }
 
@@ -611,11 +648,18 @@ impl Lifter<'_> {
             Encoding::Exp => self.export(&d),
             Encoding::Vop3p => self.vop3p(name, &d),
             Encoding::Ds if name == "ds_swizzle_b32" => self.swizzle(&d),
+            Encoding::Ds if name == "ds_bpermute_b32" && self.wave != wave::Wave::Agnostic => self.bpermute(&d),
             Encoding::Ds => self.lds(name, &d),
             Encoding::Vop1 | Encoding::Vop2 | Encoding::Vop3 | Encoding::Vopc => {
                 if let Some((x, v)) = &d.extra {
                     if x.name == "dpp16" {
+                        if self.wave != wave::Wave::Agnostic {
+                            return self.dpp_wide(name, &d, v[0] as u16, None);
+                        }
                         return self.dpp16(name, &d, v[0] as u16);
+                    }
+                    if x.name == "dpp8" && self.wave != wave::Wave::Agnostic {
+                        return self.dpp_wide(name, &d, v[0] as u16, Some(v[1]));
                     }
                     // SDWA / DPP8: not yet
                     self.why = Some(if x.name.starts_with("sdwa") { "SDWA".into() } else { x.name.to_string() });
@@ -857,7 +901,7 @@ impl Lifter<'_> {
             n if (n.contains("_saveexec_") || n.contains("_wrexec_")) && n.ends_with(if self.wave64 { "_b64" } else { "_b32" }) => {
                 self.saveexec(n, d)
             }
-            _ => None,
+            _ => self.cross_salu(name, d),
         }
     }
 
@@ -1228,13 +1272,8 @@ impl Lifter<'_> {
                 self.vwrite(d, format!("{m} ? {y} : {x}"));
                 Some(())
             }
-            "v_readfirstlane_b32" => {
-                // agnostic programs read a uniform value here (the classifier checked it)
-                let x = u0(self)?;
-                let dst = d.get("vdst")?;
-                self.swrite(dst, format!("WaveReadLaneFirst({x})"))
-            }
-            _ => None,
+            "v_readfirstlane_b32" => self.readfirstlane(d),
+            _ => self.cross_valu(name, d),
         }
     }
 
@@ -1354,6 +1393,13 @@ pub fn lift_stage<'a>(insts: &[Instruction], stage: Stage<'a>, bind: Option<Bind
     l.out
 }
 
+/// [`lift_program`] for any wave class: `wave` says how console lanes map to host lanes ([`Wave::choose`]).
+pub fn lift_program_wave<'a>(insts: &[Instruction], stage: Stage<'a>, bind: Option<Bindings<'a>>, wave64: bool, wave: Wave) -> Lifted {
+    let mut l = Lifter::new(stage, bind, wave64);
+    l.set_wave(wave);
+    cfg::lift(l, insts)
+}
+
 /// Translates a whole program, with control flow (v1): blocks from its branches, structured into HLSL
 /// `if`/loops ([`cfg`]). `wave64` is the console's wave size for this program (lane-mask ops are `_b64`).
 /// An irreducible graph or a branch kind not translated is named in [`Lifted::unsupported`].
@@ -1364,7 +1410,21 @@ pub fn lift_program<'a>(insts: &[Instruction], stage: Stage<'a>, bind: Option<Bi
 
 impl<'a> Lifter<'a> {
     fn new(stage: Stage<'a>, bind: Option<Bindings<'a>>, wave64: bool) -> Self {
-        Lifter { out: Lifted::default(), stage, bind, f: FlowState::default(), why: None, wave64, scc_live: false, dpp: None }
+        Lifter {
+            out: Lifted::default(),
+            stage,
+            bind,
+            f: FlowState::default(),
+            why: None,
+            wave64,
+            scc_live: false,
+            dpp: None,
+            wave: Wave::Agnostic,
+            entry_narrowed: false,
+            pre: String::new(),
+            post: String::new(),
+            tmp: 0,
+        }
     }
 
     /// Lifts instructions in order; `live[k]` says whether SCC is read after instruction k.
@@ -1372,6 +1432,9 @@ impl<'a> Lifter<'a> {
         for (k, i) in insts.iter().enumerate() {
             self.why = None;
             self.scc_live = live.get(k).copied().unwrap_or(true);
+            let start = self.out.body.len();
+            self.pre.clear();
+            self.post.clear();
             if self.inst(i).is_none() {
                 let n = i.name().unwrap_or("?").to_string();
                 self.out.unsupported.push((i.offset, match self.why.take() {
@@ -1380,12 +1443,16 @@ impl<'a> Lifter<'a> {
                 }));
                 let _ = writeln!(self.out.body, "    // not translated: {}", i.name().unwrap_or("?"));
             }
+            self.finish(start);
         }
     }
 }
 
 /// The register declarations a lifted body needs (all registers start at 0; inputs are assigned after).
 pub fn declarations(l: &Lifted) -> String {
+    if l.wave != Wave::Agnostic {
+        return wave::declarations(l);
+    }
     let mut s = String::new();
     for r in &l.sgprs {
         let _ = writeln!(s, "    uint s{r} = 0;");
