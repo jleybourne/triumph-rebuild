@@ -1,7 +1,8 @@
 //! On the card: console lists recorded through the real path (the device's slots, crates/d3d12x resources and
 //! views, crates/xlist lists), submitted through queue 0x50, shown through 0x100, captured to PNG and read back.
 //! By hand, one GPU test at a time, while `agents\MEASURING` is absent (checked again right before the device is
-//! made); skipped with no D3D12 device. The window is an off-screen tool window ([`crate::present::hide_window`]).
+//! made) and holding the card's lock `agents\CARD` (created create-new, removed at the end, pass or fail);
+//! skipped with no D3D12 device. The window is an off-screen tool window ([`crate::present::hide_window`]).
 //! Every fence wait is bounded (5 s). Pass or fail, the guard releases the bridge's waits, waits for the queue (at
 //! most 5 s), releases the swap chain and destroys the window, so a failure leaves no queue waiting on the GPU.
 //!
@@ -29,6 +30,35 @@ fn measuring() -> bool {
         println!("skipped: agents\\MEASURING is present (the lead is timing)");
     }
     m
+}
+
+/// The card's exclusive lock (`agents\CARD`, made create-new; removed on drop, pass or fail). `None`: another run
+/// holds the card, skip.
+struct Card(std::path::PathBuf);
+impl Card {
+    fn take() -> Option<Card> {
+        let path = std::path::PathBuf::from(r"D:\Developer\triumph-rebuild\agents\CARD");
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                use std::io::Write;
+                let _ = writeln!(f, "present lane: present_card test, pid {}", std::process::id());
+                Some(Card(path))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                println!("skipped: agents\\CARD is held by another run");
+                None
+            }
+            // no lead checkout on this machine: nothing to share the card with
+            Err(_) => Some(Card(std::path::PathBuf::new())),
+        }
+    }
+}
+impl Drop for Card {
+    fn drop(&mut self) {
+        if !self.0.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
 }
 
 fn method<F: Copy>(obj: Raw, offset: usize) -> F {
@@ -189,7 +219,11 @@ fn every_pixel_is(px: &[u8], want: [u8; 3]) -> bool {
 #[test]
 #[ignore = "GPU: by hand with --test-threads=1, while agents\\MEASURING is absent"]
 fn present_card_lists_run_in_order_and_the_frame_reaches_a_png() {
-    // immediately before the device
+    // immediately before the device: no measurement, and the card's lock (dropped last, after the shutdown)
+    if measuring() {
+        return;
+    }
+    let Some(_card) = Card::take() else { return };
     if measuring() {
         return;
     }
