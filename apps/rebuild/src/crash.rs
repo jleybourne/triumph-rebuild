@@ -125,7 +125,8 @@ fn in_title(addr: u64) -> bool {
 }
 
 /// (base, offset): base 0 is the exe (a preferred address given), 1..=16 a register of the faulting context
-static PEEKS: std::sync::OnceLock<Vec<(usize, u64)>> = std::sync::OnceLock::new();
+/// base 17: `[exe global]+off`, the global (exe-relative) in the third field
+static PEEKS: std::sync::OnceLock<Vec<(usize, u64, u64)>> = std::sync::OnceLock::new();
 const REGS: [&str; 16] = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"];
 
 /// Set by handlers that may run inside the host heap (a watchpoint hit): no DbgHelp, which allocates.
@@ -188,13 +189,42 @@ unsafe fn report_inner(kind: &str, p: *const EXCEPTION_POINTERS) {
         let title = IMAGES.get().and_then(|v| v.iter().find(|i| i.0.ends_with(".exe"))).map(|i| i.1).unwrap_or(0);
         let mut pk = Buf { b: [0; 2048], n: 0 };
         let regs = [ctx.Rax, ctx.Rcx, ctx.Rdx, ctx.Rbx, ctx.Rsp, ctx.Rbp, ctx.Rsi, ctx.Rdi, ctx.R8, ctx.R9, ctx.R10, ctx.R11, ctx.R12, ctx.R13, ctx.R14, ctx.R15];
-        for &(base, off) in peeks {
-            let at = if base == 0 { title + off } else { regs[base - 1].wrapping_add(off) };
+        let readable = |a: u64| {
+            let mut m = MEMORY_BASIC_INFORMATION::default();
+            (unsafe { VirtualQuery(Some(a as *const _), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) }) != 0
+                && m.State.0 == 0x1000
+                && m.Protect.0 & 0x66 != 0
+        };
+        for &(base, off, global) in peeks {
+            let at = match base {
+                0 => title + off,
+                17 => {
+                    let g = title + global;
+                    if !readable(g) {
+                        continue;
+                    }
+                    unsafe { (g as *const u64).read_unaligned() }.wrapping_add(off)
+                }
+                // [reg+inner]+off: base 18 + register index, the inner offset in `global`
+                r if (18..34).contains(&r) => {
+                    let g = regs[r - 18].wrapping_add(global);
+                    if !readable(g) {
+                        continue;
+                    }
+                    unsafe { (g as *const u64).read_unaligned() }.wrapping_add(off)
+                }
+                r => regs[r - 1].wrapping_add(off),
+            };
             let mut m = MEMORY_BASIC_INFORMATION::default();
             let ok = unsafe { VirtualQuery(Some(at as *const _), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } != 0
                 && m.State.0 == 0x1000
                 && m.Protect.0 & 0x66 != 0;
-            let tag = if base == 0 { "exe+" } else { REGS[base - 1] };
+            let tag = match base {
+                0 => "exe+",
+                17 => "[global]",
+                r if (18..34).contains(&r) => "[reg]",
+                r => REGS[r - 1],
+            };
             if ok {
                 let v = unsafe { (at as *const u64).read_unaligned() };
                 let _ = write!(pk, "          peek {tag}+{off:#x} = {v:#x}\n");
@@ -254,6 +284,9 @@ unsafe extern "system" fn first_chance(p: *mut EXCEPTION_POINTERS) -> i32 {
         if in_title(at) && FATAL.fetch_add(1, Ordering::Relaxed) == 0 {
             if let Some(f) = ON_FATAL.get() {
                 f();
+            }
+            if std::env::var_os("REBUILD_THREADS").is_some() {
+                other_threads();
             }
         }
     }
@@ -352,11 +385,28 @@ pub fn install(images: Vec<(String, u64, u64)>) {
     let _ = IMAGES.set(images);
     if let Ok(list) = std::env::var("REBUILD_PEEK") {
         let parse = |t: &str| u64::from_str_radix(t.trim_start_matches("0x"), 16).ok();
-        let peeks = list
+        let exe_rel = |a: u64| a.saturating_sub(0x1_4000_0000);
+        let peeks: Vec<(usize, u64, u64)> = list
             .split(',')
-            .filter_map(|t| match t.trim().split_once('+') {
-                Some((r, o)) => REGS.iter().position(|x| *x == r).and_then(|i| parse(o).map(|o| (i + 1, o))),
-                None => parse(t.trim()).map(|a| (0, a.saturating_sub(0x1_4000_0000))),
+            .filter_map(|t| {
+                let t = t.trim();
+                // [0x14...]+off : follow a title global, then add
+                if let Some(rest) = t.strip_prefix('[') {
+                    let (g, off) = rest.split_once(']')?;
+                    let off = off.trim_start_matches('+');
+                    let off = if off.is_empty() { 0 } else { parse(off)? };
+                    // [reg+inner]+off, or [0x14global]+off
+                    if let Some((r, inner)) = g.split_once('+') {
+                        if let Some(i) = REGS.iter().position(|x| *x == r) {
+                            return Some((18 + i, off, parse(inner)?));
+                        }
+                    }
+                    return Some((17, off, exe_rel(parse(g)?)));
+                }
+                match t.split_once('+') {
+                    Some((r, o)) => REGS.iter().position(|x| *x == r).and_then(|i| parse(o).map(|o| (i + 1, o, 0))),
+                    None => parse(t).map(|a| (0, exe_rel(a), 0)),
+                }
             })
             .collect();
         let _ = PEEKS.set(peeks);
@@ -506,4 +556,9 @@ impl std::fmt::Write for Line {
 pub fn chain(out: &mut Line, ctx: &windows::Win32::System::Diagnostics::Debug::CONTEXT, frames: usize) {
     let mut c = *ctx;
     unwind_into(&mut out.0, &mut c, frames);
+}
+
+/// The title exe's base, once images are installed.
+pub fn title_base() -> Option<u64> {
+    IMAGES.get().and_then(|v| v.iter().find(|i| i.0.ends_with(".exe"))).map(|i| i.1)
 }

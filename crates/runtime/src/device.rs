@@ -185,6 +185,38 @@ unsafe extern "system" fn trap<const SLOT: usize>(_this: *mut c_void, _a: usize,
     E_NOTIMPL
 }
 
+/// 0x1c8 / 0x218: pipelines from console code (`*desc, iid, *out`). Not built: refuse as the fork did, with
+/// `E_NOTIMPL` **and `*out = null`** (the generic trap leaves `*out` alone, and the title would read its own stack
+/// garbage as a pipeline). The first call's callers are named once (title offsets), for tracing who asks.
+unsafe extern "system" fn console_pipeline<const SLOT: usize>(_this: *mut c_void, _desc: *const c_void, _iid: *const c_void, out: *mut *mut c_void) -> u64 {
+    note(SLOT);
+    if !out.is_null() {
+        unsafe { out.write(std::ptr::null_mut()) };
+    }
+    if CALLS[SLOT].load(Ordering::Relaxed) == 1 {
+        let mut frames = [std::ptr::null_mut::<c_void>(); 8];
+        let n = unsafe { windows::Win32::System::Diagnostics::Debug::RtlCaptureStackBackTrace(1, &mut frames, None) } as usize;
+        let list: Vec<String> = frames[..n].iter().map(|&f| module_offset(f as usize)).collect();
+        eprintln!("device    first {:#x} call from {}", SLOT * 8, list.join(" "));
+    }
+    E_NOTIMPL
+}
+
+/// `module+offset` for a code address (the title's images are loaded by the Windows loader, so they are modules).
+fn module_offset(addr: usize) -> String {
+    use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT};
+    let mut m = windows::Win32::Foundation::HMODULE::default();
+    let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    if unsafe { GetModuleHandleExW(flags, windows::core::PCWSTR(addr as *const u16), &mut m) }.is_err() {
+        return format!("{addr:#x}");
+    }
+    let mut path = [0u16; 260];
+    let n = unsafe { GetModuleFileNameW(m, &mut path) } as usize;
+    let name = String::from_utf16_lossy(&path[..n]);
+    let file = name.rsplit('\\').next().unwrap_or("?").to_string();
+    format!("{file}+{:#x}", addr - m.0 as usize)
+}
+
 macro_rules! traps_table {
     ($($n:literal)*) => { [$(trap::<$n> as Trap),*] };
 }
@@ -445,6 +477,9 @@ fn vtable() -> &'static [usize; SLOTS] {
         t[0x278 / 8] = crate::frame::ScheduleFrameEventX as *const () as usize;
         t[0x280 / 8] = crate::frame::WaitFrameEventX as *const () as usize;
         t[0x288 / 8] = crate::frame::GetFrameStatisticsX as *const () as usize;
+        // console-code pipelines: refused with *out = null (not WRITTEN: still listed as traps)
+        t[0x1c8 / 8] = console_pipeline::<{ 0x1c8 / 8 }> as *const () as usize;
+        t[0x218 / 8] = console_pipeline::<{ 0x218 / 8 }> as *const () as usize;
         t[0x58 / 8] = crate::pipeline::CreateComputePipelineState as *const () as usize;
         t[0x1f0 / 8] = crate::pipeline::CreateComputePipelineStateX as *const () as usize;
         t[0x50 / 8] = crate::pipeline::CreateGraphicsPipelineState as *const () as usize;

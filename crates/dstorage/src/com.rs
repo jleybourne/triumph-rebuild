@@ -371,6 +371,11 @@ pub fn install(engine: Engine) -> Result<(), Engine> {
     }
 }
 
+/// The installed engine's counters (`None` before the title asked for DirectStorage).
+pub fn stats() -> Option<crate::Stats> {
+    INSTALLED.get().map(|f| f.engine().stats())
+}
+
 /// `xcrdapi.dll!DStorageGetFactory(REFIID, void**)`.
 ///
 /// # Safety

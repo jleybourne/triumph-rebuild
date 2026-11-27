@@ -19,6 +19,8 @@
 //!   the library does not hold.
 //! - [`ondemand`]: those programs, translated on a pool worker when the title first creates them, cached on
 //!   disk for the next session.
+//! - `rootmap` (Windows): the root seam, how a translated program's user data is made from the title's root
+//!   arguments (`docs/design/root-seam.md`), read from the console program's root layout.
 
 pub mod bindings;
 pub mod layout;
@@ -35,6 +37,8 @@ pub mod translate;
 pub mod d3d;
 #[cfg(windows)]
 pub mod pso;
+#[cfg(windows)]
+pub mod rootmap;
 
 /// A program's stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

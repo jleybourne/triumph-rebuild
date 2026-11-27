@@ -210,9 +210,20 @@ pub unsafe fn get_status(block: *mut XAsyncBlock, wait: bool) -> HRESULT {
         return E_INVALIDARG;
     }
     if wait {
-        if let Some(call) = call(block) {
-            let completed = lock(&call.completed);
-            drop(call.done.wait_while(completed, |c| !*c).unwrap_or_else(|e| e.into_inner()));
+        match call(block) {
+            Some(call) => {
+                let completed = lock(&call.completed);
+                drop(call.done.wait_while(completed, |c| !*c).unwrap_or_else(|e| e.into_inner()));
+            }
+            // No call but still pending: `complete` takes the call out of the table just before it writes the
+            // status (so the block is free the moment a waiter sees it), and this waiter landed in between.
+            // The status is a few instructions away; never hand back E_PENDING from a wait.
+            None => {
+                let start = std::time::Instant::now();
+                while status(block) == E_PENDING && start.elapsed() < std::time::Duration::from_secs(1) {
+                    std::thread::yield_now();
+                }
+            }
         }
     }
     status(block)
