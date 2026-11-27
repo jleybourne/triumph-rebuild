@@ -11,14 +11,14 @@ Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives w
 | lane | build | branch | worktree | state | last reported |
 |:--|:--|:--|:--|:--|:--|
 | **loader** | Build 3a (L1–L4), then L5 | `agent/loader` | `D:\Developer\triumph-rebuild-loader` | ✅ L1–L4 **merged** (#1); ✅ L5 **PR open** | [#7](https://github.com/jleybourne/triumph-rebuild/pull/7) |
-| **shader** | Build 4 front end (S1–S5) | `agent/shader` | `D:\Developer\triumph-rebuild-shader` | ✅ S1–S4 **PR open**; ✅ **S5 committed: 25,694 / 25,694 oracle files** on `agent/shader-s5`, PR pending | [#5](https://github.com/jleybourne/triumph-rebuild/pull/5) |
-| **launcher** | Triumph Launcher (U1–U5, library, per-game settings) | `agent/launcher` | `D:\Developer\triumph-rebuild-launcher` | 🔄 pass 3: grain gone, cards fixed, but **body text renders only first letters** (font bug); fix ordered | 13:35 |
+| **shader** | Build 4 front end (S1–S5) | `agent/shader`, `agent/shader-s5` | `D:\Developer\triumph-rebuild-shader` | ✅ **S1–S5 closed**: PR [#5](https://github.com/jleybourne/triumph-rebuild/pull/5) (S1–S4), PR [#10](https://github.com/jleybourne/triumph-rebuild/pull/10) (S5, stacked on #5: **merge #5 first**) | lane finished |
+| **launcher** | Triumph Launcher (U1–U5, library, per-game settings) | `agent/launcher` | `D:\Developer\triumph-rebuild-launcher` | 🔄 pass 3b good (font fixed: Phosphor had shadowed Latin letters; grain removed; hero, cards, smoke test; 148 tests; 42321bc). Last polish (hairline, title-bar scrim, reorder arrows, card alignment), then PR | 14:05 |
 | **vfs** | overlay file system (V1–V4) | `agent/vfs` | `D:\Developer\triumph-rebuild-vfs` | ✅ **merged** by the lead | [#3](https://github.com/jleybourne/triumph-rebuild/pull/3) (2 commits) |
 | **upscale** | DLSS and FSR backends, standalone (P1–P5) | `agent/upscale` → `agent/upscale-fsr` | `D:\Developer\triumph-rebuild-upscale` | ✅ P1, P2, P4, P5 **merged** (#4); ✅ **P3 FSR 3.1.6 done, PR open** | [#8](https://github.com/jleybourne/triumph-rebuild/pull/8) |
 | **input** | controller and keyboard (I1–I3) | `agent/input` | `D:\Developer\triumph-rebuild-input` | ✅ **merged** by the lead | [#2](https://github.com/jleybourne/triumph-rebuild/pull/2) (2 commits) |
-| **audio** | console audio hardware (A1–A4) | `agent/audio` | `D:\Developer\triumph-rebuild-audio` | 🔄 started 13:25 | — |
+| **audio** | console audio hardware (A1–A4) | `agent/audio` | `D:\Developer\triumph-rebuild-audio` | ✅ **A1, A2, A4 closed; A3 closed apart from the XMA frame decoder** (owner/lead decision) | [#11](https://github.com/jleybourne/triumph-rebuild/pull/11) |
 | **dstorage** | DirectStorage (D1–D4) | `agent/dstorage` | `D:\Developer\triumph-rebuild-dstorage` | ✅ **D1–D3 closed; D4 answered (no decoder: owner decision)**, PR open | [#6](https://github.com/jleybourne/triumph-rebuild/pull/6) |
-| **files** | the 15 file overrides (F1–F3) | `agent/files` | `D:\Developer\triumph-rebuild-files` | 🔄 started 13:27 | — |
+| **files** | the file overrides (F1–F3) | `agent/files` | `D:\Developer\triumph-rebuild-files` | ✅ **F1–F3 closed, PR open** | [#12](https://github.com/jleybourne/triumph-rebuild/pull/12) |
 | **xg** | console texture layout (X1–X4) | `agent/xg` | `D:\Developer\triumph-rebuild-xg` | ✅ **X1–X4 closed, PR open** | [#9](https://github.com/jleybourne/triumph-rebuild/pull/9) (2 commits) |
 
 No lane merges; each opens a PR to `master` titled `agent/<lane>: <what closed>`.
@@ -105,6 +105,27 @@ From **xg** (details in `agents/xg.md` on `agent/xg`, PR #9):
 41. HTILE, CMASK, FMASK and DCC metadata planes aren't sized (as in the fork). That only matters if the title sizes a pool from console sizes.
 42. Numbers: 0 bytes differ from the fork's detiler over 174 synthetic cases (43.4 MB). BC7 64KB_D 2048² full chain: 0.49–0.54 ms (~11 GB/s). Workspace 135 green, 0 warnings. The layout maths are vendored from the fork's `victory-formats/src/texture.rs` (itself following AMD's MIT addrlib) with the header; `CREDITS.md` created.
 
+From **shader** (details in `agents/shader.md`, PRs #5 and #10):
+43. **Numbers:** 25,694 programs (VS+PS+CS+MS), matching the fork's census by hash and stage; all 1,433 world-frame hashes found. The decoder re-encodes **43,952,121 / 43,952,121 instructions byte-exact, 0 unknown opcodes**. 99.18 % of programs are structured (20 irreducible CS; the 195 ES end in an indirect jump). Branches are 59.7 % per-lane, 40.3 % wave-uniform. Wave class: 9,128 agnostic, 4,631 wave-wide only via `v_readfirstlane`, 12,325 wave-wide (9,329 of them via `v_mbcnt`). 445,906 of 529,146 wave ops sit in divergent regions (approximate, program order). Median 40 VGPRs and 66 SGPRs.
+44. **Oracle:** 25,694 / 25,694 present, 0 missing, 854.8 MB DXIL in `D:\victory-data\rebuild-oracle\<hash>.dxil` (plus `.vsh` whole cache entries; 1.8 GB, outside git). Made by the fork's `translate --warm all` with the build that gave its 25,694/25,694 census (`wt-bisect\target\vn\diag`); the fork's `cache-fx` couldn't be used (its names hash a build fingerprint). 50 spot re-translations were byte-identical.
+45. **Doc fix:** `tasks.md` and `secondary-agent.md` quote "4.64M instructions" as a corpus total. It's actually 4,641,843 *DXIL* instructions over the 1,433 world-frame programs; the corpus has 43.95M console instructions (40.61M without hints, against the fork's 40.56M, +0.13 %).
+46. "25,694 programs" counts VS+PS+CS+MS only; the archive also has 195 ES and 195 GS.
+
+From **audio** (details in `agents/audio.md`, PR #11):
+47. **XMA decoder: decision needed.** Open decoders exist: FFmpeg's `wmaprodec.c` (LGPL-2.1+), and the fork's pure-Rust `crates/victory-formats/src/xma.rs` (GPL-3.0+, derived from FFmpeg's). There's no MIT/BSD one. A codec carries performance, so section 3 kept the lane from vendoring either. It plugs in through the `FrameDecoder` trait; until then XMA voices play silence with exact timing.
+48. The fork's notes say the title's audio middleware reaches host WASAPI through COM itself. If so, A4's output is only for audio the layer mixes itself.
+49. XApu now answers asynchronously ("pending" until ready); the fork decoded inline on the title's thread. The title polls, so this should be fine.
+50. Numbers: workspace 128 green, 0 warnings. The slowest title-facing call is 27.6–68.1 µs (the first version had 4.6 ms and 3.8 ms stalls, now fixed). Opus 20 ms stereo packet: ~29 µs. The test tone played (440 Hz, 0.5 s, amplitude 0.05).
+51. Unknown (marked in A1): the ApuAlloc flags, ApuCreateHeap size units, XApuConnect option bit 1, the DSP impulse-response layout (so XDsp output is silence for now), and pitch.
+
+From **files** (details in `agents/files.md`, PR #12):
+52. All 22 `files` overrides are built, with host signatures and host handles. The side-by-side script matches the host on **145 / 145** calls (return values, `GetLastError`, attributes, find data, `MoveFileExW` flags); the base folder hash is unchanged.
+53. **Bind 5 more overrides** (built, last in `FUNCTIONS`): `FindNextFileW`, `FindNextFileA`, `FindClose` (search handles are ours because directories span overlay, mods and base), `SetFileAttributesW` and `GetTempPathW`. Until they're bound, the host gets our search handles and console paths, **and if `G:` or `T:` exists on the host, the host would act on real host files.**
+54. **The host CRT bypasses every file override** (`fopen`, `_wfopen`, `_open`, `_wstat64`, `remove`, `_wrename`, `_wchdir`, `_wgetcwd`, …): it calls the host's own `CreateFileW`. These need overrides too (open through our `CreateFileW`, then `_open_osfhandle`).
+55. Not overridden yet: `CopyFile2`, `CreateHardLinkW`, `CreateSymbolicLinkW`, `WerRegisterFile`. The census says 15 file functions, but the override list has 22 names; all 22 are built.
+56. Wiring: `rebuild_winfiles::install(Files::new(vfs, r"G:\"))`, then `override_export(name)` in `HostResolver`'s override arm; read `discoveries()` with `modules::misses()`.
+57. vfs gaps: delete-on-close and delete or rename through a handle leave the index stale; directory attributes and a directory case change below the overlay are refused and logged; `CREATE_ALWAYS` over a base file drops its attributes.
+
 From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f):
 6. Lane `launcher` U5 says "launch the proofs (`gputest --bare`)", but section 2 says helpers never run `gputest`. The launcher lane was told to build U5's launch path against a fake child process in tests, and to run no `gputest` itself. Please say which you meant.
 7. Lane `upscale` P3 needs AMD's FidelityFX SDK. If it isn't already on disk, getting it is a download. The lane was told not to download without your say, and to do P1, P2, P4 and P5 first. For DLSS it was pointed at the Streamline SDK zip already in `D:\tools\dlss\download` (production `bin/x64`, extracted outside git) and the user-supplied `nvngx_dlss.dll` in `D:\tools\dlss`.
@@ -123,6 +144,10 @@ From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f)
 
 | time | event |
 |:--|:--|
+| 14:15 | **files** done: PR #12 open (145/145 match the host). |
+| 14:12 | **audio** done: PR #11 open; XMA decoder choice flagged. |
+| 14:08 | **shader** done: S1–S5 closed; PR #5 (S1–S4) and PR #10 (S5, stacked: merge #5 first). |
+| 14:05 | **App restart at ~13:40** stopped launcher, audio and files mid-work (uncommitted work kept on disk); all three resumed. Launcher pass 3b reviewed: good, 4 polish items, then its PR. |
 | 13:42 | **xg** done: X1–X4 closed, PR #9 open. |
 | 13:40 | **upscale P3** done: FSR 3.1.6 beside DLSS, PR #8 open; licence checked compatible. |
 | 13:36 | **loader L5** done: PR #7 open (76 run-time names; the GDK is reached through `xgameruntime!QueryApiImpl` objects, not by name). |
