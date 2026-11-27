@@ -22,6 +22,8 @@ use windows::Win32::System::Threading::{
 
 static ADDRESS: AtomicU64 = AtomicU64::new(0);
 static HITS: AtomicU32 = AtomicU32::new(0);
+static LAST: AtomicU64 = AtomicU64::new(0);
+static DECREASES: AtomicU32 = AtomicU32::new(0);
 /// CONTEXT_AMD64 | CONTEXT_DEBUG_REGISTERS
 const DEBUG_REGISTERS: CONTEXT_FLAGS = CONTEXT_FLAGS(0x0010_0010);
 /// L0 enabled, RW0 = write, LEN0 = 8 bytes
@@ -32,6 +34,77 @@ struct Ctx(CONTEXT);
 
 /// Start watching if `REBUILD_WATCH` names an address. Call before the title runs.
 pub fn install() {
+    // `[0x14global]+off`: wait until that title global is set, then watch where it points (plus off)
+    if let Some(spec) = std::env::var("REBUILD_WATCH").ok().filter(|s| s.trim_start().starts_with('[')) {
+        let parsed = (|| {
+            let rest = spec.trim().strip_prefix('[')?;
+            let (g, off) = rest.split_once(']')?;
+            let hex = |t: &str| u64::from_str_radix(t.trim().trim_start_matches("0x"), 16).ok();
+            let off = off.trim().trim_start_matches('+');
+            Some((hex(g)?, if off.is_empty() { 0 } else { hex(off)? }))
+        })();
+        let Some((global, off)) = parsed else { return };
+        crate::crash::NO_SYMBOLS.store(true, Ordering::Relaxed);
+        unsafe {
+            AddVectoredExceptionHandler(1, Some(handler));
+        }
+        std::thread::Builder::new()
+            .name("watch-arm".into())
+            .spawn(move || {
+                let start = std::time::Instant::now();
+                // resolve: the global at its run address
+                let g = loop {
+                    if let Some(b) = crate::crash::title_base() {
+                        break b + global - 0x1_4000_0000;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                };
+                let target = loop {
+                    let v = unsafe { (g as *const u64).read_volatile() };
+                    if v != 0 {
+                        break v + off;
+                    }
+                    if start.elapsed().as_secs() > 120 {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                };
+                ADDRESS.store(target & !7, Ordering::Relaxed);
+                eprintln!("watch     [{global:#x}] became {:#x}: watching {target:#x} on every thread", target - off);
+                // also poll it: a write through another mapping of the same page, the kernel or the GPU never
+                // trips a debug register
+                std::thread::Builder::new()
+                    .name("watch-poll".into())
+                    .spawn(move || {
+                        let t0 = rebuild_runtime::overlap::epoch();
+                        let mut last = unsafe { ((target & !7) as *const u64).read_volatile() };
+                        let mut n = 0;
+                        while t0.elapsed().as_secs() < 120 && n < 30 {
+                            let v = unsafe { ((target & !7) as *const u64).read_volatile() };
+                            if v != last {
+                                eprintln!("poll      {:>9.3} ms {:#x}: {last:#x} -> {v:#x}", t0.elapsed().as_secs_f64() * 1e3, target & !7);
+                                last = v;
+                                n += 1;
+                            }
+                            std::thread::sleep(std::time::Duration::from_micros(200));
+                        }
+                    })
+                    .ok();
+                let mut armed: HashSet<u32> = HashSet::new();
+                let me = unsafe { GetCurrentThreadId() };
+                let mut alias_seen = false;
+                while start.elapsed().as_secs() < 120 {
+                    if !alias_seen && rebuild_runtime::overlap::ALIAS.load(Ordering::Relaxed) != 0 {
+                        alias_seen = true;
+                        armed.clear(); // re-arm every thread with the second register
+                    }
+                    arm_new(&mut armed, me);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            })
+            .ok();
+        return;
+    }
     // an absolute address, or `exe+0x...` (the title image moves between runs), or a preferred address 0x14...
     let Some(a) = std::env::var("REBUILD_WATCH").ok().and_then(|s| {
         let s = s.trim().to_ascii_lowercase();
@@ -77,6 +150,12 @@ fn arm_new(armed: &mut HashSet<u32>, me: u32) {
                     if unsafe { GetThreadContext(h, &mut c.0) }.is_ok() {
                         c.0.Dr0 = ADDRESS.load(Ordering::Relaxed);
                         c.0.Dr7 = (c.0.Dr7 & !0xF_0003) | DR7_WRITE8;
+                        // a second register on the alias address, once the runtime has seen one
+                        let alias = rebuild_runtime::overlap::ALIAS.load(Ordering::Relaxed);
+                        if alias != 0 {
+                            c.0.Dr1 = alias;
+                            c.0.Dr7 = (c.0.Dr7 & !0xF0_000C) | (1 << 2) | (1 << 20) | (3 << 22);
+                        }
                         c.0.ContextFlags = DEBUG_REGISTERS;
                         let _ = unsafe { SetThreadContext(h, &c.0) };
                     }
@@ -96,16 +175,20 @@ unsafe extern "system" fn handler(p: *mut EXCEPTION_POINTERS) -> i32 {
         return 0; // EXCEPTION_CONTINUE_SEARCH
     }
     let ctx = unsafe { &mut *(*p).ContextRecord };
-    if ctx.Dr6 & 1 == 0 {
+    if ctx.Dr6 & 3 == 0 {
         return 0;
     }
+    let via_alias = ctx.Dr6 & 2 != 0;
     ctx.Dr6 = 0;
     let n = HITS.fetch_add(1, Ordering::Relaxed);
-    if n < 40 {
-        let a = ADDRESS.load(Ordering::Relaxed);
-        let v = unsafe { (a as *const u64).read_volatile() };
+    let a = ADDRESS.load(Ordering::Relaxed);
+    let v = unsafe { (a as *const u64).read_volatile() };
+    // a decrease (a counter reset, a pointer moved back) is always named, however late
+    let before = LAST.swap(v, Ordering::Relaxed);
+    let decreased = n > 0 && v < before;
+    if n < 40 || (decreased && DECREASES.fetch_add(1, Ordering::Relaxed) < 20) {
         let mut out = crate::crash::Line::new();
-        let _ = write!(out, "watch     #{n} {:#x} = {v:#x}{} after ", a, if v == 0 { "  <-- ZERO" } else { "" });
+        let _ = write!(out, "watch     #{n}{} {:#x} = {v:#x}{}{} after ", if via_alias { " VIA ALIAS" } else { "" }, a, if v == 0 { "  <-- ZERO" } else { "" }, if decreased { "  <-- DECREASE" } else { "" });
         crate::crash::chain(&mut out, ctx, 10);
         out.flush();
     }

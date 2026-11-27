@@ -51,7 +51,7 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
 
 pub use alloc::{create_allocator, host_allocator, upload_range};
-pub use list::{create_list, forget_bound_state, host_list, segments, stats, sync_descriptors, HostList, ListStats, Segment};
+pub use list::{create_list, CLOSE_FAILED, NO_SHADOW, forget_bound_state, host_list, segments, skip, stats, sync_descriptors, HostList, ListStats, Segment};
 pub use slots::{allocator_slots, list_slots, traps, Returns, SlotInfo, SlotKind, Trap, ALLOCATOR_SLOTS, LIST_SLOTS};
 
 /// A COM or console object pointer, borrowed: never released through this.
@@ -80,6 +80,9 @@ pub struct HostPipeline {
     /// console state and written in the library's layout at each draw or dispatch that follows a change.
     /// `None`: the title's root arguments go to the host list by the title's parameter numbers.
     pub user: Option<&'static UserMap>,
+    /// The PSO's primitive topology type (1 point, 2 line, 3 triangle, 4 patch), or 0 when not known (no check):
+    /// a draw whose topology is outside it is refused by the host (debug #611, the list's Close fails), so dropped.
+    pub topology: u8,
 }
 
 /// User-data dwords a translated program's root constants carry (`rebuild_pipelines::layout::USER_DATA_DWORDS`).

@@ -67,6 +67,9 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
     // SAFETY: the title passes `count` list pointers.
     let lists = unsafe { std::slice::from_raw_parts(lists, count as usize) };
     let mut batch = Batch { q, n: 0, raw: [std::ptr::null_mut(); BATCH] };
+    // this submission's progress value: every host list in it is marked with it, the queue signals it at the end
+    let me = q as *const Queue as usize;
+    let mut value = q.progress_next.fetch_add(1, Ordering::AcqRel) + 1;
     if let Some(begin) = crate::present::frame_begin(q) {
         batch.push(begin);
     }
@@ -87,12 +90,52 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
             for w in &seg.waits {
                 wait(&mut batch, w);
             }
+            // a list the host refused at Close: executing it would remove the device
+            if seg.list.bad.load(Ordering::Relaxed) {
+                BAD.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            // a list still running from an earlier submission: wait for it (the console allows the re-execution, a
+            // host queue refuses it, and a card can hang on it)
+            let last = seg.list.executed_at.load(Ordering::Acquire);
+            if last != 0 && seg.list.executed_on.load(Ordering::Relaxed) == me && unsafe { q.progress.GetCompletedValue() } < last {
+                batch.flush();
+                if last == value {
+                    // the same list twice in this submission: close this value now, take a fresh one for the rest
+                    unsafe { let _ = q.host.Signal(&q.progress, value); };
+                    value = q.progress_next.fetch_add(1, Ordering::AcqRel) + 1;
+                }
+                wait_done(q, last);
+                REEXECUTED.fetch_add(1, Ordering::Relaxed);
+            }
+            seg.list.executed_on.store(me, Ordering::Relaxed);
+            seg.list.executed_at.store(value, Ordering::Release);
             batch.push(seg.list.list.as_raw());
         }
     }
     batch.flush();
+    unsafe {
+        let _ = q.host.Signal(&q.progress, value);
+    }
     LISTS.fetch_add(lists.len() as u64, Ordering::Relaxed);
     crate::framelog::submitted(draws, dispatches, skipped);
+}
+
+/// Re-executions of a host list that had to wait for its earlier run.
+pub static REEXECUTED: AtomicU64 = AtomicU64::new(0);
+/// Host lists not executed because their Close failed.
+pub static BAD: AtomicU64 = AtomicU64::new(0);
+
+/// Wait (at most 2 s) until the queue's progress fence reaches `value`.
+fn wait_done(q: &Queue, value: u64) {
+    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+    let Ok(event) = (unsafe { CreateEventW(None, false, false, None) }) else { return };
+    unsafe {
+        if q.progress.SetEventOnCompletion(value, event).is_ok() {
+            let _ = WaitForSingleObject(event, 2000);
+        }
+        let _ = windows::Win32::Foundation::CloseHandle(event);
+    }
 }
 
 /// Host lists gathered for one `ExecuteCommandLists`.
@@ -114,6 +157,9 @@ impl Batch {
 
     #[inline]
     fn flush(&mut self) {
+        if self.n > 0 && rebuild_xlist::console::skip::on(rebuild_xlist::console::skip::SUBMIT) {
+            self.n = 0; // REBUILD_GPU_SKIP=submit: recorded, never executed
+        }
         if self.n > 0 {
             // SAFETY: closed host graphics lists (an ID3D12GraphicsCommandList is an ID3D12CommandList).
             unsafe { (Interface::vtable(&self.q.host).ExecuteCommandLists)(Interface::as_raw(&self.q.host), self.n as u32, self.raw.as_ptr() as *const _) };

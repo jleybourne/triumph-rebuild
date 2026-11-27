@@ -345,6 +345,9 @@ pub fn ps_program(l: &Lifted, ps: &PsStage, bind: Option<&super::Bindings>, isg1
     }
     let mut s = String::from(super::PRELUDE);
     s.push_str(&code_table(l));
+    if l.wave != super::Wave::Agnostic {
+        s.push_str(super::wave::PRELUDE);
+    }
     for k in 0..l.immediate_samplers.len() {
         let ty = if l.immediate_compare.contains(&k) { "SamplerComparisonState" } else { "SamplerState" };
         let _ = writeln!(s, "{ty} sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
@@ -507,6 +510,9 @@ pub fn vs_program(l: &Lifted, vs: &VsStage, bind: Option<&super::Bindings>, isg1
     }
     let mut s = String::from(super::PRELUDE);
     s.push_str(&code_table(l));
+    if l.wave != super::Wave::Agnostic {
+        s.push_str(super::wave::PRELUDE);
+    }
     for k in 0..l.immediate_samplers.len() {
         let ty = if l.immediate_compare.contains(&k) { "SamplerComparisonState" } else { "SamplerState" };
         let _ = writeln!(s, "{ty} sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
@@ -720,6 +726,9 @@ pub fn cs_program(l: &Lifted, cs: &ComputeIo, bind: Option<&super::Bindings>) ->
     }
     let mut s = String::from(super::PRELUDE);
     s.push_str(&code_table(l));
+    if l.wave != super::Wave::Agnostic {
+        s.push_str(super::wave::PRELUDE);
+    }
     for k in 0..l.immediate_samplers.len() {
         let ty = if l.immediate_compare.contains(&k) { "SamplerComparisonState" } else { "SamplerState" };
         let _ = writeln!(s, "{ty} sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
@@ -733,14 +742,23 @@ pub fn cs_program(l: &Lifted, cs: &ComputeIo, bind: Option<&super::Bindings>) ->
     if l.uses_lds {
         let _ = writeln!(s, "groupshared uint sir_lds[{}];", (cs.lds_bytes() / 4).max(1));
     }
-    let [x, y, z] = cs.threads;
-    let _ = writeln!(s, "[numthreads({}, {}, {})]", x.max(1), y.max(1), z.max(1));
+    let entry = super::wave::cs_entry(l, cs);
+    if let Some((attr, _)) = &entry {
+        s.push_str(attr);
+    } else {
+        let [x, y, z] = cs.threads;
+        let _ = writeln!(s, "[numthreads({}, {}, {})]", x.max(1), y.max(1), z.max(1));
+    }
     s.push_str("void main(uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID) {\n");
     s.push_str(&super::declarations(l));
     s.push_str(&init);
-    for k in 0..cs.thread_id_vgprs().min(3) {
-        if l.vgprs.contains(&u16::from(k)) {
-            let _ = writeln!(s, "    v{k} = tid.{};", ["x", "y", "z"][k as usize]);
+    if let Some((_, ids)) = &entry {
+        s.push_str(ids);
+    } else {
+        for k in 0..cs.thread_id_vgprs().min(3) {
+            if l.vgprs.contains(&u16::from(k)) {
+                let _ = writeln!(s, "    v{k} = tid.{};", ["x", "y", "z"][k as usize]);
+            }
         }
     }
     s.push_str(&l.body);

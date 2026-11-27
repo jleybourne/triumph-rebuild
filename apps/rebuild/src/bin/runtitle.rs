@@ -109,7 +109,21 @@ fn device_report() {
         ),
         None => println!("dstorage  the title has not asked for DirectStorage"),
     }
-    let t = rebuild_runtime::device::traps();
+    if let Some(dred) = rebuild_runtime::device::dred_report() {
+        print!("{dred}");
+    }
+    {
+        use rebuild_runtime::submit::{BAD, FOREIGN, LISTS, REEXECUTED};
+        use std::sync::atomic::Ordering::Relaxed;
+        println!(
+            "submit    {} lists executed, {} not ours, {} re-executions waited for their earlier run, {} host lists not run (Close failed; {} Close failures)",
+            LISTS.load(Relaxed), FOREIGN.load(Relaxed), REEXECUTED.load(Relaxed), BAD.load(Relaxed),
+            rebuild_xlist::console::CLOSE_FAILED.load(Relaxed)
+        );
+        println!("lists     {} draws and dispatches dropped: a library pipeline with no shadow table bound", rebuild_xlist::console::NO_SHADOW.load(Relaxed));
+        println!("views     {} UAVs of resources without unordered access written as null views", rebuild_d3d12x::heap::NO_UAV.load(Relaxed));
+    }
+    let t =rebuild_runtime::device::traps();
     println!("device    {} slots called that are not written yet (first call, ms after the device):", t.len());
     for (off, name, n, ms) in t {
         println!("  {off:#05x}  {name:<36} {n:>8}×  first at {ms:>9.3} ms");

@@ -35,6 +35,9 @@ use crate::format::{self, DIMENSION_BUFFER, DIMENSION_TEXTURE1D, DIMENSION_TEXTU
 use crate::object::{self, Head};
 use crate::records::{self, EntryView, Record, RAW};
 use crate::resource::{resource, Resource};
+
+/// UAVs written as null views: the host resource has no unordered access.
+pub static NO_UAV: AtomicU64 = AtomicU64::new(0);
 use crate::slots::{Fp, Object};
 use crate::views::{HostHeap, HostView, Shadow, DSV, RTV, SAMPLERS, VIEWS};
 use crate::{HeapBinding, Inner, MemoryRange, Raw, Resources};
@@ -820,6 +823,18 @@ impl Resources {
                 };
                 let e = elem_bytes(f, stride, raw);
                 Record::Buffer { uav: true, va: r.address + first * e, format: f as u32, elements: n, stride, flags: if raw { RAW } else { 0 } }
+            }
+            // the host resource has no unordered access (the console allows it on any resource; the host strips it
+            // from depth targets): a null view, never an invalid descriptor (WARP faults on one, then removes)
+            Some(r) if crate::format::host_desc(&r.desc).0.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 => {
+                if NO_UAV.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                    self.inner.events.note("UAV of a resource without unordered access: a null view (counted)", r.desc.Flags.0 as u64);
+                }
+                let v = match desc {
+                    Some(d) => *d,
+                    None => default_uav(r),
+                };
+                Record::Null { uav: true, dimension: v.ViewDimension.0 as u32 }
             }
             Some(r) => {
                 let mut v = match desc {

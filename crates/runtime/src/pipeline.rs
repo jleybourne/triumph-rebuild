@@ -172,6 +172,8 @@ struct Pipeline {
     root: AtomicUsize,
     /// how the title's root arguments become its programs' user data (`None`: not known, so never bound)
     user: Option<&'static UserMap>,
+    /// the host PSO's primitive topology type (1 point, 2 line, 3 triangle, 4 patch; 0 compute)
+    topology: u8,
 }
 
 const SLOTS: usize = 16;
@@ -291,13 +293,13 @@ unsafe fn create_compute(desc: *const ComputeDesc, iid: *const GUID, out: *mut R
         }
     };
     let user = handle.and_then(|_| compute_map(cs, bytes));
-    unsafe { hand_out(key, handle, user, iid, out) }
+    unsafe { hand_out(key, handle, user, 0, iid, out) }
 }
 
 /// The console object for a pipeline (with its pool handle, or none), answered as `iid` into `out`.
-unsafe fn hand_out(key: Key, handle: Option<Handle>, user: Option<&'static UserMap>, iid: *const GUID, out: *mut Raw) -> i32 {
+unsafe fn hand_out(key: Key, handle: Option<Handle>, user: Option<&'static UserMap>, topology: u8, iid: *const GUID, out: *mut Raw) -> i32 {
     CREATED.fetch_add(1, Ordering::Relaxed);
-    let p = Box::into_raw(Box::new(Pipeline { table: table().as_ptr(), bits: 0, refs: AtomicU32::new(1), key, handle, root: AtomicUsize::new(0), user }));
+    let p = Box::into_raw(Box::new(Pipeline { table: table().as_ptr(), bits: 0, refs: AtomicU32::new(1), key, handle, root: AtomicUsize::new(0), user, topology }));
     if out.is_null() {
         unsafe { release(p as Raw) };
         return 1; // S_FALSE: creation would succeed
@@ -335,7 +337,7 @@ fn console_sizes() -> &'static [(u32, usize)] {
 
 /// A graphics or compute description read: requested from the pool when its programs are in the library, with
 /// its programs' user-data map (read from the bytes `mem` saw).
-fn request(parsed: Result<Parsed, Refusal>, mem: &Capture) -> (Key, Option<Handle>, Option<&'static UserMap>) {
+fn request(parsed: Result<Parsed, Refusal>, mem: &Capture) -> (Key, Option<Handle>, Option<&'static UserMap>, u8) {
     let p = match parsed {
         Ok(p) => p,
         Err(r) => {
@@ -348,7 +350,7 @@ fn request(parsed: Result<Parsed, Refusal>, mem: &Capture) -> (Key, Option<Handl
                 eprintln!("pipeline  no host pipeline: {r} (counted from now on)");
             }
             *n += 1;
-            return (Key { compute: false, shaders: [0, 0], state: 0 }, None, None);
+            return (Key { compute: false, shaders: [0, 0], state: 0 }, None, None, 0);
         }
     };
     if p.skipped > 0 {
@@ -376,7 +378,13 @@ fn request(parsed: Result<Parsed, Refusal>, mem: &Capture) -> (Key, Option<Handl
         }
     }
     let user = if all { user_map(&p.desc, mem) } else { None };
-    (key, pool.filter(|_| all).map(|pool| pool.request(key, p.desc)), user)
+    // the type the host PSO is built with (pso.rs: an unknown console value builds as triangles)
+    let topology = match &p.desc {
+        Desc::Graphics { state, .. } if (1..=4).contains(&state.topology) => state.topology as u8,
+        Desc::Graphics { .. } => 3,
+        Desc::Compute { .. } => 0,
+    };
+    (key, pool.filter(|_| all).map(|pool| pool.request(key, p.desc)), user, topology)
 }
 
 /// The user-data map of a description's programs (`None`, counted, when a program's root layout is unreadable).
@@ -417,8 +425,8 @@ pub unsafe extern "system" fn CreateGraphicsPipelineState(_this: Raw, desc: *con
     // SAFETY: the title passes a whole description, and what it points at is live for the call
     let d = unsafe { std::slice::from_raw_parts(desc as *const u8, stream::graphics_desc::SIZE) };
     let mem = unsafe { Capture::new() };
-    let (key, handle, user) = request(stream::parse_graphics(d, &mem), &mem);
-    unsafe { hand_out(key, handle, user, iid, out) }
+    let (key, handle, user, topology) = request(stream::parse_graphics(d, &mem), &mem);
+    unsafe { hand_out(key, handle, user, topology, iid, out) }
 }
 
 /// 0x2b0 CreatePipelineState: a pipeline state stream, console subobject numbering.
@@ -430,8 +438,8 @@ pub unsafe extern "system" fn CreatePipelineState(_this: Raw, desc: *const c_voi
     // SAFETY: the title passes `size` bytes of stream, and what it points at is live for the call
     let s = unsafe { std::slice::from_raw_parts(d.stream, d.size) };
     let mem = unsafe { Capture::new() };
-    let (key, handle, user) = request(stream::parse_stream(s, &mem, Numbering::Console, console_sizes()), &mem);
-    unsafe { hand_out(key, handle, user, iid, out) }
+    let (key, handle, user, topology) = request(stream::parse_stream(s, &mem, Numbering::Console, console_sizes()), &mem);
+    unsafe { hand_out(key, handle, user, topology, iid, out) }
 }
 
 /// The host pipeline of a console one, for the lists. Waits for the pool at a pipeline's first use. A pipeline
@@ -458,7 +466,7 @@ pub fn host(console: Raw) -> Option<HostPipeline> {
         root = r.as_raw() as usize;
         p.root.store(root, Ordering::Relaxed);
     }
-    Some(HostPipeline { pso: pso.as_raw(), root_signature: root as Raw, compute: p.key.compute, user: Some(user) })
+    Some(HostPipeline { pso: pso.as_raw(), root_signature: root as Raw, compute: p.key.compute, user: Some(user), topology: p.topology })
 }
 
 /// One line for the run report (a second with the on-demand failures, when there are any).

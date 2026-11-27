@@ -202,8 +202,110 @@ unsafe extern "system" fn console_pipeline<const SLOT: usize>(_this: *mut c_void
     E_NOTIMPL
 }
 
+/// DRED (with REBUILD_D3D_DEBUG): auto-breadcrumbs and page-fault reporting, read by [`dred_report`] after a removal.
+fn dred_enable() {
+    use windows::Win32::Graphics::Direct3D12::{D3D12GetDebugInterface, ID3D12DeviceRemovedExtendedDataSettings1, D3D12_DRED_ENABLEMENT_FORCED_ON};
+    let mut s: Option<ID3D12DeviceRemovedExtendedDataSettings1> = None;
+    if unsafe { D3D12GetDebugInterface(&mut s) }.is_ok() {
+        if let Some(s) = s {
+            unsafe {
+                s.SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                s.SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                s.SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            }
+            eprintln!("d3ddebug  DRED breadcrumbs and page faults on");
+        }
+    }
+}
+
+/// After a device removal: the reason, the lists the GPU had not finished (the ops around the last one done) and
+/// the page-fault address with the allocations at it. Nothing when the device is alive.
+pub fn dred_report() -> Option<String> {
+    use std::fmt::Write;
+    use windows::Win32::Graphics::Direct3D12::ID3D12DeviceRemovedExtendedData1;
+    let d = DEVICE.get()?;
+    let reason = unsafe { d.host.GetDeviceRemovedReason() }.err()?;
+    let mut out = format!("dred      device removed: {reason}\n");
+    let Ok(dred) = d.host.cast::<ID3D12DeviceRemovedExtendedData1>() else {
+        out.push_str("dred      no DRED (run with REBUILD_D3D_DEBUG)\n");
+        return Some(out);
+    };
+    const OPS: [&str; 21] = [
+        "marker", "begin-event", "end-event", "draw", "draw-indexed", "execute-indirect", "dispatch", "copy-buffer",
+        "copy-texture", "copy-resource", "copy-tiles", "resolve", "clear-rtv", "clear-uav", "clear-dsv", "barrier",
+        "bundle", "present", "resolve-query", "begin-submission", "end-submission",
+    ];
+    let op = |o: i32| OPS.get(o as usize).map(|s| s.to_string()).unwrap_or_else(|| format!("op{o}"));
+    if let Ok(b) = unsafe { dred.GetAutoBreadcrumbsOutput1() } {
+        let (mut node, mut shown, mut total) = (b.pHeadAutoBreadcrumbNode, 0, 0);
+        while !node.is_null() && total < 10_000 {
+            let n = unsafe { &*node };
+            total += 1;
+            let last = if n.pLastBreadcrumbValue.is_null() { 0 } else { unsafe { *n.pLastBreadcrumbValue } };
+            if last < n.BreadcrumbCount && shown < 6 && !n.pCommandHistory.is_null() {
+                shown += 1;
+                let list = n.pCommandList.as_ref().map(|l| l.as_raw() as usize).unwrap_or(0);
+                let _ = writeln!(out, "dred      list {list:#x}: {last} of {} ops done; around the stop:", n.BreadcrumbCount);
+                let hist = unsafe { std::slice::from_raw_parts(n.pCommandHistory, n.BreadcrumbCount as usize) };
+                let from = last.saturating_sub(6) as usize;
+                let to = (last as usize + 4).min(hist.len());
+                for (i, o) in hist.iter().enumerate().take(to).skip(from) {
+                    let mark = if i as u32 == last { "  <- first not done" } else { "" };
+                    let _ = writeln!(out, "            [{i:>5}] {}{mark}", op(o.0));
+                }
+                // ops of this list by kind, so a missing kind stands out
+                let mut kinds = std::collections::BTreeMap::new();
+                for o in hist {
+                    *kinds.entry(op(o.0)).or_insert(0u32) += 1;
+                }
+                let _ = writeln!(out, "            kinds: {kinds:?}");
+            }
+            node = n.pNext;
+        }
+        let _ = writeln!(out, "dred      {total} lists in the breadcrumb ring, {shown} not finished shown");
+    }
+    if let Ok(p) = unsafe { dred.GetPageFaultAllocationOutput1() } {
+        let _ = writeln!(out, "dred      page fault at {:#x}", p.PageFaultVA);
+        for (head, what) in [(p.pHeadExistingAllocationNode, "existing"), (p.pHeadRecentFreedAllocationNode, "recently freed")] {
+            let mut node = head;
+            let mut k = 0;
+            while !node.is_null() && k < 8 {
+                let n = unsafe { &*node };
+                let _ = writeln!(out, "            {what} allocation type {}", n.AllocationType.0);
+                node = n.pNext;
+                k += 1;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// The debug layer's errors and warnings, printed as they happen (the first 60).
+fn debug_messages(host: &ID3D12Device) {
+    use windows::Win32::Graphics::Direct3D12::{ID3D12InfoQueue1, D3D12_MESSAGE_CALLBACK_FLAG_NONE, D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_ID, D3D12_MESSAGE_SEVERITY};
+    unsafe extern "system" fn on_message(_cat: D3D12_MESSAGE_CATEGORY, sev: D3D12_MESSAGE_SEVERITY, id: D3D12_MESSAGE_ID, text: windows::core::PCSTR, _ctx: *mut c_void) {
+        static N: AtomicU32 = AtomicU32::new(0);
+        // corruption 0, error 1, warning 2
+        if (sev.0 <= 2 || std::env::var_os("REBUILD_D3D_DEBUG_ALL").is_some()) && N.fetch_add(1, Ordering::Relaxed) < 400 {
+            let t = unsafe { text.to_string() }.unwrap_or_default();
+            eprintln!("d3ddebug  [{}] #{}: {t}", ["corruption", "error", "warning", "info", "message"].get(sev.0 as usize).unwrap_or(&"?"), id.0);
+        }
+    }
+    match host.cast::<ID3D12InfoQueue1>() {
+        Ok(q) => {
+            let mut cookie = 0u32;
+            let r = unsafe { q.RegisterMessageCallback(Some(on_message), D3D12_MESSAGE_CALLBACK_FLAG_NONE, std::ptr::null_mut(), &mut cookie) };
+            if r.is_err() {
+                eprintln!("d3ddebug  no message callback: {r:?}");
+            }
+            std::mem::forget(q);
+        }
+        Err(e) => eprintln!("d3ddebug  no ID3D12InfoQueue1: {e}"),
+    }
+}
+
 /// `module+offset` for a code address (the title's images are loaded by the Windows loader, so they are modules).
-fn module_offset(addr: usize) -> String {
+pub(crate) fn module_offset(addr: usize) -> String {
     use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT};
     let mut m = windows::Win32::Foundation::HMODULE::default();
     let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
@@ -511,12 +613,52 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
     if DEVICE.get().is_none() {
         // Streamline (DLSS behind the title's FidelityFX calls) must start before the device exists
         rebuild_ffx::backends::prepare_dlss();
+        // REBUILD_D3D_DEBUG: the D3D12 debug layer, its errors and warnings printed as they happen
+        let debug = std::env::var_os("REBUILD_D3D_DEBUG").is_some();
+        if debug {
+            let mut d: Option<windows::Win32::Graphics::Direct3D12::ID3D12Debug> = None;
+            if unsafe { windows::Win32::Graphics::Direct3D12::D3D12GetDebugInterface(&mut d) }.is_ok() {
+                if let Some(d) = d {
+                    unsafe { d.EnableDebugLayer() };
+                    eprintln!("d3ddebug  the D3D12 debug layer is on");
+                    // REBUILD_D3D_GBV: GPU-based validation (descriptors and root views checked as shaders read them)
+                    if std::env::var_os("REBUILD_D3D_GBV").is_some() {
+                        if let Ok(d1) = d.cast::<windows::Win32::Graphics::Direct3D12::ID3D12Debug1>() {
+                            unsafe { d1.SetEnableGPUBasedValidation(true) };
+                            eprintln!("d3ddebug  GPU-based validation on");
+                        }
+                    }
+                }
+            }
+            dred_enable();
+        }
         let mut host: Option<ID3D12Device> = None;
-        if let Err(e) = unsafe { D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_1, &mut host) } {
+        // REBUILD_WARP: the host device on WARP, the software rasterizer: slow, but title work that would hang a
+        // card cannot reset the display driver (the way to bisect such work)
+        let adapter: Option<windows::core::IUnknown> = if std::env::var_os("REBUILD_WARP").is_some() {
+            let warp = unsafe { windows::Win32::Graphics::Dxgi::CreateDXGIFactory1::<windows::Win32::Graphics::Dxgi::IDXGIFactory4>() }
+                .and_then(|f| unsafe { f.EnumWarpAdapter::<windows::core::IUnknown>() });
+            match warp {
+                Ok(a) => {
+                    eprintln!("device    on WARP (REBUILD_WARP)");
+                    Some(a)
+                }
+                Err(e) => {
+                    eprintln!("device    WARP refused ({e}); not making a card device instead");
+                    return e.code().0;
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(e) = unsafe { D3D12CreateDevice(adapter.as_ref(), D3D_FEATURE_LEVEL_12_1, &mut host) } {
             eprintln!("device: the host D3D12 device failed: {e}");
             return e.code().0;
         }
         let Some(host) = host else { return 0x8000_4005u32 as i32 };
+        if debug {
+            debug_messages(&host);
+        }
         // resources, heaps and views behind the device; memory is a host stand-in until the tiles join (Build 1)
         let memory = match rebuild_d3d12x::HostMemory::new(&host, 1 << 30) {
             Ok(m) => m,

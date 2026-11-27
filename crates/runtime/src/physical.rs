@@ -17,6 +17,28 @@ use windows::Win32::System::Threading::GetCurrentProcess;
 
 pub const FRAME: usize = 64 << 10;
 
+/// The first 64 KiB frame handed to the title (0 reads as "no page"; the fork numbers from here too).
+pub const FIRST_PAGE: usize = 0x10_0000;
+
+/// Page numbers as the console gives them: **4 KiB units**, so a 64 KiB page is a multiple of 16. The title keeps
+/// them shifted right by 4 in a packed 21-bit table and shifts them back when it builds a scatter list; with
+/// consecutive numbers every 16 pages collapsed onto one, and its 420 MB shader arena became one page (the
+/// null-program crash on frame 2). Numbers stay below 2^25 so `>> 4` fits 21 bits.
+pub const PAGE_SHIFT: u32 = 4;
+
+/// The page number the title sees for frame-table index `i`.
+fn number(i: usize) -> usize {
+    (i + FIRST_PAGE) << PAGE_SHIFT
+}
+
+/// The frame-table index of a page number the title passes (`None`: not one of ours).
+fn index(frame: usize) -> Option<usize> {
+    if frame & ((1 << PAGE_SHIFT) - 1) != 0 {
+        return None;
+    }
+    (frame >> PAGE_SHIFT).checked_sub(FIRST_PAGE)
+}
+
 struct Section {
     handle: HANDLE,
     frames: usize,
@@ -88,7 +110,7 @@ impl Physical {
         self.sections.push(Section { handle, frames: n, live: n, view: 0 });
         let first = self.frames.len();
         self.frames.extend((0..n).map(|k| Some((si, k))));
-        Some((first..first + n).collect())
+        Some((first..first + n).map(number).collect())
     }
 
     /// Free frames (their mappings must be gone first).
@@ -96,11 +118,12 @@ impl Physical {
         if frames.iter().any(|f| self.mapped.values().any(|m| m == f)) {
             return false;
         }
-        if frames.iter().any(|&f| !matches!(self.frames.get(f), Some(Some(_)))) {
+        if frames.iter().any(|&f| !matches!(index(f).and_then(|i| self.frames.get(i)), Some(Some(_)))) {
             return false;
         }
         for &f in frames {
-            let Some((si, _)) = self.frames[f].take() else { continue };
+            let Some(i) = index(f) else { continue };
+            let Some((si, _)) = self.frames[i].take() else { continue };
             let s = &mut self.sections[si];
             s.live -= 1;
             if s.live == 0 {
@@ -122,7 +145,7 @@ impl Physical {
     /// Map frame `frame` at `addr` (64 KiB aligned, inside a placeholder reservation). Whatever was
     /// mapped there is unmapped first.
     pub fn map(&mut self, addr: u64, frame: usize) -> bool {
-        let Some(Some((si, k))) = self.frames.get(frame).copied() else { return false };
+        let Some(Some((si, k))) = index(frame).and_then(|i| self.frames.get(i)).copied() else { return false };
         if addr % FRAME as u64 != 0 || k >= self.sections[si].frames {
             return false;
         }
@@ -164,7 +187,7 @@ impl Physical {
     /// The 64 KiB of a live frame, wherever (or whether) it is mapped. The pointer stays valid while
     /// this `Physical` lives: sections are only closed when it drops.
     pub fn frame_ptr(&mut self, frame: usize) -> Option<*mut u8> {
-        let (si, k) = (*self.frames.get(frame)?)?;
+        let (si, k) = (*self.frames.get(index(frame)?)?)?;
         let s = &mut self.sections[si];
         if s.view == 0 {
             let v = unsafe { MapViewOfFile(s.handle, FILE_MAP_ALL_ACCESS, 0, 0, s.frames * FRAME) };
@@ -174,6 +197,11 @@ impl Physical {
             s.view = v.Value as usize;
         }
         Some((s.view + k * FRAME) as *mut u8)
+    }
+
+    /// Every address frame `frame` is mapped at now (a diagnostic scan).
+    pub fn mapped_at(&self, frame: usize) -> Vec<u64> {
+        self.mapped.iter().filter(|(_, &f)| f == frame).map(|(&a, _)| a).collect()
     }
 
     pub fn frame_at(&self, addr: u64) -> Option<usize> {
@@ -237,5 +265,18 @@ mod tests {
         }
         assert!(p.free(&frames));
         assert_eq!(p.live_frames(), 0);
+    }
+
+    #[test]
+    fn page_numbers_are_4k_units_and_survive_the_titles_packing() {
+        let mut p = Physical::default();
+        let frames = p.allocate(40).unwrap();
+        // what the title does: keep `n >> 4` in a 21-bit field, rebuild `(field << 4) & 0x1FFFFF0`
+        let rebuilt: Vec<usize> = frames.iter().map(|&n| ((n >> 4) << 4) & 0x1FF_FFF0).collect();
+        assert_eq!(rebuilt, frames, "every page survives the round trip");
+        assert!(frames.iter().all(|n| n % 16 == 0 && *n != 0));
+        let distinct: std::collections::HashSet<_> = rebuilt.iter().collect();
+        assert_eq!(distinct.len(), 40, "no two pages collapse onto one");
+        assert!(p.free(&frames));
     }
 }

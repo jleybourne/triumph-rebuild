@@ -232,6 +232,17 @@ pub fn host_desc(d: &D3D12_RESOURCE_DESC) -> (D3D12_RESOURCE_DESC, u32) {
     h.Alignment = 0;
     // render target, depth, unordered access, deny shader resource, cross adapter, simultaneous access
     h.Flags = D3D12_RESOURCE_FLAGS(d.Flags.0 & 0x3f);
+    // combinations the console takes and the host refuses (the resource would not exist): depth with render
+    // target, unordered access or simultaneous access; render target or depth on a buffer
+    const RT: i32 = 0x1;
+    const DS: i32 = 0x2;
+    const UAV: i32 = 0x4;
+    const SIMULTANEOUS: i32 = 0x20;
+    if d.Dimension.0 == DIMENSION_BUFFER {
+        h.Flags.0 &= !(RT | DS);
+    } else if h.Flags.0 & DS != 0 {
+        h.Flags.0 &= !(RT | UAV | SIMULTANEOUS);
+    }
     if d.Dimension.0 == DIMENSION_BUFFER {
         h.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         h.Format = DXGI_FORMAT_UNKNOWN;

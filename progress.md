@@ -1,9 +1,9 @@
 # Progress
 
 ```
-overall   ████████████░░░░░░░░  59 %   work toward 30 fps, weighted by build step
-fps       frame 1 presented (black, as the title draws it); frame 2 next · target 30 · baseline 7.6
-updated   2026-11-27
+overall   ████████████░░░░░░░░  61 %   work toward 30 fps, weighted by build step
+fps       frames 1-60 presented on WARP (black) · card runs paused · target 30 · baseline 7.6
+updated   2026-11-28
 ```
 
 The percentage is **work done**, not fps. Once Build 5 shows a frame, the measured fps goes on the second line
@@ -13,9 +13,9 @@ and becomes the number that counts.
 
 | track | progress | | note |
 |---|---|--:|---|
-| **Build 5 · first frame** | `██████████░░░░░░░░░░` | 50 % | frame 1 presented and captured; frame 2 blocked by a null program binding |
-| shaders compiled (agnostic) | `███████████████████░` | 8,799 / 9,128 | PS 6,733 · VS 1,448 · CS 618 |
-| shaders counted | `░░░░░░░░░░░░░░░░░░░░` | 0 / 25,694 | counted once execution matches the oracle |
+| **Build 5 · first frame** | `███████████░░░░░░░░░` | 55 % | WARP: ~900 lists, frames 1-60 captured; cause of the hangs found (CBV/SRV slot type, fix in #37) |
+| shaders compiled (every class) | `███████░░░░░░░░░░░░░` | 9,415 / 25,694 | pixel 7,840 · vertex 987 · compute 588 · of them wave-wide 1,892 ([wave64](runs/build4-wave64.md)) · agnostic 8,799 / 9,128 ([v1](runs/build4-v1.md)) |
+| shaders counted | `████░░░░░░░░░░░░░░░░` | 5,195 / 25,694 | bit-exact vs the oracle on WARP ([exec](runs/build4-exec.md)) |
 | runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
 | launcher | `██████████████░░░░░░` | 5 / 7 | C2 and L5 left · not part of the 59 % |
 
@@ -32,13 +32,13 @@ and becomes the number that counts.
 | 1 | tiled VRAM at console addresses | `████████████████████` | 100 % | 10 | closed |
 | 2 | CPU-written memory ring; GPU→CPU | `████████████████████` | 100 % | 8 | closed |
 | 3 | PE loader + console runtime | `████████████████████` | 100 % | 15 | closed: the title's code runs |
-| 4 | shader recompiler RDNA2 → DXIL | `█████████████░░░░░░░` | 65 % | 15 | front end closed; execution check, wave64 open |
-| 5 | device, lists, descriptors, present | `██████████░░░░░░░░░░` | 50 % | 12 | frame 1 presented through our layer; frame 2 next |
+| 4 | shader recompiler RDNA2 → DXIL | `███████████████░░░░░` | 75 % | 15 | 9,415 compile, 5,195 bit-exact; wave64 built |
+| 5 | device, lists, descriptors, present | `███████████░░░░░░░░░` | 55 % | 12 | frames 1-2 presented; GPU safe mode next |
 | 6 | list translation | `██░░░░░░░░░░░░░░░░░░` | 10 % | 8 | translator core measured |
 | 7 | upscaler: DLSS + FSR | `██████░░░░░░░░░░░░░░` | 30 % | 10 | both standalone; wiring to the title open |
 | 8 | frame pacing | `░░░░░░░░░░░░░░░░░░░░` | 0 % | 6 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | `░░░░░░░░░░░░░░░░░░░░` | 0 % | 6 | 30 fps on AMD closes here |
-| | **total** | `████████████░░░░░░░░` | **59 %** | 100 | 59.55 points earned |
+| | **total** | `████████████░░░░░░░░` | **61 %** | 100 | 61.65 points earned |
 
 ## Build 5 · first frame, piece by piece
 

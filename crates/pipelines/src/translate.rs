@@ -71,6 +71,9 @@ pub struct Hlsl {
     pub samplers: Samplers,
     /// The highest user-data dword the program reads (heap bases excluded), if any.
     pub top_dword: Option<u32>,
+    /// Every descriptor read and its view (`rebuild_sir::lift::Lifted::desc_uses`): what `execcheck` builds a
+    /// heap from.
+    pub uses: Vec<rebuild_sir::lift::res::DescUse>,
 }
 
 /// Why a program was not assembled; `body` is the lifted text so far (for `REBUILD_TRANSLATE_DUMP`).
@@ -97,8 +100,10 @@ pub fn lift_hlsl(p: &NativeProgram, isg1: &[u8], osg1: &[u8], v1: bool) -> Resul
     let code = p.patched_code();
     let insts = gfx10::decode(&code).map_err(|_| Refused::new("patched code does not decode"))?;
     let wave64 = p.wave64;
-    // v1 gets the code bytes too: data embedded after the program (read through s_getpc_b64)
-    let run = |st| if v1 { lift::lift_program_code(&insts, &code, st, Some(bind), wave64) } else { lift::lift_stage(&insts, st, Some(bind)) };
+    // how console lanes map to host lanes, by the program's wave class (agnostic programs: as before); v1 gets
+    // the code bytes too: data embedded after the program (read through s_getpc_b64)
+    let wave = wave_of(p, &insts);
+    let run = |st| if v1 { lift::lift_program_full(&insts, &code, st, Some(bind), wave64, wave) } else { lift::lift_stage(&insts, st, Some(bind)) };
     // compute programs have no signatures
     let sig = |b: &[u8]| if stage == Stage::Cs { Ok(Vec::new()) } else { signature::parse(b) };
     let (Ok(isg1), Ok(osg1)) = (sig(isg1), sig(osg1)) else { return Err(Refused::new("signature unreadable")) };
@@ -125,7 +130,7 @@ pub fn lift_hlsl(p: &NativeProgram, isg1: &[u8], osg1: &[u8], v1: bool) -> Resul
     let src = result.map_err(|reason| Refused { reason, body: l.body.clone() })?;
     let top_dword = l.live_in.iter().filter(|s| !bind.is_heap_base(**s)).filter_map(|s| bind.user_dword(*s)).max().map(u32::from);
     let compare = l.immediate_compare.iter().filter(|k| **k < 32).fold(0u32, |m, k| m | 1 << k);
-    Ok(Hlsl { stage, src, samplers: Samplers { words: l.immediate_samplers, compare, top_dword: None }, top_dword })
+    Ok(Hlsl { stage, src, samplers: Samplers { words: l.immediate_samplers, compare, top_dword: None }, top_dword, uses: l.desc_uses })
 }
 
 /// DXC processes this process runs at once, at most (the owner's rule: the machine stays responsive).
@@ -216,16 +221,22 @@ pub fn native_of(bytes: &[u8]) -> Result<(NativeProgram, Vec<u8>, Vec<u8>), Stri
     Ok((p, part(FourCC::ISG1), part(FourCC::OSG1)))
 }
 
-/// Refuses what `translate v1` refuses before lifting: undecodable code, and wave-dependent programs.
+/// The wave mapping of a program (`rebuild_sir::lift::Wave::choose`): agnostic programs stay one console lane per
+/// host lane; wave-wide ones run native wave32, as a partly filled wave64 (graphics) or doubled (compute).
+pub fn wave_of(p: &NativeProgram, insts: &[gfx10::Instruction]) -> rebuild_sir::lift::Wave {
+    let class = features::analyse(p, &mut Findings::default()).class();
+    rebuild_sir::lift::Wave::choose(class, p.wave64, matches!(p.io, StageIo::Cs(_)), insts)
+}
+
+/// Refuses what `translate v1` refuses before lifting: undecodable code. Every wave class is lifted (wave-wide
+/// programs through `rebuild_sir::lift::wave`); a program the lifter cannot finish is refused there.
 pub fn check_kind(p: &NativeProgram) -> Result<(), String> {
     let row = features::analyse(p, &mut Findings::default());
     if let Some(e) = &row.decode_error {
         return Err(format!("does not decode: {e}"));
     }
-    match row.class() {
-        WaveClass::Agnostic => Ok(()),
-        c => Err(format!("{} ({}, first trigger {})", c.name(), if p.wave64 { "wave64" } else { "wave32" }, row.wide_reason.unwrap_or("v_readfirstlane_b32"))),
-    }
+    let _: WaveClass = row.class();
+    Ok(())
 }
 
 /// The layout of a compiled program, refusing user-data reads past the root constants.

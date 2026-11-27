@@ -30,6 +30,7 @@ pub mod exports;
 #[cfg(windows)]
 pub mod modules;
 pub mod physical;
+pub mod overlap;
 pub mod pipeline;
 pub mod registry;
 pub mod present;
@@ -59,6 +60,9 @@ pub enum Tier {
 pub const OVERRIDES: &[(&str, &str)] = &[
     // the console's device type: the registry value OEM\ConsoleMode (registry.rs)
     ("RegOpenKeyW", "registry"),
+    // traced only with REBUILD_TRACE_READS (winfiles::trace); otherwise the host's
+    ("ReadFile", "files (trace)"),
+    ("SetFilePointerEx", "files (trace)"),
     ("RegOpenKeyExW", "registry"),
     ("RegQueryValueExW", "registry"),
     ("RegGetValueW", "registry"),
@@ -226,6 +230,11 @@ pub mod host {
             if let (super::Tier::Override, Some(n)) = (tier, name) {
                 if let Some(ours) = crate::modules::override_export(n) {
                     return Some(ours);
+                }
+                // listed as an override but none is built (or it is off, like the read tracer): the host's, not a
+                // trap thunk (deepdive.md item 4)
+                if f.is_some() {
+                    return f;
                 }
             }
             if let (super::Tier::ConsoleDll | super::Tier::ConsoleFunction, Some(n)) = (tier, name) {

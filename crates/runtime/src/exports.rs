@@ -128,6 +128,7 @@ pub extern "system" fn XMemVirtualAlloc(base: *mut c_void, size: usize, kind: u3
                     eprintln!("xmem      placeholder reserve failed: size {size:#x}: {}", std::io::Error::last_os_error());
                 } else {
                     s.xmem.record(Region { base: a, size: size as u64, flags, protect });
+                    crate::overlap::alloc("XMemVirtualAlloc placeholder", a, size as u64);
                 }
                 return a as *mut c_void;
             }
@@ -139,7 +140,11 @@ pub extern "system" fn XMemVirtualAlloc(base: *mut c_void, size: usize, kind: u3
                 return base;
             }
         }
-        host::virtual_alloc(&mut s.xmem, base as u64, size as u64, kind, flags, protect) as *mut c_void
+        let a = host::virtual_alloc(&mut s.xmem, base as u64, size as u64, kind, flags, protect);
+        if base.is_null() || kind & MEM_RESERVE.0 != 0 {
+            crate::overlap::alloc("XMemVirtualAlloc", a, size as u64);
+        }
+        a as *mut c_void
     })
 }
 
@@ -175,7 +180,9 @@ pub extern "system" fn XMemAllocDefault(size: usize, attributes: u64) -> *mut c_
     with(|s| {
         let State { xmem, heap, heap32, .. } = s;
         let h = if attributes & ALLOC_32BIT != 0 { heap32 } else { heap };
-        h.alloc(xmem, size as u64, align) as *mut c_void
+        let a = h.alloc(xmem, size as u64, align);
+        crate::overlap::alloc("XMemAllocDefault", a, size as u64);
+        a as *mut c_void
     })
 }
 
@@ -183,6 +190,7 @@ pub extern "system" fn XMemFreeDefault(address: *mut c_void, attributes: u64) {
     with(|s| {
         let State { xmem, heap, heap32, .. } = s;
         let h = if attributes & ALLOC_32BIT != 0 { heap32 } else { heap };
+        crate::overlap::free(address as u64);
         h.free(xmem, address as u64);
     })
 }
@@ -249,6 +257,7 @@ pub extern "system" fn XMemFreePhysicalPages(n: usize, pages: *const usize) -> B
 /// Map `n` frames contiguously at `address`; a null `pages` unmaps the range instead.
 pub extern "system" fn XMemMapPhysicalPages(address: *mut c_void, n: usize, pages: *const usize) -> *mut c_void {
     let base = address as u64;
+    crate::overlap::map("map", base, n, (!pages.is_null() && n > 0).then(|| unsafe { *pages }));
     let ok = with(|s| {
         (0..n).all(|i| {
             let at = base + (i * FRAME) as u64;
@@ -274,14 +283,31 @@ pub extern "system" fn XMemMapPhysicalPagesScatter(addresses: *const *mut c_void
     if addresses.is_null() {
         return BOOL(0);
     }
+    if n > 0 {
+        crate::overlap::map("scatter", unsafe { *addresses } as u64, n, (!pages.is_null()).then(|| unsafe { *pages }));
+        if crate::overlap::on() && !pages.is_null() {
+            let first = unsafe { *pages };
+            let at = unsafe { *addresses } as u64;
+            let pairs: Vec<String> = (0..n.min(6)).map(|i| unsafe { format!("{:#x}->{:#x}", *addresses.add(i) as u64, *pages.add(i)) }).collect();
+            let raw: Vec<String> = (0..8).map(|i| unsafe { format!("{:#x}", *(pages as *const u32).add(i)) }).collect();
+            eprintln!("scatter   n {n}: {} | pages as u32: {}", pairs.join(" "), raw.join(" "));
+            let already = with(|s| s.physical.mapped_at(first));
+            if let Some(&other) = already.iter().find(|&&a| a != at) {
+                eprintln!("alias     frame {first:#x} mapped at {at:#x} is already mapped at {other:#x}");
+                let _ = crate::overlap::ALIAS.compare_exchange(0, other, std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
     let ok = with(|s| {
         (0..n).all(|i| {
             let at = unsafe { *addresses.add(i) } as u64;
-            if pages.is_null() {
+            // a null array, or page 0 in it, unmaps that address (the title writes 0 for "no page")
+            let page = if pages.is_null() { 0 } else { unsafe { *pages.add(i) } };
+            if page == 0 {
                 s.physical.unmap(at);
                 true
             } else {
-                s.physical.map(at, unsafe { *pages.add(i) })
+                s.physical.map(at, page)
             }
         })
     });
@@ -311,11 +337,18 @@ pub extern "system" fn VirtualAlloc(base: *mut c_void, size: usize, kind: u32, p
     let gpu = protect & !xmem::HOST_PROTECTION != 0;
     with(|s| {
         let flags = if gpu { GRAPHICS } else { 0 };
-        host::virtual_alloc(&mut s.xmem, base as u64, size as u64, kind, flags, protect) as *mut c_void
+        let a = host::virtual_alloc(&mut s.xmem, base as u64, size as u64, kind, flags, protect);
+        if base.is_null() || kind & MEM_RESERVE.0 != 0 {
+            crate::overlap::alloc("VirtualAlloc", a, size as u64);
+        }
+        a as *mut c_void
     })
 }
 
 pub extern "system" fn VirtualFree(base: *mut c_void, size: usize, kind: u32) -> BOOL {
+    if kind & 0x8000 != 0 {
+        crate::overlap::free(base as u64); // MEM_RELEASE
+    }
     BOOL(with(|s| host::virtual_free(&mut s.xmem, base as u64, size as u64, kind)) as i32)
 }
 
@@ -443,7 +476,39 @@ unsafe extern "system" fn serialize_versioned_root_signature(desc: *const u8, bl
         CONSOLE_ROOT_FLAGS.fetch_or(flags & !HOST_ROOT_FLAGS, std::sync::atomic::Ordering::Relaxed);
         copy[0x28..0x2c].copy_from_slice(&(flags & HOST_ROOT_FLAGS).to_le_bytes());
     }
-    unsafe { host(copy.as_ptr(), blob, errors) }
+    // ask for the host's error text ourselves, so a refusal can be named even when the title passes no `errors`
+    let mut own_errors: *mut c_void = std::ptr::null_mut();
+    let errs = if errors.is_null() { &mut own_errors as *mut *mut c_void } else { errors };
+    let hr = unsafe { host(copy.as_ptr(), blob, errs) };
+    if hr < 0 {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+            let version = u32::from_le_bytes(copy[0..4].try_into().unwrap());
+            let params = u32::from_le_bytes(copy[8..12].try_into().unwrap());
+            let samplers = u32::from_le_bytes(copy[0x18..0x1c].try_into().unwrap());
+            let mut text = String::new();
+            let e = unsafe { *errs };
+            if !e.is_null() {
+                // ID3DBlob: GetBufferPointer (slot 3), GetBufferSize (slot 4)
+                unsafe {
+                    let vt = *(e as *const *const usize);
+                    let ptr: unsafe extern "system" fn(*mut c_void) -> *const u8 = std::mem::transmute(*vt.add(3));
+                    let len: unsafe extern "system" fn(*mut c_void) -> usize = std::mem::transmute(*vt.add(4));
+                    text = String::from_utf8_lossy(std::slice::from_raw_parts(ptr(e), len(e))).trim_end_matches('\0').trim().to_string();
+                }
+            }
+            eprintln!("rootsig   serialize refused {hr:#x}: version {version}, {params} parameters, {samplers} static samplers, flags {flags:#x}: {text}");
+        }
+    }
+    if !own_errors.is_null() {
+        // release our own error blob (IUnknown::Release, slot 2)
+        unsafe {
+            let vt = *(own_errors as *const *const usize);
+            let release: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(*vt.add(2));
+            release(own_errors);
+        }
+    }
+    hr
 }
 
 /// Our implementation of a console-only function, by DLL and name.

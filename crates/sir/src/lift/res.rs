@@ -51,7 +51,7 @@ impl Bindings<'_> {
 }
 
 /// Which heap a loaded descriptor indexes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Heap {
     Resource,
     Sampler,
@@ -66,7 +66,69 @@ pub struct Desc {
     pub user_data: u8,
 }
 
+/// The host view a descriptor is read as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum View {
+    /// `ConstantBuffer<SirCb>`
+    Cbv,
+    /// `ByteAddressBuffer`
+    Raw,
+    /// `RWByteAddressBuffer`
+    RwRaw,
+    /// `Buffer<float4>`
+    Typed,
+    /// `RWBuffer<float4>`
+    RwTyped,
+    /// `Texture*<float4>` by the console's `dim` (0 1D, 1 2D, 2 3D, 3 cube, 4 1D array, 5 2D array)
+    Tex(u8),
+    /// `RWTexture*<float4>` by the console's `dim`
+    RwTex(u8),
+    /// `SamplerState`
+    Sampler,
+    /// `SamplerComparisonState`
+    SamplerCmp,
+}
+
+/// One descriptor read ([`super::Lifted::desc_uses`]): the table it comes from, its byte offset in that table
+/// when that is a constant (`None`: computed by the program), and the view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DescUse {
+    pub heap: Heap,
+    pub user_data: u8,
+    pub byte_off: Option<i32>,
+    pub view: View,
+    /// When the access also reads the descriptor's shadow-table entry (stride and record count): where in the
+    /// record it ends (the instruction's constant offset plus the bytes it moves, at most 255; else 0).
+    pub shadow: u8,
+}
+
 impl Lifter<'_> {
+    /// Records that the descriptor whose heap index SGPR `s` holds is read as `view`.
+    fn use_desc(&mut self, s: u8, view: View, shadow: u8) {
+        if let Some(d) = self.f.descs.get(&s) {
+            let u = DescUse { heap: d.heap, user_data: d.user_data, byte_off: self.f.desc_off.get(&s).copied(), view, shadow };
+            self.out.desc_uses.push(u);
+        }
+    }
+
+    /// The kind of view the descriptor whose heap index SGPR `s` holds is, in the title's root signature: the
+    /// range of its table that starts last at or before its offset (known only for a constant offset).
+    fn desc_kind(&self, s: u8) -> Option<ResourceType> {
+        let (d, off, bind) = (self.f.descs.get(&s)?, *self.f.desc_off.get(&s)?, self.bind?);
+        let dword = u32::try_from(off).ok()? / 4;
+        bind.used
+            .iter()
+            .filter(|u| u.root == RootType::Table && u.user_data == d.user_data && u.table_offset_dwords <= dword)
+            .max_by_key(|u| u.table_offset_dwords)
+            .map(|u| u.kind)
+    }
+
+    /// The descriptor is a UAV: a load through it reads the host's UAV, so it is declared as one (a UAV
+    /// descriptor read as an SRV type is undefined).
+    fn desc_is_uav(&self, s: u8) -> bool {
+        self.desc_kind(s) == Some(ResourceType::Uav)
+    }
+
     /// `s_load_dwordx4/x8` of a descriptor from a table: the destination's first SGPR becomes the heap index.
     pub(super) fn smem(&mut self, name: &str, d: &Decoded) -> Option<()> {
         let bind = self.bind?;
@@ -149,6 +211,8 @@ impl Lifter<'_> {
             }
         };
         let stride = if heap == Heap::Sampler { 16 } else { 32 };
+        // the offset in the table is a constant when the base is the table's own user SGPR
+        let const_off = if reg.is_none() && matches!(p.root, RootType::Table | RootType::ResourceHeap | RootType::SamplerHeap) { self.table_offset(base).map(|k| k.wrapping_add(off)) } else { None };
         self.out.sgprs.insert(base);
         if self.f.stale.contains(&base) {
             self.why = Some("a lane mask read as data".into());
@@ -161,6 +225,9 @@ impl Lifter<'_> {
         self.wrote(dst);
         let _ = writeln!(self.out.body, "    s{dst} = (uint)((int)s{base} + {byte_off}) / {stride}u;");
         self.f.descs.insert(dst, Desc { heap, dwords, user_data: p.user_data });
+        if let Some(o) = const_off {
+            self.f.desc_off.insert(dst, o);
+        }
         for k in 1..dwords {
             self.wrote(dst + k);
             self.f.desc_words.insert(dst + k);
@@ -186,7 +253,14 @@ impl Lifter<'_> {
             return None;
         }
         let bind = self.bind?;
-        let cbv = bind.used.iter().any(|u| u.user_data == desc.user_data && u.kind == ResourceType::Cbv);
+        // a constant buffer when its range is one (an SRV range of the same table is a raw buffer); with no known
+        // offset, when the table holds any constant buffer
+        let cbv = match self.desc_kind(base) {
+            Some(k) => k == ResourceType::Cbv,
+            None => bind.used.iter().any(|u| u.user_data == desc.user_data && u.kind == ResourceType::Cbv),
+        };
+        let uav = !cbv && self.desc_is_uav(base);
+        self.use_desc(base, if cbv { View::Cbv } else if uav { View::RwRaw } else { View::Raw }, 0);
         let dw = off as u32 / 4;
         let _ = writeln!(self.out.body, "    {{");
         // with a register offset the dword index is dynamic: c.d[i >> 2][i & 3]
@@ -198,7 +272,9 @@ impl Lifter<'_> {
             self.out.uses_cb = true;
             let _ = writeln!(self.out.body, "        ConstantBuffer<SirCb> c = ResourceDescriptorHeap[{}];", alternate(base));
         } else {
-            let _ = writeln!(self.out.body, "        ByteAddressBuffer c = ResourceDescriptorHeap[s{base}]; uint sir_ld = {};", lead(base));
+            // a UAV is read through its own view (the alternate: a raw UAV over the same 16-byte aligned start)
+            let (rw, at) = if uav { ("RW", alternate(base)) } else { ("", format!("s{base}")) };
+            let _ = writeln!(self.out.body, "        {rw}ByteAddressBuffer c = ResourceDescriptorHeap[{at}]; uint sir_ld = {};", lead(base));
         }
         for k in 0..n {
             let s = dst + k;
@@ -283,6 +359,17 @@ impl Lifter<'_> {
         }
         let soff = self.usrc(d, "soffset")?;
         let (idxen, offen) = (d.get("idxen")? == 1, d.get("offen")? == 1);
+        let uav = store || self.desc_is_uav(rsrc);
+        // a load through a constant buffer's descriptor (the title's root signature says CBV) reads the host's CBV
+        let cbv = !store && self.desc_kind(rsrc) == Some(ResourceType::Cbv);
+        let view = if cbv {
+            View::Cbv
+        } else if uav {
+            View::RwRaw
+        } else {
+            View::Raw
+        };
+        self.use_desc(rsrc, view, if idxen { (d.get("offset")? + u32::from(n) * 4).min(255) as u8 } else { 0 });
         let vaddr = d.get("vaddr")? as u16;
         let mut addr = format!("{}u + {soff}", d.get("offset")?);
         // with idxen, vaddr is the index and vaddr + 1 the offset (when offen)
@@ -321,7 +408,20 @@ impl Lifter<'_> {
             let _ = writeln!(self.out.body, "    {{{sh} RWByteAddressBuffer b = ResourceDescriptorHeap[sh.z]; if ({cond}) b.{st}({addr}, {value}); }}");
             return Some(());
         }
-        let _ = writeln!(self.out.body, "    {{ ByteAddressBuffer b = ResourceDescriptorHeap[s{rsrc}];{sh} uint{ty} r = b.{load}({addr});{guard}");
+        if cbv {
+            // dword k of the access at byte a: row a / 16, component a / 4 % 4
+            self.out.uses_cb = true;
+            let parts: Vec<String> = (0..n).map(|k| format!("c.d[(a + {}u) >> 4][((a + {}u) >> 2) & 3]", 4 * k, 4 * k)).collect();
+            let r = if n == 1 { parts[0].clone() } else { format!("uint{n}({})", parts.join(", ")) };
+            let _ = writeln!(self.out.body, "    {{{sh} ConstantBuffer<SirCb> c = ResourceDescriptorHeap[sh.z]; uint a = {addr}; uint{ty} r = {r};{guard}");
+        } else {
+            // a UAV is read through its own view, the alternate
+            if uav {
+                let _ = writeln!(self.out.body, "    {{{sh} RWByteAddressBuffer b = ResourceDescriptorHeap[sh.z]; uint{ty} r = b.{load}({addr});{guard}");
+            } else {
+                let _ = writeln!(self.out.body, "    {{ ByteAddressBuffer b = ResourceDescriptorHeap[s{rsrc}];{sh} uint{ty} r = b.{load}({addr});{guard}");
+            }
+        }
         for k in 0..n {
             let e = if n == 1 { "r".to_string() } else { format!("r.{}", ["x", "y", "z", "w"][k as usize]) };
             self.vwrite_raw(vdata + k, e);
@@ -557,15 +657,23 @@ impl Lifter<'_> {
         } else {
             "0u".to_string()
         };
+        let uav = store || self.desc_is_uav(rsrc);
+        self.use_desc(rsrc, if uav { View::RwTyped } else { View::Typed }, 0);
         let ch = ["x", "y", "z", "w"];
+        // d16: the data are halves, two to a register (component k in register k / 2, half k % 2); the host view
+        // converts the format to and from float, and the halves are that float's f16 bits
+        let d16 = name.contains("_d16_");
         if store {
             let vals: Vec<String> = (0..4u16)
                 .map(|k| {
-                    if k < n {
+                    if k >= n {
+                        "0.0f".into()
+                    } else if d16 {
+                        self.out.vgprs.insert(vdata + k / 2);
+                        format!("f16tof32(v{} >> {}u)", vdata + k / 2, 16 * (k % 2))
+                    } else {
                         self.out.vgprs.insert(vdata + k);
                         format!("asfloat(v{})", vdata + k)
-                    } else {
-                        "0.0f".into()
                     }
                 })
                 .collect();
@@ -580,9 +688,25 @@ impl Lifter<'_> {
             );
             return Some(());
         }
-        let _ = writeln!(self.out.body, "    {{ Buffer<float4> b = ResourceDescriptorHeap[{}]; float4 r = b[{el}];", alternate(rsrc));
-        for k in 0..n {
-            self.vwrite_raw(vdata + k, format!("asuint(r.{})", ch[k as usize]));
+        // the typed view (RW for a UAV) is the alternate
+        let rw = if uav { "RW" } else { "" };
+        let _ = writeln!(self.out.body, "    {{ {rw}Buffer<float4> b = ResourceDescriptorHeap[{}]; float4 r = b[{el}];", alternate(rsrc));
+        if d16 {
+            // a register with one half loaded keeps its other half (as the console's d16 loads do)
+            for r in 0..n.div_ceil(2) {
+                let lo = format!("f32tof16(r.{})", ch[2 * r as usize]);
+                let e = if 2 * r + 1 < n {
+                    format!("{lo} | (f32tof16(r.{}) << 16)", ch[2 * r as usize + 1])
+                } else {
+                    self.out.vgprs.insert(vdata + r);
+                    format!("(v{} & 0xffff0000u) | {lo}", vdata + r)
+                };
+                self.vwrite_raw(vdata + r, e);
+            }
+        } else {
+            for k in 0..n {
+                self.vwrite_raw(vdata + k, format!("asuint(r.{})", ch[k as usize]));
+            }
         }
         self.out.body.push_str("    }\n");
         Some(())
@@ -628,6 +752,8 @@ impl Lifter<'_> {
             3 => ("TextureCube", "", 3),
             _ => return None, // MSAA: next step
         };
+        // a load through a UAV descriptor reads the host's UAV
+        let ty = if name == "image_load" && !rw.is_empty() && self.desc_is_uav(rsrc) { rw } else { ty };
         let vaddr = d.get("vaddr")? as u16;
         let vdata = d.get("vdata")? as u16;
         let dmask = d.get("dmask")? as u8;
@@ -777,9 +903,15 @@ impl Lifter<'_> {
                 // a gather returns four texels: all four channels are written
                 // a heap sampler is declared here; an immediate one is global
                 let decl = match s.strip_prefix("sir_smp") {
-                    Some(n) => format!(" SamplerState {s} = SamplerDescriptorHeap[s{n}];"),
+                    Some(n) => {
+                        if let Ok(k) = n.parse() {
+                            self.use_desc(k, View::Sampler, 0);
+                        }
+                        format!(" SamplerState {s} = SamplerDescriptorHeap[s{n}];")
+                    }
                     None => String::new(),
                 };
+                self.use_desc(rsrc, View::Tex(d.get("dim")? as u8), 0);
                 let _ = writeln!(
                     self.out.body,
                     "    {{ {ty}<float4> t = ResourceDescriptorHeap[s{rsrc}];{decl} float4 r = t.Gather{ch}({s}, {c}{offset});"
@@ -828,6 +960,7 @@ impl Lifter<'_> {
                     }
                 }).collect();
                 let guard = if self.f.narrowed { "if (ex) " } else { "" };
+                self.use_desc(rsrc, View::RwTex(d.get("dim")? as u8), 0);
                 let _ = writeln!(self.out.body, "    {{ {rw}<float4> t = ResourceDescriptorHeap[s{rsrc}]; {guard}t[{c}] = float4({}); }}", vals.join(", "));
                 return Some(());
             }
@@ -836,14 +969,22 @@ impl Lifter<'_> {
         let smp = match (result.find("sir_smp"), result.find("sir_cmp")) {
             (Some(i), _) => {
                 let n: String = result[i + 7..].chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(k) = n.parse() {
+                    self.use_desc(k, View::Sampler, 0);
+                }
                 format!(" SamplerState sir_smp{n} = SamplerDescriptorHeap[s{n}];")
             }
             (None, Some(i)) => {
                 let n: String = result[i + 7..].chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(k) = n.parse() {
+                    self.use_desc(k, View::SamplerCmp, 0);
+                }
                 format!(" SamplerComparisonState sir_cmp{n} = SamplerDescriptorHeap[s{n}];")
             }
             _ => String::new(),
         };
+        let dim = d.get("dim")? as u8;
+        self.use_desc(rsrc, if ty.starts_with("RW") { View::RwTex(dim) } else { View::Tex(dim) }, 0);
         let _ = writeln!(self.out.body, "    {{ {ty}<float4> t = ResourceDescriptorHeap[s{rsrc}];{smp} float4 r = {result};");
         let guard = if self.f.narrowed { "if (ex) " } else { "" };
         let chans: Vec<&str> = (0..4usize).filter(|c| dmask >> c & 1 == 1).map(|c| ["x", "y", "z", "w"][c]).collect();

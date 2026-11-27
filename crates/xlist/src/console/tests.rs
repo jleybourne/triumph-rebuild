@@ -55,7 +55,7 @@ const MEM_HOST: u64 = 0x7_0000_0000;
 
 impl PipelineSource for TestHost {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
-        (console != BAD).then_some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: 0x5160 as Raw, compute: false, user: None })
+        (console != BAD).then_some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: 0x5160 as Raw, compute: false, user: None, topology: 0 })
     }
 }
 
@@ -632,8 +632,8 @@ impl PipelineSource for SeamHost {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
         let (g, c) = seam_maps();
         match console {
-            SEAM_GFX | SEAM_OTHER_GFX => Some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: LIB_GFX_ROOT, compute: false, user: Some(g) }),
-            SEAM_CS => Some(HostPipeline { pso: 0x8000_6C00 as Raw, root_signature: LIB_CS_ROOT, compute: true, user: Some(c) }),
+            SEAM_GFX | SEAM_OTHER_GFX => Some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: LIB_GFX_ROOT, compute: false, user: Some(g), topology: 0 }),
+            SEAM_CS => Some(HostPipeline { pso: 0x8000_6C00 as Raw, root_signature: LIB_CS_ROOT, compute: true, user: Some(c), topology: 0 }),
             _ => None,
         }
     }
@@ -851,7 +851,7 @@ impl BenchHost {
 impl PipelineSource for BenchHost {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
         let i = self.pipelines.get(console as u64)?;
-        Some(HostPipeline { pso: self.pso[i as usize] as Raw, root_signature: self.root as Raw, compute: false, user: self.user })
+        Some(HostPipeline { pso: self.pso[i as usize] as Raw, root_signature: self.root as Raw, compute: false, user: self.user, topology: 0 })
     }
 }
 
@@ -1210,5 +1210,25 @@ fn card_cost_per_draw() {
     for (l, a) in pairs {
         assert_eq!(release(l), 0);
         assert_eq!(release(a), 0);
+    }
+}
+
+#[test]
+fn lists_recording_at_once_on_one_allocator_get_their_own_host_allocators() {
+    let h = Arc::new(TestHost::default());
+    let (l1, a, _backend) = fake_list(h);
+    // a second list on the same console allocator while the first still records (the console allows it)
+    let l2 = create_list(0, a, std::ptr::null_mut()).expect("second list");
+    let pool = |a: Raw| alloc::state(a).unwrap().pool.lock().unwrap().iter().map(|(x, h)| (x.as_raw() as usize, *h)).collect::<Vec<_>>();
+    let p = pool(a);
+    assert_eq!(p.len(), 2, "two host allocators");
+    assert_ne!(p[0].0, p[1].0);
+    assert!(p.iter().all(|(_, h)| *h != 0), "both held");
+    // closing the first frees its host allocator; a third list reuses it instead of making another
+    unsafe { method::<unsafe extern "system" fn(Raw) -> HRESULT>(l1, 0x48)(l1) };
+    let l3 = create_list(0, a, std::ptr::null_mut()).expect("third list");
+    assert_eq!(pool(a).len(), 2, "reused, not grown");
+    for l in [l1, l2, l3] {
+        release(l);
     }
 }
