@@ -1,7 +1,7 @@
 # Progress
 
 ```
-work toward 30 fps   [████████░░░░░░░░░░░░]  38 %
+work toward 30 fps   [████████░░░░░░░░░░░░]  40 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (fork reference: 25,694 translated, 7 pipelines refused)
 launcher track       [███░░░░░░░░░░░░░░░░░]  1 / 7 steps (C1 settings registry; the mods tab's file system is merged); does not count toward the fps %
 measured fps         none yet — the title has not rendered a frame on this code
@@ -25,10 +25,10 @@ second row and is the number that counts.
 | 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 25 % | 3.75 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; decoder in lane `shader` |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
-| 7 | upscaler: DLSS + FSR | 10 | 0 % | 0 | plan corrected: the upscale pass is found by bindings; lowering the internal resolution is its own task |
+| 7 | upscaler: DLSS + FSR | 10 | 20 % | 2.0 | DLSS standalone through Streamline on a synthetic scene (PR #4); FSR waits for the SDK; wiring to the title's pass todo |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **37.8 ≈ 38 %** | |
+| | **total** | **100** | | **39.8 ≈ 40 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -81,6 +81,25 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Lane `upscale` merged: DLSS runs standalone; three more helper lanes
+
+```
+[████████░░░░░░░░░░░░]  40 %   (was 38 %: +2.0 Build 7, DLSS standalone)
+shaders     0 / 25,694
+measured fps   none yet
+```
+
+- **Merged PR #4 (`upscale`):** one `Upscaler` interface in the layer's own convention, a synthetic scene
+  (jitter, exact motion vectors, normal or reversed depth, a supersampled truth image), and **DLSS through
+  Streamline 2.14.16**. Streamline is declared from its MIT headers and loaded at run time; nothing NVIDIA's is
+  committed. 0 NaN, 0 black frames, better than bilinear on every check. FSR 3.1 waits for the SDK download,
+  which is approved (section 10).
+- **Reviewed:** no binaries, DLLs or images committed; the DLSS DLL comes from `D:\tools\dlss` at run time.
+- **More work for helpers** (`secondary-agent.md`): lane `files` (the 15 file overrides over `vfs`), lane `xg`
+  (the console texture layout), and loader L5 (names the title looks up through `GetProcAddress`). Lanes
+  `audio` and `dstorage` are waiting to start.
+- **114 tests** in the workspace.
 
 ### 2026-11-27 — Build 3: the title's memory: `xmem` placement and physical pages, which the GPU reads in place
 

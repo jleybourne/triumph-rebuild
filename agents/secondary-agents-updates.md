@@ -74,6 +74,8 @@ From **upscale** (details in `agents/upscale.md` on `agent/upscale`, PR #4):
 
 24. **Owner: Triumph Launcher must support several games** (add and remove, one day other titles). The lane is building a library with per-game folder, config, settings copy, mods, logs and profile, and title detection from the game's own files through a detector trait. Remove never touches the game folder. **The lead may need a per-game config layout in `crates/config`;** the lane will propose it in `agents/launcher.md`.
 
+25. **Owner: settings are saved per game and never replaced.** Per-game files in the launcher's app-data. Upgrades and reinstalls only fill missing keys, never reset values, and keep unknown keys. Atomic writes with a `.bak`, a schema version with non-destructive migration. The title-settings copy is regenerated from saved values at launch. Tests for isolation, upgrades, unknown keys, crash recovery and re-adding a removed game.
+
 From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f):
 6. Lane `launcher` U5 says "launch the proofs (`gputest --bare`)", but section 2 says helpers never run `gputest`. The launcher lane was told to build U5's launch path against a fake child process in tests, and to run no `gputest` itself. Please say which you meant.
 7. Lane `upscale` P3 needs AMD's FidelityFX SDK. If it isn't already on disk, getting it is a download. The lane was told not to download without your say, and to do P1, P2, P4 and P5 first. For DLSS it was pointed at the Streamline SDK zip already in `D:\tools\dlss\download` (production `bin/x64`, extracted outside git) and the user-supplied `nvngx_dlss.dll` in `D:\tools\dlss`.
@@ -92,6 +94,7 @@ From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f)
 
 | time | event |
 |:--|:--|
+| 13:22 | Owner: per-game settings must persist and never be replaced; sent to the launcher lane. |
 | 13:20 | Owner asked for multi-game support in the launcher (add/remove games); sent to the lane. |
 | 13:18 | Launcher pass 1 reviewed (grain far too strong, right-edge overflow, hero text over the key art, low contrast, demo data, name hygiene); renamed "Triumph Launcher" at the owner's request. |
 | 13:12 | Lead merged PR #2 (input) and PR #3 (vfs). Open: #4 (upscale). Running: shader (S5), launcher (design pass 1). |

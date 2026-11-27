@@ -26,7 +26,7 @@ Read, in this order: `README.md`, `plan.md` (the six decisions), `tasks.md` (you
 ```powershell
 cd D:\Developer\triumph-rebuild
 git fetch origin
-git worktree add ..\triumph-rebuild-<lane> -b agent/<lane> origin/master    # <lane> = shader, launcher, upscale, audio or dstorage (loader, vfs, input: merged)
+git worktree add ..\triumph-rebuild-<lane> -b agent/<lane> origin/master    # <lane> = shader, launcher, upscale, audio, dstorage, files, xg, or loader (L5)
 cd ..\triumph-rebuild-<lane>
 cargo test --release                                                         # must be green before you change anything
 ```
@@ -164,6 +164,44 @@ is in the console's tiled texture layout (`docs/design/gpu-textures.md` on the f
 | D3 | zlib decompression (a Rust crate under MIT/Apache/zlib is fine) | round-trip and throughput number in `agents/dstorage.md` |
 | D4 | BCPack: what it is and whether it can be decoded on the CPU or must be on the GPU; the fork's notes first | a written answer with evidence; a decoder only if it is plain code with no performance cost on the GPU side |
 
+### Lane `files` — the 15 file overrides (Build 3 piece)
+
+New crate `crates/winfiles` (package `rebuild-winfiles`). No GPU. Read `runs/build3-runtime-census.md`. The title
+imports 15 host file functions whose paths must go through the overlay file system (`crates/vfs`, merged):
+`CreateFileW`, `CreateFile2`, `CreateFileA`, `DeleteFileW`, `DeleteFileA`, `CreateDirectoryW`, `CreateDirectoryA`,
+`RemoveDirectoryW`, `MoveFileExW`, `GetFileAttributesW`/`A`, `GetFileAttributesExW`/`A`, `FindFirstFileW`/`ExW`/`A`/`ExA`,
+`GetFullPathNameW`/`A`, `GetDiskFreeSpaceExW`, `Get`/`SetCurrentDirectoryW` (the list in `crates/runtime/src/lib.rs`
+`OVERRIDES`, "files").
+
+| # | task | closes when |
+|:--:|:--|:--|
+| F1 | each as an `extern "system"` function with the host's exact signature, translating console paths through `vfs` and returning **host handles** (so `ReadFile`, `CloseHandle` and the rest stay the host's) | unit tests per function |
+| F2 | behaviour matches the host's on the same files: error codes (`GetLastError`), attribute bits, find-data structures, `MoveFileExW` flags | a test calls the override and the host function side by side on a temporary tree and compares |
+| F3 | a path the title uses that `vfs` does not know is logged as a discovery entry, never guessed | test |
+
+The lead binds them in `crates/runtime` once merged.
+
+### Lane `xg` — the console texture layout (`xg_xs.dll`; Build 5 piece)
+
+New crate `crates/xg` (package `rebuild-xg`). No GPU at first. The title imports `XGCreateTextureComputer` and
+`XGSuggestSwizzleMode`: the console's texture layout calculator (tile modes, swizzle, mip and slice offsets). The
+fork's `docs/design/gpu-textures.md` and its texture code are the reference (read; decode-only maths may be vendored
+with credit, section 3).
+
+| # | task | closes when |
+|:--:|:--|:--|
+| X1 | the layouts the title uses (from the fork's notes and logs): which tile/swizzle modes, which formats | table in `agents/xg.md` |
+| X2 | address maths: (x, y, slice, mip) → byte offset for each mode, and the inverse | round-trip unit tests over every texel of small textures in every mode |
+| X3 | the texture computer's interface as the title calls it (vtable slots used) | named in `agents/xg.md` |
+| X4 | a CPU detiler: console layout → linear, for the formats in X1 | tested against the fork's detiled output on synthetic data |
+
+### Loader L5 — names the title looks up at run time
+
+On branch `agent/loader` (a new pull request): the GDK functions (`XGame*`, `XUser*`, `XAsync*`, `XTaskQueue*`, …) are not
+imported, so the title reaches them by `GetProcAddress`. Scan the title's images for ASCII and UTF-16 strings that look
+like API names next to the DLL names they would come from, and list them (names only) in `agents/loader-getproc.csv` with
+a confidence column. This is an early estimate of what discovery will find at run time.
+
 ### Lane `upscale` — the DLSS and FSR backends, standalone (Build 7 piece)
 
 New crate `crates/upscale` (package `rebuild-upscale`), plus a binary `apps/rebuild/src/bin/upscaletest.rs`.
@@ -208,9 +246,9 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, after xmem placement and physical pages (the GPU reads them in place)
-progress  38 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
-tests     103 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 13, input 16, vfs 18, runtime 8)
+updated   2026-11-27, after merging lane upscale (PR #4); lanes files, xg and loader L5 added
+progress  40 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
+tests     114 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 13, input 16, vfs 18, runtime 8, upscale 11)
 ```
 
 | build | state | where | proof |
@@ -226,7 +264,7 @@ tests     103 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlis
 | 6 list translation | 🔄 core built | `crates/xlist` | Build 0 (b) |
 | 7 upscaler | ⏳ (plan decision 5 corrected) | — | — |
 | 8 pacing · 9 AMD testers | ⏳ | — | — |
-| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | merged: `loader` (#1), `input` (#2), `vfs` (#3). Running: `shader`, `launcher`, `upscale`. **New, to start: `audio`, `dstorage`** | their pull requests |
+| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | merged: `loader` (#1), `input` (#2), `vfs` (#3), `upscale` P1/P2/P4/P5 (#4). Running: `shader`, `launcher`. **To start: `audio`, `dstorage`, `files`, `xg`, loader L5, upscale P3 (FSR, SDK approved)** | their pull requests |
 | launcher track | 🔄 C1 registry built; launcher app in lane `launcher` | `crates/config`, [design](docs/design/launcher.md) | 6 unit tests |
 
 ## 9. Taking over as lead
@@ -280,6 +318,10 @@ If the owner hands you the whole job, you are the lead. Read `README.md`, `plan.
 - Whether to push the fork's local `dlss-hook` branch (commit `ee0b94a3`) so the docs can link to it.
 
 ## 10. The lead's answers to "For the lead" (newest first)
+
+**2026-11-27, to lane `upscale` (PR #4, merged):** the FidelityFX SDK download is approved (see item 7 below):
+pinned version, official GPUOpen GitHub release, extracted outside git, SHA-256 recorded. Then do P3, and confirm the
+FSR column of the conventions table with the same sweep as DLSS.
 
 **2026-11-27, to lanes `input` (PR #2) and `vfs` (PR #3), both merged:**
 

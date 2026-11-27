@@ -125,7 +125,8 @@ decision 4.
 |---|---|---|
 | todo | find the title's temporal upscale pass and its inputs **by bindings** — colour, depth (2560x1440), motion vectors (2560x1440 R16G16_FLOAT), jitter and vector scale from its FSR constant block. Method 0x218 is pipeline creation, not an upscale call (fork `ee0b94a3`, local branch `dlss-hook`); plan.md decision 5 needs correcting | inputs logged and visualised for one frame |
 | todo | a way to lower the internal resolution: resizing the title's targets from the layer made it assert while loading (fork `docs/research/resolution.md`) | internal resolution below 2560x1440 with the title running |
-| todo | DLSS through NVIDIA Streamline | correct picture on the RTX 4070 Ti; internal resolution drops |
+| done | DLSS through NVIDIA Streamline, standalone (`crates/upscale`, lane `upscale`, PR #4): one `Upscaler` interface, a synthetic jittered scene with exact motion vectors, the conventions table | 0 NaN, 0 black frames; beats bilinear on every check (`agents/upscale.md`) |
+| todo | DLSS wired to the title's upscale pass (Build 7 proper) | correct picture on the RTX 4070 Ti; internal resolution drops |
 | todo | FSR through the FidelityFX SDK (driver-upgradable to FSR 4) | FSR 3.1 correct on the RTX 4070 Ti beside DLSS |
 | todo | fidelity check against a native-resolution frame, both backends | capture comparison: no black, no smearing, UI stable |
 

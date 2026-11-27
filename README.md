@@ -4,7 +4,7 @@
 built around the right memory model from the first line, aiming at 30 frames a second.</b></p>
 
 <p align="center">
-  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-38%25-yellow?style=for-the-badge"></a>
+  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-40%25-yellow?style=for-the-badge"></a>
   <a href="progress.md"><img alt="frame" src="https://img.shields.io/badge/title%20frame-not%20yet-lightgrey?style=for-the-badge"></a>
   <a href="tasks.md"><img alt="shaders" src="https://img.shields.io/badge/shaders-0%20%2F%2025%2C694-lightgrey?style=for-the-badge"></a>
   <a href="plan.md"><img alt="target" src="https://img.shields.io/badge/target-30%20fps-blue?style=for-the-badge"></a>
@@ -14,11 +14,11 @@ built around the right memory model from the first line, aiming at 30 frames a s
   <a href="https://www.rust-lang.org"><img alt="Rust" src="https://img.shields.io/badge/Rust-1.100-000000?logo=rust"></a>
   <a href="https://learn.microsoft.com/windows/win32/direct3d12/directx-12-programming-guide"><img alt="Direct3D 12" src="https://img.shields.io/badge/Direct3D-12-0078D4"></a>
   <a href="HANDOFF.md"><img alt="GPU" src="https://img.shields.io/badge/tested%20on-RTX%204070%20Ti-76B900?logo=nvidia"></a>
-  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-103%20green-brightgreen"></a>
+  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-114%20green-brightgreen"></a>
   <a href="LICENSE"><img alt="licence" src="https://img.shields.io/badge/licence-GPL--3.0--only-blue"></a>
 </p>
 
-<p align="center"><a href="progress.md"><b>Progress <code>[████████░░░░░░░░░░░░]</code> 38 %</b></a><br>
+<p align="center"><a href="progress.md"><b>Progress <code>[████████░░░░░░░░░░░░]</code> 40 %</b></a><br>
 <sub>work toward 30 fps, weighted by build step · no title frame measured yet</sub></p>
 
 <table align="center">
@@ -57,8 +57,8 @@ Measured on one machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB RAM, PCIe 3.0, Win
 | **Descriptors** | ✅ 12,027 a frame from a dirty list: 2.0 ms | no scan |
 | **Shaders** | 0 / 25,694; core proven on the card: IR → HLSL → DXC → GPU exact, wave64 on wave32 exact ([run](runs/build4-sirtest.md)) | 25,694, wave32, 0 refused |
 | **Launcher** | settings registry built (18 options, validated); desktop launcher in progress ([design](docs/design/launcher.md)) | launcher, mods, profiles, in-game menu |
-| **Upscaler** | not started; plan corrected (the title's upscale pass is found by bindings) | DLSS on NVIDIA, FSR on AMD |
-| **Tests** | 97 green (`uma` 24, `xlist` 5, `sir` 13, `config` 6, `loader` 13, `input` 16, `vfs` 18, `runtime` 8) | |
+| **Upscaler** | ✅ DLSS runs standalone through Streamline on a synthetic scene; FSR next; wiring to the title in Build 7 | DLSS on NVIDIA, FSR on AMD |
+| **Tests** | 97 green (`uma` 24, `xlist` 5, `sir` 13, `config` 6, `loader` 13, `input` 16, `vfs` 18, `runtime` 8, `upscale` 11) | |
 
 Every result is reported as **fps · ms · draws · dropped** together, with resolution and upscaler mode.
 A faster frame that draws less of the scene is not a win.
@@ -123,7 +123,7 @@ and replacing only the memory model has not been costed, and no title frame has 
 | 4 | **Shaders**: 25,694 programs, our own core, wave32, offline | the full scene, no refusals, ~10-22 ms of GPU time back | 🔄 core proven on the card |
 | 5 | **D3D12.X device, lists, descriptors, present** | a frame, and the frame line | ⏳ |
 | 6 | **List translation** on the title's threads | the CPU half of the frame | 🔄 core built |
-| 7 | **Upscaler**: find the title's pass, lower the internal resolution, DLSS + FSR | fewer pixels | ⏳ |
+| 7 | **Upscaler**: find the title's pass, lower the internal resolution, DLSS + FSR | fewer pixels | 🔄 DLSS standalone ✅ |
 | L | **Launcher, settings, mods, in-game menu** (one registry drives all three) | a proper application in front of the layer | 🔄 registry built |
 | 8 | **Frame pacing** | frame time ≈ the card's own work: **30 fps on NVIDIA** | ⏳ |
 | 9 | **AMD validation by testers** | 30 fps on AMD | ⏳ |
@@ -174,7 +174,7 @@ Full status with outcomes: **[tasks](tasks.md)** · **[progress](progress.md)**.
 Requirements: Windows 10/11 x64, a Direct3D 12 GPU with tiled resources tier 2 or higher, and Rust.
 
 ```powershell
-cargo test --release                                  # 103 tests, no GPU or game data needed
+cargo test --release                                  # 114 tests, no GPU or game data needed
 cargo run --release --bin gputest                     # the GPU writes, the CPU reads, no copy
 cargo run --release --bin gputest -- --bare           # control: never blame the machine
 cargo run --release --bin gputest -- --tiled          # Build 1: tiles, console addresses, sharing
@@ -199,7 +199,8 @@ crates/config     every option, declared once: the launcher, the layer and the i
 crates/loader     PE32+ parser, map at base, bind through a resolver; the title's import census (apps/rebuild/src/bin/imports.rs)
 crates/vfs        console paths → host: read-only package, write overlay, mods as ordered layers
 crates/input      XInput pads, keyboard stand-in pad, in-game menu input isolation
-crates/runtime    what the title's imports bind to: host, override or console-only
+crates/runtime    what the title's imports bind to: host, override or console-only; xmem; physical pages
+crates/upscale    one upscaler interface; DLSS through Streamline (FSR next); a synthetic test scene
 apps/rebuild      the launcher, gputest, uploadbench, listbench
 runs/             every measurement: a write-up and the raw output beside it
 ```
