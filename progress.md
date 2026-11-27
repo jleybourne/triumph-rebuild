@@ -1,9 +1,9 @@
 # Progress
 
 ```
-work toward 30 fps   [████████░░░░░░░░░░░░]  41 %
+work toward 30 fps   [████████░░░░░░░░░░░░]  42 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (fork reference: 25,694 translated, 7 pipelines refused)
-runtime functions    [████░░░░░░░░░░░░░░░░]  13 / 73 ours built (xmem); 624 more bind to the host directly
+runtime functions    [█████████░░░░░░░░░░░]  32 / 73 ours built (xmem, modules, memory, process); 624 more bind to the host directly
 launcher track       [███░░░░░░░░░░░░░░░░░]  1 / 7 steps (C1 settings registry; the mods tab's file system is merged); does not count toward the fps %
 measured fps         none yet — the title has not rendered a frame on this code
 baseline to beat     7.6 fps · 131.3 ms · ~4,500 draws · 356 dropped   (the layer being replaced)
@@ -22,14 +22,14 @@ second row and is the number that counts.
 | 0 | three answers before more code | 10 | 70 % | 7.0 | (a) upload **done**; (b) translation **done**: 0.43 µs a draw; (c) blocked until the title renders (moved to Build 5) |
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
-| 3 | PE loader + console runtime | 15 | 60 % | 9.0 | loader (PR #1), files (PR #3), input (PR #2) merged; runtime census (89.5 % host); `xmem` complete: placement, physical pages, the 13 exports bound |
+| 3 | PE loader + console runtime | 15 | 65 % | 9.75 | loader (PR #1), files (PR #3), input (PR #2) merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides built (32 / 73 ours); files, audio, DirectStorage in lanes |
 | 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 25 % | 3.75 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; decoder in lane `shader` |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 20 % | 2.0 | DLSS standalone through Streamline on a synthetic scene (PR #4); FSR waits for the SDK; wiring to the title's pass todo |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **40.55 ≈ 41 %** | |
+| | **total** | **100** | | **41.3 ≈ 41 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -82,6 +82,28 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Build 3: module, memory and process overrides; discovery is live (32 / 73 ours built)
+
+```
+[████████░░░░░░░░░░░░]  41 %   (was 41 %: +0.75 Build 3 overrides)
+runtime     32 / 73 of our functions built (was 13)
+shaders     0 / 25,694
+measured fps   none yet
+```
+
+- **Built** `crates/runtime/src/modules.rs`: `GetProcAddress`, `LoadLibrary*`, `GetModuleHandle*`,
+  `GetModuleFileName*` and `FreeLibrary` over a registry of the title's mapped modules and our console DLLs
+  (pseudo-handles above the user address space). `GetModuleHandle(NULL)` is the title's exe. The title sees
+  its modules at console paths. **Every miss is logged**: that is the discovery list, live, including the GDK
+  functions the title looks up by name.
+- **Built** memory and process overrides: the title's `VirtualAlloc` with the console's GPU protection bits
+  becomes graphics memory inside one window, write-watched (the fork found the title's heap arrives this
+  way). `GetCommandLineA/W` returns the title's console path, never the host's arguments.
+- **Measured:** 14 runtime tests. `runtimecensus`: **32 of our 73 built**. What remains of mine is
+  `d3d12_xs` (4, Build 5); files (15), audio (19), DirectStorage (1) and the texture layout (2) are in lanes.
+- **Next:** map the title's images through the real resolver (bound vs discovery, without running anything),
+  then Build 5's D3D12.X device.
 
 ### 2026-11-27 — Build 3: all 13 `xmem` functions built and bound
 

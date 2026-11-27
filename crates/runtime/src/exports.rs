@@ -279,6 +279,54 @@ pub extern "system" fn XMemIsToolsMemAvailable() -> BOOL {
     BOOL(0)
 }
 
+// ----------------------------------------------------------------- memory and process overrides
+
+/// The console's `VirtualAlloc`: protection bits above the host's (0x800-0x40000) are GPU access.
+/// GPU-reachable memory is placed like `XMemVirtualAlloc` graphics memory (inside one window,
+/// write-watched); everything else is the host's call, unchanged.
+pub extern "system" fn VirtualAlloc(base: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void {
+    let gpu = protect & !xmem::HOST_PROTECTION != 0;
+    with(|s| {
+        let flags = if gpu { GRAPHICS } else { 0 };
+        host::virtual_alloc(&mut s.xmem, base as u64, size as u64, kind, flags, protect) as *mut c_void
+    })
+}
+
+pub extern "system" fn VirtualFree(base: *mut c_void, size: usize, kind: u32) -> BOOL {
+    BOOL(with(|s| host::virtual_free(&mut s.xmem, base as u64, size as u64, kind)) as i32)
+}
+
+static COMMAND_LINE_A: Mutex<Option<std::ffi::CString>> = Mutex::new(None);
+static COMMAND_LINE_W: Mutex<Option<Vec<u16>>> = Mutex::new(None);
+
+/// Set what the title sees as its command line (the layer sets its console exe path); never the host's.
+pub fn set_command_line(line: &str) {
+    *COMMAND_LINE_A.lock().unwrap() = std::ffi::CString::new(line).ok();
+    *COMMAND_LINE_W.lock().unwrap() = Some(line.encode_utf16().chain(std::iter::once(0)).collect());
+}
+
+pub extern "system" fn GetCommandLineA() -> *const u8 {
+    let mut g = COMMAND_LINE_A.lock().unwrap();
+    g.get_or_insert_with(|| std::ffi::CString::new(r"G:\default.exe").unwrap()).as_ptr() as *const u8
+}
+
+pub extern "system" fn GetCommandLineW() -> *const u16 {
+    let mut g = COMMAND_LINE_W.lock().unwrap();
+    g.get_or_insert_with(|| r"G:\default.exe".encode_utf16().chain(std::iter::once(0)).collect()).as_ptr()
+}
+
+/// Memory and process overrides, by name.
+pub fn override_export(name: &str) -> Option<u64> {
+    let f: *const () = match name {
+        "VirtualAlloc" => VirtualAlloc as *const (),
+        "VirtualFree" => VirtualFree as *const (),
+        "GetCommandLineA" => GetCommandLineA as *const (),
+        "GetCommandLineW" => GetCommandLineW as *const (),
+        _ => return None,
+    };
+    Some(f as usize as u64)
+}
+
 /// Our implementation of a console-only function, by DLL and name.
 pub fn console_export(dll: &str, name: &str) -> Option<u64> {
     if !dll.eq_ignore_ascii_case("xmem.dll") {
@@ -339,6 +387,21 @@ mod tests {
             XMemFree(p as *mut c_void, at);
         }
         assert!(graphics_regions().iter().all(|r| r.base >> 32 == (r.base + r.size - 1) >> 32));
+    }
+
+    #[test]
+    fn virtual_alloc_with_gpu_bits_lands_in_one_window_and_plain_memory_stays_the_hosts() {
+        let size = 4 << 20;
+        let g = VirtualAlloc(std::ptr::null_mut(), size, (MEM_RESERVE | MEM_COMMIT).0, PAGE_READWRITE.0 | 0x800) as u64;
+        assert!(g >= xmem::WINDOW && g >> 32 == (g + size as u64 - 1) >> 32, "GPU memory in one window: {g:#x}");
+        assert!(graphics_regions().iter().any(|r| r.base == g));
+        let p = VirtualAlloc(std::ptr::null_mut(), 65536, (MEM_RESERVE | MEM_COMMIT).0, PAGE_READWRITE.0) as u64;
+        assert!(p != 0 && !graphics_regions().iter().any(|r| r.base == p), "plain memory is not graphics");
+        assert_eq!(VirtualFree(g as *mut c_void, 0, MEM_RELEASE.0).0, 1);
+        assert_eq!(VirtualFree(p as *mut c_void, 0, MEM_RELEASE.0).0, 1);
+        set_command_line(r"G:\title.exe");
+        let c = unsafe { std::ffi::CStr::from_ptr(GetCommandLineA() as *const std::ffi::c_char) };
+        assert_eq!(c.to_str().unwrap(), r"G:\title.exe");
     }
 
     #[test]

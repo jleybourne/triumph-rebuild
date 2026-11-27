@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use rebuild_runtime::host::Host;
 use rebuild_runtime::exports::console_export;
+use rebuild_runtime::modules::override_export;
 use rebuild_runtime::{classify, override_reason, Tier};
 
 fn main() {
@@ -49,7 +50,12 @@ fn main() {
         let tier = classify(func, has_dll, has_fn);
         *tiers.entry(tier).or_default() += 1;
         *by_dll.entry(dll.to_ascii_lowercase()).or_default().entry(tier).or_default() += 1;
-        if matches!(tier, Tier::ConsoleDll | Tier::ConsoleFunction) && name.and_then(|n| console_export(dll, n)).is_some() {
+        let ours_built = match tier {
+            Tier::ConsoleDll | Tier::ConsoleFunction => name.and_then(|n| console_export(dll, n)).is_some(),
+            Tier::Override => name.and_then(override_export).is_some(),
+            Tier::Host => false,
+        };
+        if ours_built {
             built += 1;
         }
         if tier == Tier::Override {
@@ -74,7 +80,7 @@ fn main() {
     }
     let ours = total - tiers.get(&Tier::Host).copied().unwrap_or(0);
     println!();
-    println!("ours, built: {built} of {ours} ({} console-only functions bound to our implementations)", built);
+    println!("ours, built: {built} of {ours} (bound to our implementations; the rest are still discovery entries)");
     println!();
     println!("overrides by reason: {}", overrides.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(" · "));
     println!();
