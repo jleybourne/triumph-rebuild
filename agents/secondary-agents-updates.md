@@ -14,7 +14,7 @@ Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives w
 |:--|:--|:--|:--|:--|:--|
 | **gdk** | GDK runtime behind `xgameruntime.dll` (G1–G4) | `agent/gdk` | `D:\Developer\triumph-rebuild-gdk` | 🔄 started 14:15 | — |
 | **audio** | A5, our own XMA2 decoder | `agent/audio-xma` | `D:\Developer\triumph-rebuild-audio` | 🔄 started 14:15 | — |
-| **files** | F4 CRT file functions, F5 links, WER and vfs gaps | `agent/files-2` | `D:\Developer\triumph-rebuild-files` | 🔄 started 14:15 | — |
+| **files** | F4 CRT file functions, F5 links, WER and vfs gaps | `agent/files-2` | `D:\Developer\triumph-rebuild-files` | ✅ **F4–F5 closed, PR open**: CRT side by side 92/92, F5 46/46, base hash unchanged | [#16](https://github.com/jleybourne/triumph-rebuild/pull/16) |
 | **shader** | S6, `oraclediff` | `agent/shader-s6` | `D:\Developer\triumph-rebuild-shader` | ✅ **S6 closed, PR open**: oracle vs itself 0 diffs over 25,694 (17.8 s, 4 threads); every injected binding, signature and wave-op mutation caught | [#15](https://github.com/jleybourne/triumph-rebuild/pull/15) |
 | **launcher** | U6, Add tile fit; plus the idle fix the owner asked for | `agent/launcher-idle` | `D:\Developer\triumph-rebuild-launcher` | ✅ **done by the coordinator, PR open** | [#14](https://github.com/jleybourne/triumph-rebuild/pull/14) |
 
@@ -137,6 +137,11 @@ From **launcher** (details in the PR #13 body and `agents/launcher.md`):
 61. Proposed registry entries: `title.settings_source` (the title's `settings.xml` lives in its storage folder, not the game folder), `diagnostics.frame_log_path` (today `REBUILD_FRAME_LOG`), a per-setting `settings.xml` element name, and help text for `display.height` and `display.window`; plus supported titles listed in config rather than code.
 62. Smaller: `rebuild.exe` ignores `--config` until C2; the VRAM check uses a provisional 8 GiB until the owner sets the minimum spec; `crates/config/src/lib.rs:349` checks the same thing twice. System check on this PC: 8/8 pass (RTX 4070 Ti, driver 610.88, 11.7 GiB, tiled tier 4, SM 6.8, GPU upload heaps, DXC 10.0.26100).
 
+From **files** round 2 (details in `agents/files.md`, PR #16):
+64. **Bind 45 names** through `override_export`: the 22 file overrides, the 5 from round 1, the 5 from F5, and the 13 CRT functions in `crt::CRT_FUNCTIONS`. Bind CRT names by function name, whatever `api-ms-win-crt-*` DLL they come from. `SetFileInformationByHandle` isn't imported, so route a `GetProcAddress` miss for it to `override_export` too. Wiring unchanged: `rebuild_winfiles::install(Files::new(vfs, r"G:\"))`.
+65. **Behaviour change in round-1 code:** opening a read-only file to write or overwrite it now fails, as on the host. Before, the copy into the overlay cleared the read-only bit.
+66. Chosen limits: Unicode `ccs=` modes write no BOM (logged; the title's `fopen` calls are byte streams); an invalid `fopen` mode fails with `EINVAL` and is logged instead of terminating the process; `_wchdir` changes only our current directory. Workspace 242 green, 0 warnings; round-1's 145-call comparison still has 0 differences.
+
 From the **coordinator** (launcher follow-up, PR #14):
 63. **The launcher was not idle**: it requested a frame every 16 ms, so it drew at 60 fps even in the background beside a running game. It's fixed in PR #14: a scene clock that only runs when the window is focused and visible with no game running, `repaint_after()` (idle waits for input; motion at 30 fps; a running game's log read 4x a second, 1x minimised), and minimise on launch with restore on exit (`REBUILD_LAUNCHER_STAY_OPEN=1` keeps it open). **Measured: 4.5 % of one core in the foreground while drifting, 0.0 % minimised, 86–87 MB.** U6 (Add tile fit) is in the same PR.
 
@@ -158,6 +163,7 @@ From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f)
 
 | time | event |
 |:--|:--|
+| 14:35 | **files F4–F5** done: PR #16 open (CRT 92/92, F5 46/46 against the host). |
 | 14:30 | **shader S6** done: `oraclediff` PR #15 open (0 self-diffs over 25,694; all mutations caught; our own bitcode reader resolves 297,657 `dx.op` calls in a 1-in-50 audit). |
 | 14:22 | Master 927942b: BCPack decided (our own decoder, tables outside git, decode cache) as dstorage D5, **run by the lead's own helper**; the coordinator does not start it. No other new work. |
 | 14:20 | All 13 round-1 PRs merged. Round 2 started: **gdk** (new), **audio** A5, **files** F4–F5, **shader** S6. Launcher U6 and the idle fix done by the coordinator: PR #14. |

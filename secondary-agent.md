@@ -234,7 +234,13 @@ New crate `crates/input` (package `rebuild-input`). No GPU.
 ### Round 2 (2026-11-27, the second lead session)
 
 Every round-1 lane has handed back and is merged. Lanes `loader`, `vfs`, `input`, `upscale` and `xg`
-have no new work: stop them. `dstorage` D5 is run by the lead's own helper agent, not the coordinator. The rules of sections 1-4 are unchanged. Each task ends in a test or a number.
+have no new work: stop them. The rules of sections 1-4 are unchanged. Each task ends in a test or a number.
+
+**Game folder freeze (2026-11-27): no helper opens anything in the game folder, for any reason,** until the lead
+lifts this line. A helper overwrote a game file with a shell wildcard, and the owner is re-dumping it; the folder
+is made read-only at the file-system level before anyone reads it again. Start now: `gdk`, `files` F4-F5,
+`shader` S6 (the oracle folder is outside the game folder), `launcher` U6. **Held:** `audio` A5 (it reads the
+title's XMA streams) and `dstorage` D5 (the lead does BCPack itself).
 
 #### New lane `gdk` — the GDK runtime behind `xgameruntime.dll` (Build 3 piece)
 
