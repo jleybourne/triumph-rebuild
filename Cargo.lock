@@ -54,6 +54,7 @@ version = "0.1.0"
 dependencies = [
  "rebuild-sir",
  "rebuild-uma",
+ "rebuild-upscale",
  "rebuild-xlist",
  "windows",
 ]
@@ -71,6 +72,13 @@ version = "0.1.0"
 
 [[package]]
 name = "rebuild-uma"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
+name = "rebuild-upscale"
 version = "0.1.0"
 dependencies = [
  "windows",
