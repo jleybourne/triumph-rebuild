@@ -110,6 +110,15 @@ decision 4.
 | todo | oracle diff against the fork's translation, per program | 25,694 / 25,694 match or differ with a named reason |
 | todo | pipelines built into a hash-keyed library at start (fork: 8,169 pipelines) | 0 runtime compiles; library build time on the frame line |
 
+**Translation (decided 2026-11-27; `docs/design/shader-ir.md` "Translation from GFX10"):**
+
+| state | work | closes when |
+|---|---|---|
+| todo | v0: straight-line agnostic programs (2,881: PS 1,798, VS 951, CS 132): registers as HLSL variables, EXEC per lane, the fork's interface | each compiles with DXC and S6 `oraclediff` shows 0 interface diffs; the shader bar starts |
+| todo | v1: structurize the reducible CFG (99.18 %); dispatcher fallback for the 20 irreducible CS and 195 ES | the agnostic set (9,128) translated |
+| todo | wave-wide programs: lane doubling (compute) or 64-thread groups (graphics) | all 25,694 |
+| todo | execution check against the oracle on the card (lead) | a program counts only when outputs match |
+
 ## Build 5 — first frame
 
 | state | work | closes when |

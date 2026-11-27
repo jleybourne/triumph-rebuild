@@ -135,6 +135,31 @@ Before the corpus there are **lane-model tests** in `crates/sir`: a reference wa
 against the doubled wave32 model, on reductions, ballots and readlanes under random EXEC masks. They must
 agree bit for bit.
 
+## Translation from GFX10 (decided 2026-11-27, second lead session)
+
+The decoder (lane `shader`, PRs #5 and #10) gives every instruction of all 25,694 programs, byte-exact. The
+translation decisions, each for performance or for the shortest correct path to it:
+
+1. **Registers become HLSL variables; DXC builds the SSA.** Each SGPR and VGPR the program touches is a local
+   variable, and each instruction becomes a statement over them. DXC's `-O3` runs mem2reg, GVN and dead-code
+   removal, so its output equals hand-built SSA, without writing an SSA pass. `sir`'s own IR stays for the
+   wave-level decisions (classify, uniformity, lane doubling), where DXC can't help.
+2. **EXEC is a per-lane boolean** for agnostic programs: each host lane is one console lane and knows only its
+   own bit. Lane masks used only as masks (VCC, compare results, saved EXEC in SGPRs) are per-lane booleans
+   too, and `s_and_saveexec_b64` and friends become per-lane boolean operations. A mask read as a number
+   (`s_bcnt1`, a mask moved to a VGPR) makes a program wave-wide, which the classifier already catches.
+3. **Divergence by predication, branches only where the console's are uniform.** VALU writes are guarded by
+   the lane's EXEC. Only scalar branches (`s_cbranch_scc*`, `vccz`, `execz`) become HLSL control flow.
+4. **Control flow, in steps:** v0 handles straight-line programs. v1 structurizes the reducible CFG (99.18 %
+   of programs, S4) into if/loop. A loop-plus-switch dispatcher is the fallback for the 20 irreducible compute
+   programs and the 195 ES programs that end in an indirect jump.
+5. **The interface is the fork's** (its root bindings, user data and IO, read from the oracle's `.vsh`
+   entries), so the oracle comparison is like for like. Whether another binding layout is faster is decided
+   in Build 5 by the frame line, not now.
+
+**v0 target, from `agents/shader-census.csv`:** 2,881 programs that are straight-line (one block) and
+agnostic: 1,798 PS, 951 VS, 132 CS. 1,813 of them use 16-bit work, 17 use LDS, none use scratch.
+
 ## Order of work
 
 1. ✅ `crates/sir`: IR types, uniformity analysis, the wave-size classifier, and the lane-doubling model
