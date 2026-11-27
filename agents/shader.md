@@ -139,6 +139,50 @@ device; the fork's runs on a 32-lane card may differ where `VICTORY_HOST_WAVE`/`
 A first warm with the fork's newer `target\release\victory.exe` gave 25,636 (its 58 known refusals), so it
 was not used.
 
+## S6 — `oraclediff`, the oracle diff tool (round 2)
+
+```powershell
+$env:REBUILD_ORACLE_DIR = 'D:\victory-data\rebuild-oracle'
+cargo run --release --bin oraclediff -- --ours <dir of <hash>.dxil> --out <csv outside git>
+cargo run --release --bin oraclediff -- --self --mutate --out D:\victory-data\rebuild-oraclediff\self.csv
+cargo run --release --bin oraclediff -- --self --out NUL --audit 50     # checks the bitcode reader
+```
+
+**Built:** `crates/shader/src/bitcode.rs`, our own LLVM 3.7 bitstream reader (abbreviations, BLOCKINFO, types,
+value numbering with relative ids, constants, the value symbol table), enough to list each function's
+instructions and resolve every call to `dx.op.*` to its opcode. `crates/shader/src/oraclediff.rs` reads both
+containers and compares:
+
+```
+signatures   ISG1 / OSG1 / PSG1 elements, as sorted lists: name, index, system value, component type,
+             register, mask, stream, min precision
+bindings     PSV0 resources, sorted: type, space, lower and upper bound, kind, flags
+threads      PSV0 thread-group size        wave size   PSV0 minimum and maximum wave lane count
+stage        PSV0 shader stage
+histogram    memory (cbuffer, sample, texture and buffer ops, atomics, LOD, raw buffers; LLVM load,
+             store, atomics) · wave (wave and quad ops) · control (br, switch, ret, unreachable,
+             discard) · barrier · I/O (inputs, outputs, eval, thread ids, mesh outputs)
+```
+
+One CSV row per oracle hash: which parts differ, and the histogram as ours/oracle. No GPU.
+
+**Measured** (the oracle against itself, 25,694 programs, 17.8 s on 4 threads):
+
+```
+diffs         0 programs differ (0 unreadable)
+mutations     a binding moved up one register          caught in 25,060 of 25,060 programs with a binding
+              the last output-signature element dropped caught in 22,551 of 22,551 programs with outputs
+              the first wave op removed                 caught in 18,896 of 18,896 programs with a wave op
+reader audit  every 50th program (514): 297,657 dx.op calls through 44 functions, 0 unresolved; every
+              function name gives exactly its DXIL opcode (waveReadLaneFirst 118, rawBufferLoad 139,
+              cbufferLoadLegacy 59, ...) except the unary/binary/tertiary families, which carry several
+```
+
+The first two mutations are made in the container's bytes and read back. The third is applied to the
+decoded instruction list, because the bitcode has no fixed-size slot to blank. Tests: 4 more (bitcode
+reader on a hand-built module; signatures, bindings, threads, wave size and the three mutations on a
+hand-built container). Workspace: 242 green.
+
 ## Decided
 
 - The census counts all 26,084 native programs, and reports the 25,694 VS+PS+CS+MS beside it, because ES
