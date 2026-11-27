@@ -66,6 +66,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rebuild-input"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "rebuild-sir"
 version = "0.1.0"
 
