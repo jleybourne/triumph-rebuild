@@ -110,6 +110,10 @@ name = "rebuild-vfs"
 version = "0.1.0"
 
 [[package]]
+name = "rebuild-xg"
+version = "0.1.0"
+
+[[package]]
 name = "rebuild-xlist"
 version = "0.1.0"
 dependencies = [

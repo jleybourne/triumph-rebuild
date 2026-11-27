@@ -1,0 +1,8 @@
+[package]
+name = "rebuild-xg"
+description = "The console's texture layout library (xg_xs.dll): layouts, address maths, the texture computer, a CPU detiler."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
