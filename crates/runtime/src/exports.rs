@@ -443,7 +443,39 @@ unsafe extern "system" fn serialize_versioned_root_signature(desc: *const u8, bl
         CONSOLE_ROOT_FLAGS.fetch_or(flags & !HOST_ROOT_FLAGS, std::sync::atomic::Ordering::Relaxed);
         copy[0x28..0x2c].copy_from_slice(&(flags & HOST_ROOT_FLAGS).to_le_bytes());
     }
-    unsafe { host(copy.as_ptr(), blob, errors) }
+    // ask for the host's error text ourselves, so a refusal can be named even when the title passes no `errors`
+    let mut own_errors: *mut c_void = std::ptr::null_mut();
+    let errs = if errors.is_null() { &mut own_errors as *mut *mut c_void } else { errors };
+    let hr = unsafe { host(copy.as_ptr(), blob, errs) };
+    if hr < 0 {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+            let version = u32::from_le_bytes(copy[0..4].try_into().unwrap());
+            let params = u32::from_le_bytes(copy[8..12].try_into().unwrap());
+            let samplers = u32::from_le_bytes(copy[0x18..0x1c].try_into().unwrap());
+            let mut text = String::new();
+            let e = unsafe { *errs };
+            if !e.is_null() {
+                // ID3DBlob: GetBufferPointer (slot 3), GetBufferSize (slot 4)
+                unsafe {
+                    let vt = *(e as *const *const usize);
+                    let ptr: unsafe extern "system" fn(*mut c_void) -> *const u8 = std::mem::transmute(*vt.add(3));
+                    let len: unsafe extern "system" fn(*mut c_void) -> usize = std::mem::transmute(*vt.add(4));
+                    text = String::from_utf8_lossy(std::slice::from_raw_parts(ptr(e), len(e))).trim_end_matches('\0').trim().to_string();
+                }
+            }
+            eprintln!("rootsig   serialize refused {hr:#x}: version {version}, {params} parameters, {samplers} static samplers, flags {flags:#x}: {text}");
+        }
+    }
+    if !own_errors.is_null() {
+        // release our own error blob (IUnknown::Release, slot 2)
+        unsafe {
+            let vt = *(own_errors as *const *const usize);
+            let release: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(*vt.add(2));
+            release(own_errors);
+        }
+    }
+    hr
 }
 
 /// Our implementation of a console-only function, by DLL and name.

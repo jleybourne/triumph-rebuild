@@ -47,6 +47,9 @@ impl<P: PipelineSource + Send + Sync> ListHost for Host<P> {
     fn memory(&self, va: u64) -> Option<MemoryRange> {
         self.resources.memory(va)
     }
+    fn sync_descriptors(&self, start: u64, len: u64) -> u32 {
+        self.resources.sync(start, len)
+    }
     fn first_trap(&self, object: &'static str, offset: usize) {
         self.resources.inner.events.first_trap(object, offset);
     }
