@@ -132,24 +132,28 @@ pub mod host {
         if graphics && kind & MEM_RESERVE.0 != 0 {
             kind |= MEM_WRITE_WATCH;
         }
-        let alignment = if base == 0 && kind & MEM_RESERVE.0 != 0 { 64 << 10 } else { 0 };
         let got = if base != 0 {
             // a fixed address: the title's choice (a commit inside its own reservation, usually)
             unsafe { VirtualAlloc2(GetCurrentProcess(), Some(base as *const c_void), size as usize, VIRTUAL_ALLOCATION_TYPE(kind), protect, None) }
         } else {
+            // never MEM_ADDRESS_REQUIREMENTS: with write-watch, a request into a window that has no room
+            // spins in the kernel (exitprobe wwmany 8 GiB: the 17th 256 MiB reservation, minutes, the
+            // process unkillable). We find the gap ourselves and ask for that exact address, which never
+            // searches: it succeeds or fails at once.
             let mut got = std::ptr::null_mut();
             for (lo, hi) in candidate_windows(address_range(flags), size) {
-                let mut req = MEM_ADDRESS_REQUIREMENTS {
-                    LowestStartingAddress: lo as *mut c_void,
-                    HighestEndingAddress: hi as *mut c_void,
-                    Alignment: alignment,
-                };
-                let mut p = MEM_EXTENDED_PARAMETER::default();
-                p.Anonymous1._bitfield = MemExtendedParameterAddressRequirements.0 as u64;
-                p.Anonymous2.Pointer = &mut req as *mut _ as *mut c_void;
-                got = unsafe { VirtualAlloc2(GetCurrentProcess(), None, size as usize, VIRTUAL_ALLOCATION_TYPE(kind), protect, Some(&mut [p])) };
-                if !got.is_null() {
-                    break;
+                if let Some(at) = free_gap(lo, hi, size) {
+                    got = unsafe { VirtualAlloc2(GetCurrentProcess(), Some(at as *const c_void), size as usize, VIRTUAL_ALLOCATION_TYPE(kind), protect, None) };
+                    if !got.is_null() {
+                        break;
+                    }
+                    // taken between the query and the call (another thread): one fresh look in this window
+                    if let Some(at) = free_gap(lo, hi, size) {
+                        got = unsafe { VirtualAlloc2(GetCurrentProcess(), Some(at as *const c_void), size as usize, VIRTUAL_ALLOCATION_TYPE(kind), protect, None) };
+                        if !got.is_null() {
+                            break;
+                        }
+                    }
                 }
             }
             got
@@ -162,6 +166,32 @@ pub mod host {
             x.record(Region { base: at, size, flags, protect });
         }
         at
+    }
+
+    /// The first 64 KiB-aligned free gap of `size` bytes inside `[lo, hi]`, by walking the address space
+    /// with VirtualQuery (user mode, bounded: one step per region).
+    pub fn free_gap(lo: u64, hi: u64, size: u64) -> Option<u64> {
+        const ALIGN: u64 = 64 << 10;
+        let mut at = lo.div_ceil(ALIGN) * ALIGN;
+        for _ in 0..(1 << 20) {
+            if at > hi || hi - at + 1 < size {
+                return None;
+            }
+            let mut m = MEMORY_BASIC_INFORMATION::default();
+            let n = unsafe { VirtualQuery(Some(at as *const c_void), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
+            if n == 0 {
+                return None;
+            }
+            let end = m.BaseAddress as u64 + m.RegionSize as u64; // one past the region
+            if m.State == MEM_FREE {
+                let start = at.max(m.BaseAddress as u64).div_ceil(ALIGN) * ALIGN;
+                if start + size <= end && start + size - 1 <= hi {
+                    return Some(start);
+                }
+            }
+            at = end.div_ceil(ALIGN) * ALIGN;
+        }
+        None
     }
 
     pub fn virtual_free(x: &mut Xmem, base: u64, size: u64, kind: u32) -> bool {
