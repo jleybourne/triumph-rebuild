@@ -3,6 +3,7 @@ name = "rebuild-launcher"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+build = "build.rs"
 
 # The desktop launcher (docs/design/launcher.md). egui/eframe: no browser engine, no network crate.
 
@@ -21,11 +22,18 @@ path = "src/bin/fake-layer.rs"
 
 [dependencies]
 rebuild-config = { path = "../../crates/config" }
+rebuild-vfs = { path = "../../crates/vfs" }
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
 rfd = "0.15"
 egui-phosphor = { version = "0.9", features = ["regular"] }
 png = "0.17"
 toml = "0.8"
+
+[dev-dependencies]
+ttf-parser = "0.25"
+
+[build-dependencies]
+embed-resource = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Direct3D", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging"] }

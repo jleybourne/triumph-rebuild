@@ -2,5 +2,6 @@
 //! the controls ([`widgets`]).
 
 pub mod background;
+pub mod icons;
 pub mod theme;
 pub mod widgets;

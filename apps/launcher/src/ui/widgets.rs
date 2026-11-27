@@ -62,8 +62,23 @@ fn hover(ui: &Ui, resp: &Response) -> f32 {
 
 /// Text plus an optional leading icon, laid out and painted centred in `r`.
 fn label_in(ui: &Ui, r: Rect, icon: &str, text: &str, font: egui::FontId, color: Color32) {
-    let s = if icon.is_empty() { text.to_string() } else if text.is_empty() { icon.to_string() } else { format!("{icon}  {text}") };
-    ui.painter().text(r.center(), Align2::CENTER_CENTER, s, font, color);
+    let p = ui.painter();
+    let ifont = th::icon(font.size + 2.0);
+    if text.is_empty() {
+        p.text(r.center(), Align2::CENTER_CENTER, icon, ifont, color);
+        return;
+    }
+    let tg = p.layout_no_wrap(text.to_string(), font, color);
+    if icon.is_empty() {
+        p.galley(r.center() - tg.size() / 2.0, tg, color);
+        return;
+    }
+    let ig = p.layout_no_wrap(icon.to_string(), ifont, color);
+    let gap = 8.0;
+    let total = ig.size().x + gap + tg.size().x;
+    let x = r.center().x - total / 2.0;
+    p.galley(Pos2::new(x, r.center().y - ig.size().y / 2.0), ig, color);
+    p.galley(Pos2::new(x + total - tg.size().x, r.center().y - tg.size().y / 2.0), tg, color);
 }
 
 /// The primary action: an accent gradient, a glow on hover, a press-scale.
@@ -82,7 +97,7 @@ pub fn primary_button(ui: &mut Ui, icon: &str, text: &str, size: Vec2, enabled: 
     } else {
         ui.painter().rect_filled(r2, CornerRadius::same(radius as u8), th::SURFACE_3);
     }
-    let font = th::semibold(size.y * 0.32);
+    let font = th::semibold((size.y * 0.32).max(13.5));
     label_in(ui, r2, icon, text, font, if enabled { Color32::WHITE } else { th::TEXT_3 });
     focus_ring(ui, &resp, r, radius as u8);
     resp
@@ -91,7 +106,7 @@ pub fn primary_button(ui: &mut Ui, icon: &str, text: &str, size: Vec2, enabled: 
 /// A quiet button: surface fill, hairline, hover lift.
 pub fn button(ui: &mut Ui, icon: &str, text: &str, enabled: bool) -> Response {
     let font = th::medium(13.5);
-    let w = ui.painter().layout_no_wrap(format!("{icon}  {text}"), font.clone(), th::TEXT).size().x + 28.0;
+    let w = ui.painter().layout_no_wrap(text.to_string(), font.clone(), th::TEXT).size().x + if icon.is_empty() { 28.0 } else { 52.0 };
     let size = Vec2::new(if text.is_empty() { 32.0 } else { w }, 32.0);
     let (r, resp) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
     let h = if enabled { hover(ui, &resp) } else { 0.0 };
@@ -117,7 +132,7 @@ pub fn danger_button(ui: &mut Ui, icon: &str, text: &str, enabled: bool) -> Resp
 /// A pill: caption type, tinted fill, optional glow.
 pub fn pill(ui: &mut Ui, text: &str, color: Color32, glowing: bool) -> Response {
     let (font, track) = th::caption();
-    let galley = ui.painter().layout_job(th::job(&text.to_uppercase(), (font, track), color));
+    let galley = ui.painter().layout_job(th::job(&text.to_uppercase(), (font, track), lerp(color, Color32::WHITE, 0.18)));
     let size = galley.size() + Vec2::new(18.0, 8.0);
     let (r, resp) = ui.allocate_exact_size(size, Sense::hover());
     if glowing {
@@ -249,50 +264,59 @@ pub fn page_t0(ctx: &egui::Context) -> f64 {
     ctx.data(|d| d.get_temp::<f64>(Id::new("page-t0"))).unwrap_or(0.0)
 }
 
-/// A frosted card. `index` staggers its entrance after a page switch.
-pub fn card<R>(ui: &mut Ui, art: &Art, index: usize, title: Option<(&str, &str)>, add: impl FnOnce(&mut Ui) -> R) -> R {
+/// A glass card. `index` staggers its entrance after a page switch.
+pub fn card<R>(ui: &mut Ui, _art: &Art, index: usize, title: Option<(&str, &str)>, add: impl FnOnce(&mut Ui) -> R) -> R {
+    card_ex(ui, index, title, None, add).0
+}
+
+/// A card that lifts on hover (a brighter rim, a deeper shadow, 2 px up). Returns its rect too.
+pub fn card_hover<R>(ui: &mut Ui, index: usize, id: Id, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
+    card_ex(ui, index, None, Some(id), add)
+}
+
+fn card_ex<R>(ui: &mut Ui, index: usize, title: Option<(&str, &str)>, hover: Option<Id>, add: impl FnOnce(&mut Ui) -> R) -> (R, Rect) {
     let now = ui.input(|i| i.time);
     let a = ease_out(((now - page_t0(ui.ctx())) as f32 - th::T_STAGGER * index as f32) / th::T_PAGE);
     if a < 1.0 {
         ui.ctx().request_repaint();
     }
-    ui.add_space((1.0 - a) * 12.0);
-    let r = ui
+    let hovered_before = hover.map(|id| ui.ctx().data(|d| d.get_temp::<bool>(id.with("hov")).unwrap_or(false))).unwrap_or(false);
+    let h = hover.map(|id| ui.ctx().animate_bool_with_time(id.with("lift"), hovered_before, th::T_HOVER)).unwrap_or(0.0);
+    ui.add_space((1.0 - a) * 12.0 + 2.0 * (1.0 - h));
+    let (out, rect) = ui
         .scope(|ui| {
             ui.multiply_opacity(a);
+            let shadow = egui::epaint::Shadow { offset: [0, (8.0 + 6.0 * h) as i8], blur: (24.0 + 12.0 * h) as u8, spread: 0, color: Color32::from_black_alpha((115.0 + 40.0 * h) as u8) };
             let frame = egui::Frame::new()
-                .fill(th::glass())
-                .stroke(th::stroke(1.0, th::HAIRLINE))
+                .fill(lerp(th::glass(), alpha(th::SURFACE_2, 0.86), h))
+                .stroke(th::stroke(1.0, lerp(th::HAIRLINE, alpha(th::ACCENT, 0.45), h)))
                 .corner_radius(CornerRadius::same(th::R_LG))
                 .inner_margin(egui::Margin::same(th::S3 as i8))
-                .shadow(th::card_shadow());
+                .shadow(shadow);
             let inner = frame.show(ui, |ui| {
-                // reserved under the contents, above the frame fill: the grain goes here
-                let grain_idx = ui.painter().add(egui::Shape::Noop);
                 ui.set_width(ui.available_width());
                 if let Some((icon, t)) = title {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(icon).font(th::regular(17.0)).color(th::ACCENT));
+                        ui.label(egui::RichText::new(icon).font(th::icon(17.0)).color(th::ACCENT));
                         text(ui, t, th::h2(), th::TEXT);
                     });
                     ui.add_space(th::S1);
                 }
-                (grain_idx, add(ui))
+                add(ui)
             });
             let rect = inner.response.rect;
-            let (grain_idx, out) = inner.inner;
-            // grain and a top highlight make the glass
-            let uv = Rect::from_min_size(Pos2::ZERO, rect.size() / 128.0);
-            let mut m = Mesh::with_texture(art.noise.id());
-            m.add_rect_with_uv(rect.shrink(1.0), uv, Color32::from_white_alpha((0.7 * 255.0 * a) as u8));
-            ui.painter().set(grain_idx, m);
+            // the glass's top highlight
             ui.painter().line_segment(
                 [Pos2::new(rect.left() + th::R_LG as f32, rect.top() + 0.5), Pos2::new(rect.right() - th::R_LG as f32, rect.top() + 0.5)],
-                th::stroke(1.0, alpha(Color32::WHITE, 0.08 * a)),
+                th::stroke(1.0, alpha(Color32::WHITE, (0.09 + 0.05 * h) * a)),
             );
-            out
+            (inner.inner, rect)
         })
         .inner;
-    ui.add_space(th::S2);
-    r
+    if let Some(id) = hover {
+        let over = ui.rect_contains_pointer(rect);
+        ui.ctx().data_mut(|d| d.insert_temp(id.with("hov"), over));
+    }
+    ui.add_space(th::S2 + 2.0 * h);
+    (out, rect)
 }

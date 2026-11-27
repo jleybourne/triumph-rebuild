@@ -1,9 +1,11 @@
-//! triumph-rebuild launcher: settings, profiles, title settings, mods, system check, and Play.
-//! Every settings widget is generated from `rebuild_config::REGISTRY` (`docs/design/launcher.md`);
-//! the look is `src/ui` (tokens in `ui/theme.rs`, the table in `agents/launcher.md`).
+//! Triumph Launcher: a library of games, and for each its settings, profiles, title settings, mods,
+//! system check and Play. Every settings widget is generated from `rebuild_config::REGISTRY`
+//! (`docs/design/launcher.md`); the look is `src/ui` (tokens in `ui/theme.rs`, the table in
+//! `agents/launcher.md`).
 //!
-//! `rebuild-launcher --check` prints the system check without opening a window.
-//! `rebuild-launcher --shots <dir>` renders every page to PNGs in `<dir>` from a demo home, then exits.
+//! `rebuild-launcher --check` prints the system check for the selected game without opening a window.
+//! `rebuild-launcher --shots <dir> [--size WxH]` renders every page from a fixture (placeholder names,
+//! demo data) to PNGs in `<dir>`, then exits.
 //! `REBUILD_MEASURE_LOCK=<file>`: while that file exists, the check creates no D3D12 device.
 
 #![cfg_attr(not(test), windows_subsystem = "windows")]
@@ -11,14 +13,18 @@
 mod ui;
 
 use eframe::egui::{self, Align, Align2, Color32, CornerRadius, Id, Key, Layout, Pos2, Rect, Sense, StrokeKind, Vec2};
-use egui_phosphor::regular as icon;
+use ui::icons as icon;
 use rebuild_config::{Config, Setting};
 use rebuild_launcher::{
     gamemeta,
     home::{self, Home},
+    library::{self, Detection, Library},
     model::{self, Edit, Model, Tab, Widget},
-    mods, play, syscheck, title,
+    mods, play,
+    store::Store,
+    syscheck, title,
 };
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -27,7 +33,7 @@ use ui::background::{self, Art};
 use ui::theme::{self as th, alpha, ease_out, lerp};
 use ui::widgets as w;
 
-const TITLE: &str = "triumph-rebuild";
+const TITLE: &str = "Triumph Launcher";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -35,30 +41,44 @@ fn main() {
         attach_console();
         std::process::exit(print_check());
     }
-    let shots = args.iter().position(|a| a == "--shots").and_then(|i| args.get(i + 1)).map(PathBuf::from);
-    let home = match &shots {
-        Some(_) => demo_home(),
-        None => Home::locate(),
+    let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
+    let shots = arg("--shots").map(PathBuf::from);
+    let size = arg("--size")
+        .and_then(|s| s.split_once('x').and_then(|(a, b)| Some([a.parse::<f32>().ok()?, b.parse::<f32>().ok()?])))
+        .unwrap_or([1280.0, 800.0]);
+    if let Some(dir) = &shots {
+        let dir = dir.clone();
+        let _ = std::fs::create_dir_all(&dir);
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = std::fs::write(dir.join("panic.txt"), format!("{info}"));
+        }));
+    }
+    let root = match &shots {
+        Some(_) => fixture_root(),
+        None => Home::locate().dir,
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(TITLE)
-            .with_inner_size([1280.0, 800.0])
+            .with_inner_size(size)
             .with_min_inner_size([960.0, 640.0])
             .with_decorations(false)
             .with_resizable(true),
         vsync: true,
         ..Default::default()
     };
-    let r = eframe::run_native(TITLE, options, Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, home, shots)))));
+    let fixture = shots.is_some();
+    let r = eframe::run_native(TITLE, options, Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, root, shots, fixture)))));
     if let Err(e) = r {
         eprintln!("launcher: {e}");
     }
 }
 
 fn print_check() -> i32 {
-    let home = Home::locate();
-    let cfg = home.load().unwrap_or_else(|e| {
+    let root = Home::locate().dir;
+    let lib = Library::load(&root).unwrap_or(Library { root: root.clone(), games: Vec::new(), selected: None });
+    let home = lib.selected.as_deref().map(|id| lib.home(id)).unwrap_or(Home { dir: root });
+    let cfg = Store::load(&home.rebuild_toml()).map(|s| s.model.config).unwrap_or_else(|e| {
         eprintln!("{e}");
         Config::parse("").unwrap()
     });
@@ -101,45 +121,75 @@ fn probe(cfg: &Config) -> syscheck::SystemProbe {
     }
 }
 
-/// A home with sample mods, profiles and a last session, for `--shots`. The game folder comes from
-/// `REBUILD_GAME_DIR` (read-only), so the hero shows the title's own art when it is set.
-fn demo_home() -> Home {
-    let dir = std::env::temp_dir().join("rebuild-launcher-demo-home");
-    let _ = std::fs::remove_dir_all(&dir);
-    let home = Home { dir };
-    let put = |m: &str, rel: &str| {
-        let p = home.mods_dir().join(m).join(rel);
-        let _ = std::fs::create_dir_all(p.parent().unwrap());
-        let _ = std::fs::write(p, m);
-    };
-    put("cinematic-grade", "common/data/timecycle.xml");
-    put("cinematic-grade", "common/data/lut.dds");
-    put("clean-hud", "ui/hud/minimap.xml");
-    put("clean-hud", "common/data/timecycle.xml");
-    put("wider-fov", "common/data/camera.xml");
-    let mut c = Config::parse("").unwrap();
-    if let Some(g) = std::env::var_os("REBUILD_GAME_DIR") {
-        let _ = c.set("game.dir", rebuild_config::Value::Path(g.to_string_lossy().into()));
+/// A synthetic package folder for the fixture (placeholder names only).
+fn fixture_package(root: &std::path::Path, folder: &str, name: &str, family: &str) -> PathBuf {
+    let d = root.join("packages").join(folder);
+    let _ = std::fs::create_dir_all(&d);
+    let _ = std::fs::write(
+        d.join("MicrosoftGame.config"),
+        format!(r#"<Game><Executable Name="placeholder.exe" TargetDeviceFamily="{family}" /><ShellVisuals DefaultDisplayName="{name}" PublisherDisplayName="Placeholder Studio" /></Game>"#),
+    );
+    let _ = std::fs::write(d.join("placeholder.exe"), b"MZ");
+    d
+}
+
+/// The screenshot fixture: a library with placeholder names and demo data (sample mods, profiles and a
+/// last session that never ran). When `REBUILD_GAME_DIR` is set, the first game points at that folder
+/// (read-only) so the hero shows the run-time key art path, still under a placeholder name.
+fn fixture_root() -> PathBuf {
+    let root = std::env::temp_dir().join("triumph-launcher-fixture");
+    let _ = std::fs::remove_dir_all(&root);
+    let second = fixture_package(&root, "second", "Second title", "Scarlett");
+    fixture_package(&root, "third", "Third title", "Scarlett");
+    fixture_package(&root, "older", "Older title", "XboxOne");
+    let mut lib = Library { root: root.clone(), games: Vec::new(), selected: None };
+    let first = std::env::var_os("REBUILD_GAME_DIR").map(PathBuf::from).unwrap_or_else(|| fixture_package(&root, "first", "Your title", "Scarlett"));
+    for (dir, name) in [(first, "Your title"), (second, "Second title")] {
+        let id = library::game_id(&dir);
+        let home = lib.home(&id);
+        let mut st = Store::load(&home.rebuild_toml()).unwrap();
+        let set = |st: &mut Store, k: &str, e: Edit| {
+            let _ = st.model.apply(rebuild_config::find(k).unwrap(), e);
+        };
+        set(&mut st, "game.dir", Edit::Text(dir.display().to_string()));
+        if name == "Your title" {
+            set(&mut st, "display.width", Edit::Slide(2560));
+            set(&mut st, "display.height", Edit::Slide(1440));
+            let put = |m: &str, rel: &str| {
+                let p = home.mods_dir().join(m).join(rel);
+                let _ = std::fs::create_dir_all(p.parent().unwrap());
+                let _ = std::fs::write(p, m);
+            };
+            put("cinematic-grade", "common/data/timecycle.xml");
+            put("cinematic-grade", "common/data/lut.dds");
+            put("clean-hud", "ui/hud/minimap.xml");
+            put("clean-hud", "common/data/timecycle.xml");
+            put("wider-fov", "common/data/camera.xml");
+            st.model.config.mods = vec![
+                rebuild_config::Mod { name: "cinematic-grade".into(), enabled: true },
+                rebuild_config::Mod { name: "clean-hud".into(), enabled: true },
+                rebuild_config::Mod { name: "wider-fov".into(), enabled: false },
+            ];
+            let _ = home.save_profile("1440p quality", &st.model.config);
+            let mut s = st.model.config.clone();
+            s.stable_only = true;
+            let _ = home.save_profile("stable", &s);
+            st.model.config.profile = "1440p quality".into();
+            let mut log = String::from("fixture: demo frame line, not a measurement\n");
+            for (i, (fps, ms)) in [(30.8, 32.5), (31.2, 32.1), (30.4, 32.9), (31.6, 31.6)].iter().enumerate() {
+                log += &format!("t {:>3}s | fps {fps:.1} | ms {ms:.1} | draws 4,512 | dropped 0 | upload 1.9 ms | 2560x1440 dlss quality\n", i + 1);
+            }
+            let _ = std::fs::create_dir_all(&home.dir);
+            let _ = std::fs::write(home.frame_log(), log);
+        }
+        let _ = st.save(&home.rebuild_toml());
+        lib.games.push(library::Game { id: id.clone(), dir, name: name.into(), detector: "gdk-package".into() });
+        if lib.selected.is_none() {
+            lib.selected = Some(id);
+        }
     }
-    let _ = c.set("display.width", rebuild_config::Value::Int(2560));
-    let _ = c.set("display.height", rebuild_config::Value::Int(1440));
-    c.mods = vec![
-        rebuild_config::Mod { name: "cinematic-grade".into(), enabled: true },
-        rebuild_config::Mod { name: "clean-hud".into(), enabled: true },
-        rebuild_config::Mod { name: "wider-fov".into(), enabled: false },
-    ];
-    let _ = home.save_profile("1440p quality", &c);
-    let mut s = c.clone();
-    s.stable_only = true;
-    let _ = home.save_profile("stable", &s);
-    c.profile = "1440p quality".into();
-    let _ = home::export(&c, &home.rebuild_toml());
-    let mut log = String::from("config profile=1440p quality problems=0\n");
-    for (i, (fps, ms)) in [(30.8, 32.5), (31.2, 32.1), (30.4, 32.9), (31.6, 31.6)].iter().enumerate() {
-        log += &format!("t {:>3}s | fps {fps:.1} | ms {ms:.1} | draws 4,512 | dropped 0 | upload 1.9 ms | 2560x1440 dlss quality\n", i + 1);
-    }
-    let _ = std::fs::write(home.frame_log(), log);
-    home
+    let _ = lib.save();
+    root
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -155,20 +205,40 @@ struct Toast {
     at: f64,
 }
 
+#[derive(Clone)]
+enum Dialog {
+    Add { dir: PathBuf, detection: Detection, previous: bool, restore: bool },
+    Remove { id: String, name: String, delete_data: bool },
+}
+
+#[derive(Clone)]
+struct Step {
+    name: String,
+    tab: Tab,
+    collapsed: bool,
+    game: usize,
+    dialog: Option<u8>,
+}
+
 struct Shots {
     dir: PathBuf,
-    plan: Vec<(String, Tab, bool)>,
+    plan: Vec<Step>,
     step: usize,
     frames: u32,
     waiting: bool,
 }
 
 struct App {
+    root: PathBuf,
+    library: Library,
+    detectors: Vec<Box<dyn library::Detector>>,
+    detections: HashMap<String, Detection>,
+    arts: HashMap<String, Rc<Art>>,
     home: Home,
     art: Rc<Art>,
     visuals: gamemeta::Visuals,
     tab: Tab,
-    model: Model,
+    store: Store,
     saved: String,
     checks: Vec<syscheck::Check>,
     check_rx: Option<mpsc::Receiver<Vec<syscheck::Check>>>,
@@ -187,9 +257,13 @@ struct App {
     title_note: String,
     collapsed: bool,
     toasts: Vec<Toast>,
+    dialog: Option<Dialog>,
     started: f64,
     rounded: bool,
+    fixture: bool,
     shots: Option<Shots>,
+    /// tests: a lock file that always exists, so no D3D12 device is ever created
+    lock_override: Option<PathBuf>,
 }
 
 fn group_title(g: &str) -> (&'static str, String) {
@@ -208,6 +282,7 @@ fn group_title(g: &str) -> (&'static str, String) {
 
 fn tab_icon(t: Tab) -> &'static str {
     match t {
+        Tab::Library => icon::SQUARES_FOUR,
         Tab::Play => icon::PLAY,
         Tab::Display => icon::MONITOR,
         Tab::Title => icon::SLIDERS_HORIZONTAL,
@@ -221,71 +296,178 @@ fn tab_icon(t: Tab) -> &'static str {
 
 fn tab_subtitle(t: Tab) -> &'static str {
     match t {
+        Tab::Library => "Every game the launcher knows. Each keeps its own settings, profiles, mods and logs.",
         Tab::Play => "",
         Tab::Display => "Output size, window, pacing, and how the picture is upscaled.",
-        Tab::Title => "Written into a copy of the title's settings.xml at launch. The original is never touched.",
+        Tab::Title => "Written into a copy of the title's settings.xml at every launch. The original is never touched.",
         Tab::Features => "Switches for the layer itself. Each default is the measured best.",
         Tab::Mods => "Folders whose files replace the title's by path. Later mods win.",
         Tab::Diagnostics => "The frame line, captures and the system check.",
-        Tab::Profiles => "Named sets of settings. Export and import them as .toml.",
+        Tab::Profiles => "Named sets of settings for this game. Export and import them as .toml.",
         Tab::About => "",
     }
 }
 
 impl App {
-    fn new(ctx: &egui::Context, home: Home, shots: Option<PathBuf>) -> App {
+    fn new(ctx: &egui::Context, root: PathBuf, shots: Option<PathBuf>, fixture: bool) -> App {
         th::install(ctx);
-        let (config, problems) = match home.load() {
-            Ok(c) => {
-                let p = c.problems.clone();
-                (c, p)
-            }
-            Err(e) => (Config::parse("").unwrap(), vec![e]),
-        };
-        let mut art = Art::new(ctx);
-        let game = PathBuf::from(config.get("game.dir").to_string());
-        let visuals = if game.as_os_str().is_empty() { gamemeta::Visuals::default() } else { gamemeta::read(&game) };
-        art.load_title(ctx, &visuals);
-        let log = play::read_last(&home.frame_log());
+        let mut toasts = Vec::new();
+        let library = Library::load(&root).unwrap_or_else(|e| {
+            toasts.push(Toast { text: format!("library: {e}"), tone: Tone::Bad, at: -1.0 });
+            Library { root: root.clone(), games: Vec::new(), selected: None }
+        });
         let mut app = App {
-            profile_name: config.profile.clone(),
-            saved: config.to_toml(),
-            model: Model::new(config),
-            art: Rc::new(art),
-            visuals,
+            home: Home { dir: root.clone() },
+            root,
+            library,
+            detectors: library::detectors(),
+            detections: HashMap::new(),
+            arts: HashMap::new(),
+            art: Rc::new(Art::new(ctx)),
+            visuals: gamemeta::Visuals::default(),
             tab: Tab::Play,
+            store: Store::new(Config::parse("").unwrap()),
+            saved: String::new(),
             checks: Vec::new(),
             check_rx: None,
             checks_at: 0.0,
             mods: Vec::new(),
             conflicts: Vec::new(),
-            profiles: home.profiles(),
-            import_problems: problems.clone(),
+            profiles: Vec::new(),
+            profile_name: String::new(),
+            import_problems: Vec::new(),
             running: None,
             tail: None,
-            session: if log.is_empty() { "No session yet".into() } else { "Last session".into() },
-            log,
+            log: Vec::new(),
+            session: String::new(),
             proof_exe: String::new(),
             proof_args: "--bare".into(),
             title_note: String::new(),
             collapsed: false,
-            toasts: Vec::new(),
+            toasts,
+            dialog: None,
             started: -1.0,
             rounded: false,
+            fixture,
+            lock_override: None,
             shots: shots.map(|dir| {
-                let mut plan: Vec<(String, Tab, bool)> =
-                    Tab::ALL.iter().enumerate().map(|(i, t)| (format!("{:02}-{}", i + 1, slug(t.label())), *t, false)).collect();
-                plan.push(("09-play-sidebar-collapsed".into(), Tab::Play, true));
+                let st = |name: &str, tab, collapsed, game, dialog| Step { name: name.into(), tab, collapsed, game, dialog };
+                let plan = vec![
+                    st("01-library", Tab::Library, false, 0, None),
+                    st("02-library-add-supported", Tab::Library, false, 0, Some(1)),
+                    st("03-library-add-not-supported", Tab::Library, false, 0, Some(2)),
+                    st("04-library-remove-confirm", Tab::Library, false, 0, Some(3)),
+                    st("05-play-key-art", Tab::Play, false, 0, None),
+                    st("06-play-generated-art", Tab::Play, false, 1, None),
+                    st("07-display-upscaler", Tab::Display, false, 0, None),
+                    st("08-title-settings", Tab::Title, false, 0, None),
+                    st("09-features", Tab::Features, false, 0, None),
+                    st("10-mods", Tab::Mods, false, 0, None),
+                    st("11-diagnostics", Tab::Diagnostics, false, 0, None),
+                    st("12-profiles", Tab::Profiles, false, 0, None),
+                    st("13-about", Tab::About, false, 0, None),
+                    st("14-play-sidebar-collapsed", Tab::Play, true, 0, None),
+                ];
                 Shots { dir, plan, step: 0, frames: 0, waiting: false }
             }),
-            home,
         };
-        if !problems.is_empty() {
-            app.toast(Tone::Bad, format!("rebuild.toml: {}", problems.join("; ")));
+        for g in app.library.games.clone() {
+            let d = library::detect(&g.dir, &app.detectors).0;
+            app.detections.insert(g.id.clone(), d);
         }
-        app.refresh_mods();
-        app.start_check();
+        if app.library.games.is_empty() {
+            app.tab = Tab::Library;
+        }
+        app.load_game(ctx);
         app
+    }
+
+    fn game_art(&mut self, ctx: &egui::Context, id: &str, dir: &std::path::Path) -> Rc<Art> {
+        if let Some(a) = self.arts.get(id) {
+            return a.clone();
+        }
+        let mut art = Art::new(ctx);
+        let mut v = gamemeta::read(dir);
+        if self.fixture {
+            v.name = None;
+            v.publisher = None;
+        }
+        art.load_title(ctx, &v);
+        let a = Rc::new(art);
+        self.arts.insert(id.into(), a.clone());
+        a
+    }
+
+    /// Point every tab at the selected game: its settings, mods, log, art and system check.
+    fn load_game(&mut self, ctx: &egui::Context) {
+        if let Some(r) = &mut self.running {
+            r.stop();
+        }
+        self.running = None;
+        self.tail = None;
+        let sel = self.library.selected_game().cloned();
+        self.home = match &sel {
+            Some(g) => self.library.home(&g.id),
+            None => Home { dir: self.root.clone() },
+        };
+        match Store::load(&self.home.rebuild_toml()) {
+            Ok(s) => {
+                if s.recovered {
+                    self.toast(Tone::Info, "Settings recovered from the backup copy (.bak)");
+                }
+                self.import_problems = s.model.config.problems.iter().filter(|p| !p.contains("unknown setting")).cloned().collect();
+                self.store = s;
+            }
+            Err(e) => {
+                self.toast(Tone::Bad, e);
+                self.store = Store::new(Config::parse("").unwrap());
+            }
+        }
+        self.saved = self.store.to_toml();
+        self.profile_name = self.store.model.config.profile.clone();
+        self.profiles = self.home.profiles();
+        (self.art, self.visuals) = match &sel {
+            Some(g) => {
+                let a = self.game_art(ctx, &g.id, &g.dir.clone());
+                let mut v = gamemeta::read(&g.dir);
+                if self.fixture {
+                    v.publisher = None;
+                }
+                v.name = Some(g.name.clone());
+                (a, v)
+            }
+            None => (Rc::new(Art::new(ctx)), gamemeta::Visuals::default()),
+        };
+        self.log = play::read_last(&self.home.frame_log());
+        self.session = if self.log.is_empty() { "No session yet".into() } else { "Last session".into() };
+        self.title_note.clear();
+        self.refresh_mods();
+        self.start_check();
+    }
+
+    fn switch_game(&mut self, ctx: &egui::Context, id: &str) {
+        if self.dirty() {
+            self.save();
+        }
+        if let Err(e) = self.library.select(id) {
+            self.toast(Tone::Bad, e);
+            return;
+        }
+        self.load_game(ctx);
+        let name = self.library.selected_game().map(|g| g.name.clone()).unwrap_or_default();
+        self.toast(Tone::Info, format!("Switched to {name}"));
+    }
+
+    fn pick_game_folder(&mut self) {
+        if let Some(dir) = rfd::FileDialog::new().set_title("Choose a game folder").pick_folder() {
+            self.open_add(dir);
+        }
+    }
+
+    fn open_add(&mut self, dir: PathBuf) {
+        let (detection, _) = library::detect(&dir, &self.detectors);
+        let previous = self.library.has_previous(&dir);
+        self.dialog = Some(Dialog::Add { dir, detection, previous, restore: true });
     }
 
     fn toast(&mut self, tone: Tone, text: impl Into<String>) {
@@ -293,7 +475,10 @@ impl App {
     }
 
     fn start_check(&mut self) {
-        let p = probe(&self.model.config);
+        let mut p = probe(&self.store.model.config);
+        if let Some(l) = &self.lock_override {
+            p.lock = Some(l.clone());
+        }
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(syscheck::run(&p));
@@ -302,13 +487,16 @@ impl App {
     }
 
     fn dirty(&self) -> bool {
-        self.model.config.to_toml() != self.saved
+        self.library.selected.is_some() && self.store.to_toml() != self.saved
     }
 
     fn save(&mut self) -> bool {
-        match self.model.save(&self.home.rebuild_toml()) {
+        if self.library.selected.is_none() {
+            return false;
+        }
+        match self.store.save(&self.home.rebuild_toml()) {
             Ok(()) => {
-                self.saved = self.model.config.to_toml();
+                self.saved = self.store.to_toml();
                 self.toast(Tone::Good, "Settings saved");
                 true
             }
@@ -320,17 +508,17 @@ impl App {
     }
 
     fn refresh_mods(&mut self) {
-        self.mods = mods::merge(&self.model.config.mods, &mods::scan(&self.home.mods_dir()));
+        self.mods = mods::merge(&self.store.model.config.mods, &mods::scan(&self.home.mods_dir()));
         self.mods_changed();
     }
 
     fn mods_changed(&mut self) {
-        self.model.config.mods = mods::to_config(&self.mods);
+        self.store.model.config.mods = mods::to_config(&self.mods);
         self.conflicts = mods::conflicts(&self.home.mods_dir(), &self.mods);
     }
 
     fn game_dir(&self) -> PathBuf {
-        PathBuf::from(self.model.config.get("game.dir").to_string())
+        PathBuf::from(self.store.model.config.get("game.dir").to_string())
     }
 
     fn title_source(&self) -> Option<PathBuf> {
@@ -338,14 +526,15 @@ impl App {
         title::find_source(explicit.as_deref(), &self.game_dir())
     }
 
-    /// U3 at launch: the edited copy of the title's settings.xml, in the launcher's own overlay.
+    /// U3 at every launch: the copy of the title's settings.xml is regenerated from this game's saved
+    /// values (the source of truth), in its own overlay. The original is only read.
     fn write_title_copy(&mut self) -> bool {
         let game = self.game_dir();
         let (ok, note) = match self.title_source() {
             None => (false, "No settings.xml found: title settings not applied (set REBUILD_TITLE_SETTINGS).".to_string()),
             Some(src) => {
                 let before = rebuild_launcher::hash_file(&src).ok();
-                match title::write_copy(&src, Some(&game), &self.home.overlay_dir(), &self.model.config) {
+                match title::write_copy(&src, Some(&game), &self.home.overlay_dir(), &self.store.model.config) {
                     Ok(dst) => {
                         let same = before == rebuild_launcher::hash_file(&src).ok();
                         (same, format!("Copy written to {}. Original {}.", dst.display(), if same { "unchanged" } else { "CHANGED" }))
@@ -438,8 +627,9 @@ impl App {
     }
 }
 
-fn slug(s: &str) -> String {
-    s.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect::<String>().replace("--", "-").replace("--", "-")
+/// The Play hero's height for a window height: the art behind, and the title block over it.
+fn hero_height(h: f32) -> f32 {
+    (h * 0.6).clamp(420.0, 620.0)
 }
 
 // ---------------------------------------------------------------------------------------------- rows
@@ -563,7 +753,7 @@ fn empty_state(ui: &mut egui::Ui, ic: &str, head: &str, body: &str) {
         w::glow(ui.painter(), r.shrink(8.0), th::R_PILL, th::ACCENT, 0.5);
         ui.painter().circle_filled(r.center(), 30.0, alpha(th::ACCENT, 0.12));
         ui.painter().circle_stroke(r.center(), 30.0, th::stroke(1.0, alpha(th::ACCENT, 0.4)));
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, ic, th::regular(26.0), th::ACCENT);
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, ic, th::icon(26.0), th::ACCENT);
         ui.add_space(th::S2);
         w::text(ui, head, th::h2(), th::TEXT);
         ui.add_space(4.0);
@@ -581,6 +771,13 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.frame(ctx);
+    }
+}
+
+impl App {
+    /// One frame of the whole UI (no eframe types, so the smoke test can run it headless).
+    fn frame(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         if self.started < 0.0 {
             self.started = now;
@@ -602,29 +799,39 @@ impl eframe::App for App {
 
         let screen = ctx.screen_rect();
         let t = (now - self.started) as f32;
-        background::paint(&ctx.layer_painter(egui::LayerId::background()), screen, t, 1.0);
+        let bg = ctx.layer_painter(egui::LayerId::background());
+        // a soft, slow gradient; no texture anywhere
+        background::paint(&bg, screen, t * 0.5, 0.8);
 
         self.sidebar(ctx, now);
         egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx, |ui| {
             let full = ui.max_rect();
-            if self.tab == Tab::Play {
-                let hero = Rect::from_min_size(full.min, Vec2::new(full.width(), (full.height() * 0.56).clamp(360.0, 520.0)));
+            if self.tab == Tab::Play && self.library.selected.is_some() {
+                let hero = Rect::from_min_size(full.min, Vec2::new(full.width(), hero_height(full.height())));
                 let p = ui.painter().with_clip_rect(full);
                 background::hero(&p, &self.art, hero, t);
             }
-            self.title_bar(ui, ctx);
             let body = Rect::from_min_max(Pos2::new(full.left(), full.top() + 40.0), full.max);
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body));
             egui::ScrollArea::vertical().auto_shrink(false).show(&mut child, |ui| {
-                let margin = egui::Margin { left: th::S6 as i8, right: th::S6 as i8, top: th::S1 as i8, bottom: th::S6 as i8 };
+                // a centred column: equal margins, at most 1180 wide
+                let side = ((ui.available_width() - 1180.0) / 2.0).max(th::S6).min(120.0);
+                let margin = egui::Margin { left: side as i8, right: side as i8, top: th::S1 as i8, bottom: (th::S6 + 48.0) as i8 };
                 egui::Frame::new().inner_margin(margin).show(ui, |ui| {
-                    ui.set_max_width(1180.0);
+                    let wdt = ui.available_width();
+                    ui.set_width(wdt);
+                    let needs_game = !matches!(self.tab, Tab::Library | Tab::About) && self.library.selected.is_none();
+                    if needs_game {
+                        self.no_game(ui);
+                        return;
+                    }
                     match self.tab {
+                        Tab::Library => self.library_page(ui, t),
                         Tab::Play => self.play(ui, t),
                         Tab::Display | Tab::Features => {
                             page_header(ui, self.tab);
                             let art = self.art.clone();
-                            settings_cards(ui, &art, &mut self.model, self.tab, 0);
+                            settings_cards(ui, &art, &mut self.store.model, self.tab, 0);
                         }
                         Tab::Title => self.title_page(ui),
                         Tab::Mods => self.mods_page(ui),
@@ -635,7 +842,9 @@ impl eframe::App for App {
                 });
             });
         });
+        self.title_bar(ctx);
         self.save_bar(ctx);
+        self.dialogs(ctx);
         self.draw_toasts(ctx, now);
         self.resize_edges(ctx);
         // fade-in splash
@@ -644,11 +853,13 @@ impl eframe::App for App {
             let a = 1.0 - ease_out(s);
             let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Debug, Id::new("splash")));
             p.rect_filled(screen, 0.0, alpha(th::BG_BASE, a));
-            let mark = Rect::from_center_size(screen.center() - Vec2::new(0.0, 16.0), Vec2::splat(56.0));
-            w::glow(&p, mark, th::R_LG, th::ACCENT, a);
+            let rise = 1.0 + 0.04 * ease_out(s.max(0.0));
+            let mark = Rect::from_center_size(screen.center() - Vec2::new(0.0, 20.0), Vec2::splat(64.0 * rise));
+            w::glow(&p, mark, th::R_LG, th::ACCENT, a * 1.4);
             w::gradient_rrect(&p, mark, th::R_LG as f32, alpha(th::ACCENT, a), alpha(th::ACCENT_2, a));
-            p.text(mark.center(), Align2::CENTER_CENTER, icon::ROCKET_LAUNCH, th::regular(26.0), alpha(Color32::WHITE, a));
-            p.text(mark.center_bottom() + Vec2::new(0.0, 24.0), Align2::CENTER_CENTER, TITLE, th::semibold(15.0), alpha(th::TEXT, a));
+            p.text(mark.center(), Align2::CENTER_CENTER, icon::ROCKET_LAUNCH, th::icon(30.0), alpha(Color32::WHITE, a));
+            let g = p.layout_job(th::job(TITLE, (th::bold(20.0), -0.4), alpha(th::TEXT, a)));
+            p.galley(Pos2::new(screen.center().x - g.size().x / 2.0, mark.bottom() + 18.0), g, th::TEXT);
         }
     }
 }
@@ -657,7 +868,7 @@ impl App {
     fn keys(&mut self, ctx: &egui::Context) {
         let (tabs, save, launch, check, collapse) = ctx.input_mut(|i| {
             let mut tab = None;
-            let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8];
+            let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
             for (k, key) in nums.iter().enumerate() {
                 if i.consume_key(egui::Modifiers::COMMAND, *key) {
                     tab = Some(Tab::ALL[k]);
@@ -677,7 +888,7 @@ impl App {
         if save {
             self.save();
         }
-        if launch && !self.game_dir().as_os_str().is_empty() {
+        if launch && self.library.selected.is_some() {
             self.launch(false);
         }
         if check && self.check_rx.is_none() {
@@ -699,8 +910,8 @@ impl App {
             .frame(egui::Frame::new().fill(th::BG_SIDEBAR))
             .show(ctx, |ui| {
                 let r = ui.max_rect();
+                ctx.data_mut(|d| d.insert_temp(Id::new("nav-width"), r.right()));
                 ui.painter().vline(r.right() - 0.5, r.y_range(), th::stroke(1.0, th::HAIRLINE));
-                background::grain(ui.painter(), &self.art, r, 0.35);
                 // logo mark and wordmark (a drag area too)
                 let head = Rect::from_min_size(r.min, Vec2::new(r.width(), 72.0));
                 let drag = ui.interact(head, Id::new("drag-side"), Sense::click_and_drag());
@@ -710,18 +921,54 @@ impl App {
                 let mark = Rect::from_min_size(Pos2::new(r.left() + 22.0, r.top() + 20.0), Vec2::splat(32.0));
                 w::glow(ui.painter(), mark, th::R_MD, th::ACCENT, 0.6);
                 w::gradient_rrect(ui.painter(), mark, th::R_MD as f32, th::ACCENT, th::ACCENT_2);
-                ui.painter().text(mark.center(), Align2::CENTER_CENTER, icon::ROCKET_LAUNCH, th::regular(17.0), Color32::WHITE);
+                ui.painter().text(mark.center(), Align2::CENTER_CENTER, icon::ROCKET_LAUNCH, th::icon(17.0), Color32::WHITE);
                 if label_a > 0.0 {
                     let pos = Pos2::new(mark.right() + 12.0, mark.center().y);
-                    let g = ui.painter().layout_job(th::job("triumph", (th::bold(16.0), -0.3), alpha(th::TEXT, label_a)));
+                    let g = ui.painter().layout_job(th::job("Triumph", (th::bold(17.0), -0.4), alpha(th::TEXT, label_a)));
                     let gw = g.size().x;
                     ui.painter().galley(Pos2::new(pos.x, pos.y - g.size().y / 2.0), g, th::TEXT);
-                    ui.painter().text(Pos2::new(pos.x + gw + 3.0, pos.y), Align2::LEFT_CENTER, "rebuild", th::regular(16.0), alpha(th::TEXT_2, label_a));
+                    ui.painter().text(Pos2::new(pos.x + gw + 4.0, pos.y), Align2::LEFT_CENTER, "Launcher", th::regular(17.0), alpha(th::TEXT_2, label_a));
+                }
+
+                // the selected game: a chip that opens the library
+                let chip_r = Rect::from_min_size(Pos2::new(r.left() + 12.0, r.top() + 76.0), Vec2::new(r.width() - 24.0, 52.0));
+                let chip = ui.interact(chip_r, Id::new("game-chip"), Sense::click());
+                let ch = ctx.animate_bool_with_time(chip.id.with("h"), chip.hovered() || chip.has_focus(), th::T_HOVER);
+                ui.painter().rect_filled(chip_r, CornerRadius::same(th::R_MD), lerp(alpha(th::SURFACE_2, 0.7), th::SURFACE_3, ch));
+                ui.painter().rect_stroke(chip_r, CornerRadius::same(th::R_MD), th::stroke(1.0, lerp(th::HAIRLINE, th::HAIRLINE_HI, ch)), StrokeKind::Inside);
+                let thumb = Rect::from_min_size(Pos2::new(chip_r.left() + 8.0, chip_r.top() + 8.0), Vec2::splat(36.0));
+                match &self.art.logo {
+                    Some((tex, _)) => {
+                        ui.painter().add(egui::epaint::RectShape::filled(thumb, CornerRadius::same(th::R_SM), Color32::WHITE).with_texture(tex.id(), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))));
+                    }
+                    None => {
+                        w::gradient_rrect(ui.painter(), thumb, th::R_SM as f32, alpha(th::ACCENT, 0.5), alpha(th::ACCENT_2, 0.5));
+                        ui.painter().text(thumb.center(), Align2::CENTER_CENTER, icon::GAME_CONTROLLER, th::icon(18.0), Color32::WHITE);
+                    }
+                }
+                if label_a > 0.0 {
+                    let (name, status, col) = match self.library.selected_game() {
+                        Some(g) => {
+                            let ok = matches!(self.detections.get(&g.id), Some(Detection::Supported { .. }));
+                            (g.name.clone(), if ok { "Supported" } else { "Check folder" }, if ok { th::SUCCESS } else { th::WARNING })
+                        }
+                        None => ("No game yet".to_string(), "Add one", th::TEXT_3),
+                    };
+                    let tx = thumb.right() + 10.0;
+                    let name = if name.chars().count() > 18 { format!("{}…", name.chars().take(17).collect::<String>()) } else { name };
+                    ui.painter().text(Pos2::new(tx, chip_r.center().y - 8.0), Align2::LEFT_CENTER, name, th::semibold(13.5), alpha(th::TEXT, label_a));
+                    ui.painter().circle_filled(Pos2::new(tx + 3.0, chip_r.center().y + 9.0), 3.0, alpha(col, label_a));
+                    ui.painter().text(Pos2::new(tx + 11.0, chip_r.center().y + 9.0), Align2::LEFT_CENTER, status, th::medium(11.5), alpha(th::TEXT_2, label_a));
+                    ui.painter().text(Pos2::new(chip_r.right() - 12.0, chip_r.center().y), Align2::RIGHT_CENTER, icon::CARET_UP_DOWN, th::icon(13.0), alpha(th::TEXT_3, label_a));
+                }
+                w::focus_ring(ui, &chip, chip_r, th::R_MD);
+                if chip.clicked() {
+                    self.set_tab(ctx, Tab::Library);
                 }
 
                 // items, with an indicator that slides between them
-                let top = r.top() + 96.0;
-                let item_h = 44.0;
+                let top = r.top() + 148.0;
+                let item_h = 42.0;
                 let idx = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0) as f32;
                 let y = ctx.animate_value_with_time(Id::new("nav-ind"), idx * (item_h + 4.0), th::T_PAGE * 0.8) + top;
                 let ind = Rect::from_min_size(Pos2::new(r.left() + 12.0, y), Vec2::new(r.width() - 24.0, item_h));
@@ -740,9 +987,9 @@ impl App {
                     if !active && h > 0.0 {
                         ui.painter().rect_filled(ir, CornerRadius::same(th::R_MD), alpha(Color32::WHITE, 0.04 * h));
                     }
-                    let col = if active { th::TEXT } else { lerp(th::TEXT_3, th::TEXT_2, h) };
+                    let col = if active { th::TEXT } else { lerp(th::TEXT_2, th::TEXT, h) };
                     let ic_col = if active { th::ACCENT } else { col };
-                    ui.painter().text(Pos2::new(ir.left() + 26.0, ir.center().y), Align2::CENTER_CENTER, tab_icon(*t), th::regular(19.0), ic_col);
+                    ui.painter().text(Pos2::new(ir.left() + 26.0, ir.center().y), Align2::CENTER_CENTER, tab_icon(*t), th::icon(19.0), ic_col);
                     if label_a > 0.0 {
                         ui.painter().text(
                             Pos2::new(ir.left() + 48.0, ir.center().y),
@@ -751,7 +998,7 @@ impl App {
                             if active { th::semibold(14.0) } else { th::medium(14.0) },
                             alpha(col, label_a),
                         );
-                        if label_a > 0.9 && i < 8 {
+                        if label_a > 0.9 && i < 9 {
                             ui.painter().text(Pos2::new(ir.right() - 10.0, ir.center().y), Align2::RIGHT_CENTER, format!("^{}", i + 1), th::mono(10.0), alpha(th::TEXT_3, 0.7 * h));
                         }
                     }
@@ -770,10 +1017,10 @@ impl App {
                 ui.painter().rect_stroke(bottom, CornerRadius::same(th::R_MD), th::stroke(1.0, th::HAIRLINE), StrokeKind::Inside);
                 let av = Pos2::new(bottom.left() + 24.0, bottom.center().y);
                 ui.painter().circle_filled(av, 14.0, alpha(th::ACCENT, 0.2));
-                ui.painter().text(av, Align2::CENTER_CENTER, icon::USER_CIRCLE, th::regular(18.0), th::ACCENT);
+                ui.painter().text(av, Align2::CENTER_CENTER, icon::USER_CIRCLE, th::icon(18.0), th::ACCENT);
                 if label_a > 0.0 {
                     ui.painter().text(Pos2::new(av.x + 22.0, av.y - 8.0), Align2::LEFT_CENTER, "PROFILE", th::semibold(9.5), alpha(th::TEXT_3, label_a));
-                    let name = if self.model.config.profile.is_empty() { "default".to_string() } else { self.model.config.profile.clone() };
+                    let name = if self.store.model.config.profile.is_empty() { "default".to_string() } else { self.store.model.config.profile.clone() };
                     ui.painter().text(Pos2::new(av.x + 22.0, av.y + 8.0), Align2::LEFT_CENTER, name, th::medium(13.0), alpha(th::TEXT, label_a));
                 }
                 let chip = ui.interact(bottom, Id::new("profile-chip"), Sense::click());
@@ -786,7 +1033,7 @@ impl App {
                 let h = ctx.animate_bool_with_time(c.id.with("h"), c.hovered() || c.has_focus(), th::T_HOVER);
                 ui.painter().rect_filled(cr, CornerRadius::same(th::R_MD), alpha(Color32::WHITE, 0.04 * h));
                 let ic = if self.collapsed { icon::CARET_DOUBLE_RIGHT } else { icon::CARET_DOUBLE_LEFT };
-                ui.painter().text(Pos2::new(cr.left() + 26.0, cr.center().y), Align2::CENTER_CENTER, ic, th::regular(16.0), lerp(th::TEXT_3, th::TEXT, h));
+                ui.painter().text(Pos2::new(cr.left() + 26.0, cr.center().y), Align2::CENTER_CENTER, ic, th::icon(16.0), lerp(th::TEXT_3, th::TEXT, h));
                 if label_a > 0.0 {
                     ui.painter().text(Pos2::new(cr.left() + 48.0, cr.center().y), Align2::LEFT_CENTER, "Collapse", th::medium(13.0), alpha(lerp(th::TEXT_3, th::TEXT_2, h), label_a));
                 }
@@ -798,42 +1045,59 @@ impl App {
             });
     }
 
-    fn title_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let full = ui.max_rect();
-        let bar = Rect::from_min_size(full.min, Vec2::new(full.width(), 40.0));
-        let bw = 46.0;
-        let drag_r = Rect::from_min_max(bar.min, Pos2::new(bar.right() - 3.0 * bw, bar.bottom()));
-        let drag = ui.interact(drag_r, Id::new("titlebar"), Sense::click_and_drag());
-        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-        if drag.double_clicked() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-        } else if drag.drag_started() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        }
-        if self.tab != Tab::Play {
-            ui.painter().text(Pos2::new(bar.left() + th::S6, bar.center().y), Align2::LEFT_CENTER, format!("{TITLE}  /  {}", self.tab.label()), th::medium(12.0), th::TEXT_3);
-        }
-        let buttons = [
-            (icon::MINUS, "Minimise", 0),
-            (if maximized { icon::CORNERS_IN } else { icon::SQUARE }, if maximized { "Restore" } else { "Maximise" }, 1),
-            (icon::X, "Close", 2),
-        ];
-        for (k, (ic, tip, what)) in buttons.iter().enumerate() {
-            let r = Rect::from_min_size(Pos2::new(bar.right() - (3 - k) as f32 * bw, bar.top()), Vec2::new(bw, bar.height()));
-            let resp = ui.interact(r, Id::new(("winbtn", k)), Sense::click()).on_hover_text(*tip);
-            let h = ctx.animate_bool_with_time(resp.id.with("h"), resp.hovered(), th::T_HOVER);
-            let fill = if *what == 2 { alpha(th::DANGER, 0.9 * h) } else { alpha(Color32::WHITE, 0.07 * h) };
-            ui.painter().rect_filled(r, 0.0, fill);
-            let col = if *what == 2 { lerp(th::TEXT_2, Color32::WHITE, h) } else { lerp(th::TEXT_2, th::TEXT, h) };
-            ui.painter().text(r.center(), Align2::CENTER_CENTER, *ic, th::regular(14.0), col);
-            if resp.clicked() {
-                match what {
-                    0 => ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
-                    1 => ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized)),
-                    _ => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+    /// Our own title bar, on top of everything: a drag area, the breadcrumb, the fixture label, and
+    /// minimise, maximise and close drawn in theme.
+    fn title_bar(&mut self, ctx: &egui::Context) {
+        let screen = ctx.screen_rect();
+        let left = ctx.data(|d| d.get_temp::<f32>(Id::new("nav-width"))).unwrap_or(0.0);
+        let bar = Rect::from_min_max(Pos2::new(left, screen.top()), Pos2::new(screen.right(), screen.top() + 40.0));
+        egui::Area::new(Id::new("titlebar-area")).order(egui::Order::Foreground).fixed_pos(bar.min).show(ctx, |ui| {
+            ui.allocate_exact_size(bar.size(), Sense::hover());
+            let bw = 46.0;
+            let drag_r = Rect::from_min_max(bar.min, Pos2::new(bar.right() - 3.0 * bw, bar.bottom()));
+            let drag = ui.interact(drag_r, Id::new("titlebar"), Sense::click_and_drag());
+            let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+            if drag.double_clicked() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+            } else if drag.drag_started() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            let game = self.library.selected_game().map(|g| g.name.clone());
+            let crumb = match (&game, self.tab) {
+                (_, Tab::Library) | (_, Tab::About) | (None, _) => format!("{TITLE}  /  {}", self.tab.label()),
+                (Some(g), t) => format!("{TITLE}  /  {g}  /  {}", t.label()),
+            };
+            let x = bar.left() + th::S3;
+            ui.painter().text(Pos2::new(x, bar.center().y), Align2::LEFT_CENTER, &crumb, th::medium(12.0), th::TEXT_2);
+            if self.fixture {
+                let wd = ui.painter().layout_no_wrap(crumb, th::medium(12.0), th::TEXT_2).size().x;
+                let r = Rect::from_min_size(Pos2::new(x + wd + 12.0, bar.center().y - 11.0), Vec2::new(214.0, 22.0));
+                ui.painter().rect_filled(r, CornerRadius::same(th::R_PILL), alpha(th::WARNING, 0.14));
+                ui.painter().rect_stroke(r, CornerRadius::same(th::R_PILL), th::stroke(1.0, alpha(th::WARNING, 0.4)), StrokeKind::Inside);
+                ui.painter().text(r.center(), Align2::CENTER_CENTER, "SCREENSHOT FIXTURE · DEMO DATA", th::semibold(9.5), th::WARNING);
+            }
+            let buttons = [
+                (icon::MINUS, "Minimise", 0),
+                (if maximized { icon::CORNERS_IN } else { icon::SQUARE }, if maximized { "Restore" } else { "Maximise" }, 1),
+                (icon::X, "Close", 2),
+            ];
+            for (k, (ic, tip, what)) in buttons.iter().enumerate() {
+                let r = Rect::from_min_size(Pos2::new(bar.right() - (3 - k) as f32 * bw, bar.top()), Vec2::new(bw, bar.height()));
+                let resp = ui.interact(r, Id::new(("winbtn", k)), Sense::click()).on_hover_text(*tip);
+                let h = ctx.animate_bool_with_time(resp.id.with("h"), resp.hovered(), th::T_HOVER);
+                let fill = if *what == 2 { alpha(th::DANGER, 0.9 * h) } else { alpha(Color32::WHITE, 0.08 * h) };
+                ui.painter().rect_filled(r, 0.0, fill);
+                let col = if *what == 2 { lerp(th::TEXT, Color32::WHITE, h) } else { th::TEXT };
+                ui.painter().text(r.center(), Align2::CENTER_CENTER, *ic, th::icon(14.0), col);
+                if resp.clicked() {
+                    match what {
+                        0 => ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
+                        1 => ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized)),
+                        _ => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                    }
                 }
             }
-        }
+        });
     }
 
     fn resize_edges(&mut self, ctx: &egui::Context) {
@@ -883,17 +1147,21 @@ impl App {
                 .show(ui, |ui| {
                     ui.set_width(size.x - 32.0);
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(icon::FLOPPY_DISK).font(th::regular(17.0)).color(th::ACCENT));
+                        ui.label(egui::RichText::new(icon::FLOPPY_DISK).font(th::icon(17.0)).color(th::ACCENT));
                         ui.label(egui::RichText::new("Unsaved changes").font(th::medium(14.0)).color(th::TEXT));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if w::primary_button(ui, "", "Save   Ctrl+S", Vec2::new(132.0, 32.0), true).clicked() {
                                 self.save();
                             }
                             if w::button(ui, "", "Discard", true).clicked() {
-                                if let Ok(c) = Config::parse(&self.saved) {
-                                    self.model = Model::new(c);
-                                    self.refresh_mods();
-                                    self.toast(Tone::Info, "Changes discarded");
+                                match Store::load(&self.home.rebuild_toml()) {
+                                    Ok(s) => {
+                                        self.store = s;
+                                        self.refresh_mods();
+                                        self.saved = self.store.to_toml();
+                                        self.toast(Tone::Info, "Changes discarded");
+                                    }
+                                    Err(e) => self.toast(Tone::Bad, e),
                                 }
                             }
                         });
@@ -928,7 +1196,7 @@ impl App {
                     .show(ui, |ui| {
                         ui.set_width(width - 28.0);
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(ic).font(th::regular(17.0)).color(col));
+                            ui.label(egui::RichText::new(ic).font(th::icon(17.0)).color(col));
                             ui.add(egui::Label::new(egui::RichText::new(&t.text).font(th::medium(13.0)).color(th::TEXT)).wrap());
                         });
                     })
@@ -942,7 +1210,7 @@ impl App {
     fn play(&mut self, ui: &mut egui::Ui, t: f32) {
         let art = self.art.clone();
         let full_h = ui.ctx().screen_rect().height();
-        let hero_h = (full_h * 0.56).clamp(360.0, 520.0) - 40.0;
+        let hero_h = hero_height(full_h) - 120.0;
         let first_run = self.game_dir().as_os_str().is_empty();
         // hero
         let a = ease_out(((ui.input(|i| i.time) - w::page_t0(ui.ctx())) as f32) / 0.5);
@@ -959,14 +1227,14 @@ impl App {
                     ui.add_space(th::S1);
                 }
                 ui.vertical(|ui| {
-                    let caption = self.visuals.publisher.clone().unwrap_or_else(|| "triumph-rebuild".into());
+                    let caption = self.visuals.publisher.clone().unwrap_or_else(|| "Ready to play".into());
                     w::text(ui, &caption.to_uppercase(), th::caption(), th::TEXT_2);
                     let name = self.visuals.name.clone().unwrap_or_else(|| if first_run { "Welcome".into() } else { "Your title".into() });
                     w::text(ui, &name, th::display(), th::TEXT);
                 });
             });
             ui.add_space(4.0);
-            let c = &self.model.config;
+            let c = &self.store.model.config;
             let sub = if first_run {
                 "Pick the game folder below to get started. It is only ever read.".to_string()
             } else {
@@ -1039,7 +1307,7 @@ impl App {
                 let ui = &mut cols[i];
                 w::card(ui, &art, i, None, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(*ic).font(th::regular(15.0)).color(th::ACCENT));
+                        ui.label(egui::RichText::new(*ic).font(th::icon(15.0)).color(th::ACCENT));
                         w::text(ui, &unit.to_uppercase(), th::caption(), th::TEXT_2);
                     });
                     ui.add_space(4.0);
@@ -1062,19 +1330,19 @@ impl App {
                 w::muted(ui, "Pick the folder the title was installed to. The launcher only reads it; everything it writes goes to its own folder.");
                 ui.add_space(th::S1);
                 for (i, s) in model::settings_in(Tab::Play).enumerate() {
-                    setting_row(ui, &mut self.model, s, i == 0);
+                    setting_row(ui, &mut self.store.model, s, i == 0);
                 }
             });
         }
 
         // console
-        let status = if self.running.is_some() { ("live", th::SUCCESS) } else { ("idle", th::TEXT_3) };
+        let status = if self.running.is_some() { ("live", th::SUCCESS) } else { ("idle", th::TEXT_2) };
         let session = self.session.clone();
         let log_path = self.home.frame_log();
         let mut run_proof = false;
         w::card(ui, &art, 4, None, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(icon::TERMINAL_WINDOW).font(th::regular(17.0)).color(th::ACCENT));
+                ui.label(egui::RichText::new(icon::TERMINAL_WINDOW).font(th::icon(17.0)).color(th::ACCENT));
                 w::text(ui, "Frame line", th::h2(), th::TEXT);
                 w::pill(ui, status.0, status.1, self.running.is_some());
                 ui.label(egui::RichText::new(&session).font(th::small()).color(th::TEXT_3));
@@ -1137,7 +1405,7 @@ impl App {
     fn title_page(&mut self, ui: &mut egui::Ui) {
         let art = self.art.clone();
         page_header(ui, Tab::Title);
-        let next = settings_cards(ui, &art, &mut self.model, Tab::Title, 0);
+        let next = settings_cards(ui, &art, &mut self.store.model, Tab::Title, 0);
         let src = self.title_source();
         let mut write = false;
         w::card(ui, &art, next, Some((icon::FILE_TEXT, "Where it is written")), |ui| {
@@ -1210,13 +1478,17 @@ impl App {
         for i in 0..n {
             let (c, wn) = (count(&self.mods[i].name), wins(&self.mods[i].name));
             let m = &mut self.mods[i];
-            let resp = w::card(ui, &art, i, None, |ui| {
+            let card_id = Id::new(("mod-card", &m.name));
+            let lifted = ui.ctx().data(|d| d.get_temp::<bool>(card_id.with("hov")).unwrap_or(false));
+            let (_, resp) = w::card_hover(ui, i, card_id, |ui| {
                 ui.horizontal(|ui| {
                     let handle = ui.dnd_drag_source(Id::new(("mod-drag", i)), i, |ui| {
-                        ui.label(egui::RichText::new(icon::DOTS_SIX_VERTICAL).font(th::regular(20.0)).color(th::TEXT_3));
+                        let (r, _) = ui.allocate_exact_size(Vec2::new(28.0, 32.0), Sense::hover());
+                        ui.painter().rect_filled(r, CornerRadius::same(th::R_SM), alpha(Color32::WHITE, if lifted { 0.06 } else { 0.0 }));
+                        ui.painter().text(r.center(), Align2::CENTER_CENTER, icon::DOTS_SIX_VERTICAL, th::icon(20.0), if lifted { th::TEXT } else { th::TEXT_2 });
                     });
                     handle.response.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text("Drag to reorder");
-                    ui.label(egui::RichText::new(format!("{:02}", i + 1)).font(th::mono(13.0)).color(th::TEXT_3));
+                    ui.label(egui::RichText::new(format!("{:02}", i + 1)).font(th::mono(13.0)).color(th::TEXT_2));
                     ui.add_space(4.0);
                     changed |= w::toggle(ui, &mut m.enabled).changed();
                     ui.add_space(4.0);
@@ -1224,8 +1496,6 @@ impl App {
                     ui.label(egui::RichText::new(&m.name).font(th::semibold(15.0)).color(name_col));
                     if !m.present {
                         w::pill(ui, "folder missing", th::DANGER, false);
-                    } else if !m.enabled {
-                        w::pill(ui, "off", th::TEXT_3, false);
                     }
                     if m.enabled && c > 0 {
                         w::pill(ui, &format!("{} {c} conflict{}", icon::WARNING, if c == 1 { "" } else { "s" }), th::WARNING, false);
@@ -1242,7 +1512,6 @@ impl App {
                         }
                     });
                 });
-                ui.min_rect()
             });
             let zone = Rect::from_min_max(Pos2::new(resp.left() - th::S3, resp.top() - th::S3), Pos2::new(resp.right() + th::S3, resp.bottom() + th::S3));
             let z = ui.interact(zone, Id::new(("mod-drop", i)), Sense::hover());
@@ -1287,7 +1556,7 @@ impl App {
     fn diagnostics(&mut self, ui: &mut egui::Ui, now: f64) {
         let art = self.art.clone();
         page_header(ui, Tab::Diagnostics);
-        let next = settings_cards(ui, &art, &mut self.model, Tab::Diagnostics, 0);
+        let next = settings_cards(ui, &art, &mut self.store.model, Tab::Diagnostics, 0);
         let mut rerun = false;
         let running = self.check_rx.is_some();
         w::card(ui, &art, next, Some((icon::SHIELD_CHECK, "System check")), |ui| {
@@ -1331,7 +1600,7 @@ impl App {
                         ui.painter().circle_filled(r.center(), rad + 5.0, alpha(col, 0.10 * ease_out(k)));
                         ui.painter().circle_filled(r.center(), rad, alpha(col, 0.22));
                         ui.painter().circle_stroke(r.center(), rad, th::stroke(1.0, alpha(col, 0.6)));
-                        ui.painter().text(r.center(), Align2::CENTER_CENTER, ic, th::regular(14.0 * pop.min(1.2)), alpha(col, ease_out(k)));
+                        ui.painter().text(r.center(), Align2::CENTER_CENTER, ic, th::icon(14.0 * pop.min(1.2)), alpha(col, ease_out(k)));
                     }
                     ui.vertical(|ui| {
                         ui.multiply_opacity(ease_out(k));
@@ -1353,13 +1622,8 @@ impl App {
     }
 
     fn load_profile(&mut self, name: &str) {
-        match self.home.load_profile(name) {
-            Ok(c) => {
-                self.import_problems = c.problems.clone();
-                self.model = Model::new(c);
-                self.refresh_mods();
-                self.toast(Tone::Info, format!("Profile “{name}” loaded. Save to make it active."));
-            }
+        match Store::load(&self.home.profiles_dir().join(format!("{name}.toml"))) {
+            Ok(s) => self.adopt(s, format!("Profile “{name}” loaded. Save to make it active.")),
             Err(e) => self.toast(Tone::Bad, e),
         }
     }
@@ -1391,15 +1655,15 @@ impl App {
             ui.painter().hline(r.x_range(), r.top(), th::stroke(1.0, th::HAIRLINE));
             ui.add_space(th::S2);
             ui.horizontal(|ui| {
-                let mut stable = self.model.config.stable_only;
+                let mut stable = self.store.model.config.stable_only;
                 if w::toggle(ui, &mut stable).changed() {
                     let experimental_set = rebuild_config::REGISTRY
                         .iter()
-                        .any(|s| s.tier == rebuild_config::Tier::Experimental && self.model.config.get(s.key) != s.default.value());
+                        .any(|s| s.tier == rebuild_config::Tier::Experimental && self.store.model.config.get(s.key) != s.default.value());
                     if stable && experimental_set {
                         self.toasts.push(Toast { text: "Reset the experimental switches first".into(), tone: Tone::Bad, at: -1.0 });
                     } else {
-                        self.model.config.stable_only = stable;
+                        self.store.model.config.stable_only = stable;
                     }
                 }
                 ui.vertical(|ui| {
@@ -1413,7 +1677,7 @@ impl App {
                 empty_state(ui, icon::USER_CIRCLE, "No profiles yet", "Save the settings above under a name, and switch between them here or on Play.");
             });
         } else {
-            let current = self.model.config.profile.clone();
+            let current = self.store.model.config.profile.clone();
             let per_row = ((ui.available_width() + th::S2) / (260.0 + th::S2)).floor().max(1.0) as usize;
             for (row, chunk) in self.profiles.chunks(per_row).enumerate() {
                 ui.columns(per_row, |cols| {
@@ -1421,7 +1685,7 @@ impl App {
                         let ui = &mut cols[k];
                         w::card(ui, &art, 1 + row * per_row + k, None, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(icon::USER_CIRCLE).font(th::regular(22.0)).color(th::ACCENT));
+                                ui.label(egui::RichText::new(icon::USER_CIRCLE).font(th::icon(22.0)).color(th::ACCENT));
                                 ui.label(egui::RichText::new(p).font(th::semibold(15.0)).color(th::TEXT));
                                 if *p == current {
                                     w::pill(ui, "active", th::SUCCESS, true);
@@ -1440,9 +1704,9 @@ impl App {
             ui.label(egui::RichText::new(format!("{}  {p}", icon::WARNING_CIRCLE)).font(th::small()).color(th::DANGER));
         }
         if save_as {
-            match self.home.save_profile(&self.profile_name, &self.model.config) {
+            match self.home.save_profile(&self.profile_name, &self.store.model.config) {
                 Ok(_) => {
-                    self.model.config.profile = self.profile_name.trim().to_string();
+                    self.store.model.config.profile = self.profile_name.trim().to_string();
                     self.profiles = self.home.profiles();
                     self.toast(Tone::Good, format!("Profile “{}” saved", self.profile_name.trim()));
                 }
@@ -1454,7 +1718,7 @@ impl App {
         }
         if export {
             if let Some(p) = rfd::FileDialog::new().add_filter("toml", &["toml"]).set_file_name("rebuild.toml").save_file() {
-                match home::export(&self.model.config, &p) {
+                match home::export(&self.store.model.config, &p) {
                     Ok(()) => self.toast(Tone::Good, format!("Exported {}", p.display())),
                     Err(e) => self.toast(Tone::Bad, e),
                 }
@@ -1462,13 +1726,8 @@ impl App {
         }
         if import {
             if let Some(p) = rfd::FileDialog::new().add_filter("toml", &["toml"]).pick_file() {
-                match home::load_file(&p) {
-                    Ok(c) => {
-                        self.import_problems = c.problems.clone();
-                        self.model = Model::new(c);
-                        self.refresh_mods();
-                        self.toast(Tone::Info, format!("Imported {}", p.display()));
-                    }
+                match Store::load(&p) {
+                    Ok(s) => self.adopt(s, format!("Imported {}", p.display())),
                     Err(e) => self.toast(Tone::Bad, e),
                 }
             }
@@ -1482,11 +1741,11 @@ impl App {
             let (mark, _) = ui.allocate_exact_size(Vec2::splat(64.0), Sense::hover());
             w::glow(ui.painter(), mark, th::R_LG, th::ACCENT, 0.8);
             w::gradient_rrect(ui.painter(), mark, th::R_LG as f32, th::ACCENT, th::ACCENT_2);
-            ui.painter().text(mark.center(), Align2::CENTER_CENTER, icon::ROCKET_LAUNCH, th::regular(30.0), Color32::WHITE);
+            ui.painter().text(mark.center(), Align2::CENTER_CENTER, icon::ROCKET_LAUNCH, th::icon(30.0), Color32::WHITE);
             ui.add_space(th::S2);
             ui.vertical(|ui| {
                 ui.add_space(4.0);
-                w::text(ui, "triumph-rebuild", th::display(), th::TEXT);
+                w::text(ui, TITLE, th::display(), th::TEXT);
                 ui.label(egui::RichText::new(format!("Launcher {}  ·  GPL-3.0-only", env!("CARGO_PKG_VERSION"))).font(th::regular(14.0)).color(th::TEXT_2));
             });
         });
@@ -1498,7 +1757,7 @@ impl App {
                 "Creates no GPU device while a measurement is running (REBUILD_MEASURE_LOCK).",
             ] {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(icon::CHECK).font(th::regular(15.0)).color(th::SUCCESS));
+                    ui.label(egui::RichText::new(icon::CHECK).font(th::icon(15.0)).color(th::SUCCESS));
                     w::muted(ui, line);
                 });
             }
@@ -1528,7 +1787,7 @@ impl App {
                 w::muted(ui, line);
             }
             ui.add_space(4.0);
-            ui.label(egui::RichText::new(format!("{} settings in the registry  ·  Ctrl+1…8 pages  ·  Ctrl+S save  ·  Ctrl+Enter launch  ·  F5 check  ·  Ctrl+B sidebar", rebuild_config::REGISTRY.len())).font(th::small()).color(th::TEXT_3));
+            ui.label(egui::RichText::new(format!("{} settings in the registry  ·  Ctrl+1…9 pages  ·  Ctrl+S save  ·  Ctrl+Enter launch  ·  F5 check  ·  Ctrl+B sidebar", rebuild_config::REGISTRY.len())).font(th::small()).color(th::TEXT_3));
         });
     }
 
@@ -1536,6 +1795,9 @@ impl App {
 
     fn shots_step(&mut self, ctx: &egui::Context) {
         let Some(s) = &mut self.shots else { return };
+        if s.step >= s.plan.len() {
+            return;
+        }
         let shot = ctx.input(|i| {
             i.raw.events.iter().find_map(|e| match e {
                 egui::Event::Screenshot { image, .. } => Some(image.clone()),
@@ -1543,8 +1805,7 @@ impl App {
             })
         });
         if let Some(img) = shot {
-            let (name, ..) = &s.plan[s.step];
-            let path = s.dir.join(format!("{name}.png"));
+            let path = s.dir.join(format!("{}.png", s.plan[s.step].name));
             let _ = std::fs::create_dir_all(&s.dir);
             if let Err(e) = save_png(&path, &img) {
                 eprintln!("{}: {e}", path.display());
@@ -1560,25 +1821,379 @@ impl App {
         if s.waiting {
             return;
         }
-        let (_, tab, collapsed) = s.plan[s.step].clone();
+        let step = s.plan[s.step].clone();
         s.frames += 1;
         let first = s.frames == 1;
         // the first page waits out the splash and the check
-        let wait = if s.step == 0 { 150 } else { 75 };
-        let ready = s.frames >= wait;
-        if ready {
+        let wait = if s.step == 0 { 150 } else { 80 };
+        if s.frames >= wait {
             s.waiting = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
         }
         if first {
-            self.collapsed = collapsed;
-            self.set_tab(ctx, tab);
-            if tab == Tab::Play && collapsed {
-                let now = ctx.input(|i| i.time);
-                ctx.data_mut(|d| d.insert_temp(Id::new("page-t0"), now));
+            self.collapsed = step.collapsed;
+            let want = self.library.games.get(step.game).map(|g| g.id.clone());
+            if let Some(id) = want {
+                if self.library.selected.as_deref() != Some(id.as_str()) {
+                    let _ = self.library.select(&id);
+                    self.load_game(ctx);
+                    self.toasts.clear();
+                }
+            }
+            self.dialog = None;
+            let root = self.root.join("packages");
+            match step.dialog {
+                Some(1) => self.open_add(root.join("third")),
+                Some(2) => self.open_add(root.join("older")),
+                Some(3) => {
+                    if let Some(g) = self.library.games.first() {
+                        self.dialog = Some(Dialog::Remove { id: g.id.clone(), name: g.name.clone(), delete_data: false });
+                    }
+                }
+                _ => {}
+            }
+            if step.name.contains("play") && step.game == 0 && !step.collapsed {
+                self.toast(Tone::Good, "Settings saved");
+            }
+            let now = ctx.input(|i| i.time);
+            self.tab = step.tab;
+            ctx.data_mut(|d| d.insert_temp(Id::new("page-t0"), now));
+        }
+    }
+}
+
+impl App {
+    fn confirm_add(&mut self, ctx: &egui::Context, dir: &std::path::Path, detection: &Detection, restore: bool) -> bool {
+        match self.library.add(dir, &self.detectors, restore) {
+            Ok(id) => {
+                self.detections.insert(id, detection.clone());
+                self.load_game(ctx);
+                self.toast(Tone::Good, "Added to the library");
+                true
+            }
+            Err(e) => {
+                self.toast(Tone::Bad, e);
+                false
             }
         }
     }
+
+    fn confirm_remove(&mut self, ctx: &egui::Context, id: &str, name: &str, delete_data: bool) -> bool {
+        let was_selected = self.library.selected.as_deref() == Some(id);
+        if was_selected && self.dirty() {
+            self.save();
+        }
+        match self.library.remove(id, delete_data) {
+            Ok(()) => {
+                self.arts.remove(id);
+                self.detections.remove(id);
+                if was_selected {
+                    self.load_game(ctx);
+                }
+                self.toast(Tone::Info, format!("{name} removed from the library"));
+                true
+            }
+            Err(e) => {
+                self.toast(Tone::Bad, e);
+                false
+            }
+        }
+    }
+
+    /// Take settings from a profile or an imported file, keeping this game's folder.
+    fn adopt(&mut self, mut s: Store, what: String) {
+        let dir = self.game_dir().display().to_string();
+        let _ = s.model.apply(rebuild_config::find("game.dir").unwrap(), Edit::Text(dir));
+        self.import_problems = s.model.config.problems.iter().filter(|p| !p.contains("unknown setting")).cloned().collect();
+        self.store = s;
+        self.refresh_mods();
+        self.toast(Tone::Info, what);
+    }
+
+    /// Pages that need a game, before there is one.
+    fn no_game(&mut self, ui: &mut egui::Ui) {
+        let art = self.art.clone();
+        page_header(ui, self.tab);
+        let mut add = false;
+        w::card(ui, &art, 0, None, |ui| {
+            empty_state(ui, icon::GAME_CONTROLLER, "Add a game first", "Settings, mods and profiles belong to a game. Add its folder to the library to begin.");
+            ui.vertical_centered(|ui| {
+                if w::primary_button(ui, icon::PLUS, "Add a game", Vec2::new(180.0, 44.0), true).clicked() {
+                    add = true;
+                }
+                ui.add_space(th::S2);
+            });
+        });
+        if add {
+            self.pick_game_folder();
+        }
+    }
+
+    fn library_page(&mut self, ui: &mut egui::Ui, t: f32) {
+        ui.add_space(th::S1);
+        let mut add = false;
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                w::text(ui, "Library", th::h1(), th::TEXT);
+                ui.label(egui::RichText::new(tab_subtitle(Tab::Library)).font(th::regular(14.0)).color(th::TEXT_2));
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if w::primary_button(ui, icon::PLUS, "Add a game", Vec2::new(168.0, 40.0), true).clicked() {
+                    add = true;
+                }
+            });
+        });
+        ui.add_space(th::S3);
+        let games = self.library.games.clone();
+        let mut select = None;
+        let mut play = None;
+        let mut remove = None;
+        let per_row = ((ui.available_width() + th::S2) / (280.0 + th::S2)).floor().clamp(1.0, 4.0) as usize;
+        let card_h = ui.ctx().data(|d| d.get_temp::<f32>(Id::new("game-card-h")));
+        let cards: Vec<Option<library::Game>> = games.iter().cloned().map(Some).chain(std::iter::once(None)).collect();
+        let ctx = ui.ctx().clone();
+        for (row, chunk) in cards.chunks(per_row).enumerate() {
+            ui.columns(per_row, |cols| {
+                for (k, g) in chunk.iter().enumerate() {
+                    let ui = &mut cols[k];
+                    let index = row * per_row + k;
+                    match g {
+                        Some(g) => {
+                            let art = self.game_art(&ctx, &g.id, &g.dir);
+                            let selected = self.library.selected.as_deref() == Some(g.id.as_str());
+                            let det = self.detections.get(&g.id).cloned().unwrap_or(Detection::NotMine);
+                            let (_, rect) = w::card_hover(ui, index, Id::new(("game-card", &g.id)), |ui| {
+                                // the art: key art cover-fitted, or the generated glow
+                                let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ui.available_width() * 9.0 / 16.0), Sense::hover());
+                                thumb(ui.painter(), &art, r, t);
+                                if selected {
+                                    let pr = Rect::from_min_size(r.left_top() + Vec2::new(12.0, 12.0), Vec2::new(86.0, 24.0));
+                                    w::glow(ui.painter(), pr, th::R_PILL, th::ACCENT, 0.6);
+                                    w::gradient_rrect(ui.painter(), pr, 12.0, th::ACCENT, th::ACCENT_2);
+                                    ui.painter().text(pr.center(), Align2::CENTER_CENTER, "SELECTED", th::semibold(10.0), Color32::WHITE);
+                                }
+                                ui.add_space(th::S2);
+                                w::text(ui, &g.name, th::h2(), th::TEXT);
+                                ui.horizontal(|ui| match &det {
+                                    Detection::Supported { detail, .. } => {
+                                        w::pill(ui, &format!("{} supported", icon::CHECK), th::SUCCESS, false);
+                                        ui.label(egui::RichText::new(detail).font(th::small()).color(th::TEXT_2));
+                                    }
+                                    Detection::Unsupported { reason, .. } => {
+                                        w::pill(ui, "not supported yet", th::WARNING, false).on_hover_text(reason);
+                                    }
+                                    Detection::NotMine => {
+                                        w::pill(ui, "folder missing", th::DANGER, false);
+                                    }
+                                });
+                                ui.add(egui::Label::new(egui::RichText::new(g.dir.display().to_string()).font(th::mono(11.5)).color(th::TEXT_3)).truncate()).on_hover_text(g.dir.display().to_string());
+                                ui.add_space(th::S1);
+                                ui.horizontal(|ui| {
+                                    if w::primary_button(ui, icon::PLAY, "Play", Vec2::new(104.0, 34.0), true).clicked() {
+                                        play = Some(g.id.clone());
+                                    }
+                                    if !selected && w::button(ui, icon::CHECK, "Select", true).clicked() {
+                                        select = Some(g.id.clone());
+                                    }
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if w::danger_button(ui, icon::TRASH, "", true).on_hover_text("Remove from the library").clicked() {
+                                            remove = Some((g.id.clone(), g.name.clone()));
+                                        }
+                                    });
+                                });
+                            });
+                            ui.ctx().data_mut(|d| d.insert_temp(Id::new("game-card-h"), rect.height()));
+                        }
+                        None => {
+                            let (resp, _) = w::card_hover(ui, index, Id::new("add-card"), |ui| {
+                                let hgt = card_h.map(|c| c - 2.0 * th::S3).unwrap_or(ui.available_width() * 9.0 / 16.0 + 150.0);
+                                let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), hgt), Sense::click());
+                                let h = ui.ctx().animate_bool_with_time(resp.id.with("h"), resp.hovered() || resp.has_focus(), th::T_HOVER);
+                                let dash = lerp(th::HAIRLINE_HI, alpha(th::ACCENT, 0.8), h);
+                                let b = r.shrink(2.0);
+                                let st = th::stroke(1.5, dash);
+                                let k = th::R_MD as f32;
+                                for seg in [
+                                    [Pos2::new(b.left() + k, b.top()), Pos2::new(b.right() - k, b.top())],
+                                    [Pos2::new(b.left() + k, b.bottom()), Pos2::new(b.right() - k, b.bottom())],
+                                    [Pos2::new(b.left(), b.top() + k), Pos2::new(b.left(), b.bottom() - k)],
+                                    [Pos2::new(b.right(), b.top() + k), Pos2::new(b.right(), b.bottom() - k)],
+                                ] {
+                                    ui.painter().extend(egui::Shape::dashed_line(&seg, st, 8.0, 6.0));
+                                }
+                                let c = r.center() - Vec2::new(0.0, 18.0);
+                                ui.painter().circle_filled(c, 26.0, alpha(th::ACCENT, 0.12 + 0.1 * h));
+                                ui.painter().text(c, Align2::CENTER_CENTER, icon::PLUS, th::icon(24.0), th::ACCENT);
+                                ui.painter().text(c + Vec2::new(0.0, 46.0), Align2::CENTER_CENTER, "Add a game", th::semibold(15.0), th::TEXT);
+                                ui.painter().text(c + Vec2::new(0.0, 68.0), Align2::CENTER_CENTER, "Pick its folder; the launcher checks what it is", th::regular(12.5), th::TEXT_2);
+                                w::focus_ring(ui, &resp, r, th::R_MD);
+                                resp
+                            });
+                            if resp.clicked() {
+                                add = true;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        if games.is_empty() {
+            ui.label(egui::RichText::new("Each game keeps its own settings, profiles, mods and frame log, saved under the launcher's own folder and never in the game's.").font(th::small()).color(th::TEXT_2));
+        }
+        if add {
+            self.pick_game_folder();
+        }
+        if let Some(id) = select {
+            self.switch_game(&ctx, &id);
+        }
+        if let Some(id) = play {
+            if self.library.selected.as_deref() != Some(id.as_str()) {
+                self.switch_game(&ctx, &id);
+            }
+            self.set_tab(&ctx, Tab::Play);
+        }
+        if let Some((id, name)) = remove {
+            self.dialog = Some(Dialog::Remove { id, name, delete_data: false });
+        }
+    }
+
+    fn dialogs(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.dialog.clone() else { return };
+        let frame = egui::Frame::new()
+            .fill(alpha(th::SURFACE_2, 0.98))
+            .stroke(th::stroke(1.0, th::HAIRLINE_HI))
+            .corner_radius(CornerRadius::same(th::R_LG))
+            .shadow(egui::epaint::Shadow { offset: [0, 18], blur: 48, spread: 0, color: Color32::from_black_alpha(170) })
+            .inner_margin(egui::Margin::same(th::S3 as i8));
+        let mut close = false;
+        let mut repick = false;
+        let mut next: Option<Dialog> = None;
+        let resp = egui::Modal::new(Id::new("dialog")).backdrop_color(Color32::from_black_alpha(150)).frame(frame).show(ctx, |ui| {
+            ui.set_width(520.0);
+            match dialog.clone() {
+                Dialog::Add { dir, detection, previous, mut restore } => {
+                    let (ic, col, head) = match &detection {
+                        Detection::Supported { .. } => (icon::CHECK_CIRCLE, th::SUCCESS, "Ready to add"),
+                        _ => (icon::WARNING_CIRCLE, th::WARNING, "Not supported yet"),
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(ic).font(th::icon(26.0)).color(col));
+                        w::text(ui, head, th::h2(), th::TEXT);
+                    });
+                    ui.add_space(th::S1);
+                    ui.label(egui::RichText::new(dir.display().to_string()).font(th::mono(12.0)).color(th::TEXT_2));
+                    ui.add_space(th::S2);
+                    match &detection {
+                        Detection::Supported { name, detail } => {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(name).font(th::semibold(16.0)).color(th::TEXT));
+                                w::pill(ui, &format!("{} supported", icon::CHECK), th::SUCCESS, true);
+                            });
+                            w::muted(ui, &format!("{detail}. It gets its own settings, profiles, mods and frame log. The folder is only ever read."));
+                            if previous {
+                                ui.add_space(th::S2);
+                                ui.horizontal(|ui| {
+                                    if w::toggle(ui, &mut restore).changed() {
+                                        next = Some(Dialog::Add { dir: dir.clone(), detection: detection.clone(), previous, restore });
+                                    }
+                                    ui.vertical(|ui| {
+                                        ui.label(egui::RichText::new("Restore previous settings").font(th::medium(14.0)).color(th::TEXT));
+                                        w::muted(ui, "This folder was in the library before; its settings were kept. Off: they are set aside, not deleted.");
+                                    });
+                                });
+                            }
+                        }
+                        Detection::Unsupported { name, reason } => {
+                            if let Some(n) = name {
+                                ui.label(egui::RichText::new(n).font(th::semibold(16.0)).color(th::TEXT));
+                            }
+                            ui.label(egui::RichText::new(reason).font(th::regular(13.5)).color(th::WARNING));
+                            w::muted(ui, "Nothing was added. Triumph Launcher runs Xbox Series packages today; more can plug in later.");
+                        }
+                        Detection::NotMine => {}
+                    }
+                    ui.add_space(th::S3);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let ok = matches!(detection, Detection::Supported { .. });
+                        if ok {
+                            if w::primary_button(ui, icon::PLUS, "Add to library", Vec2::new(170.0, 38.0), true).clicked() {
+                                self.confirm_add(ctx, &dir, &detection, restore);
+                                close = true;
+                            }
+                        } else if w::button(ui, icon::FOLDER_OPEN, "Choose another folder", true).clicked() {
+                            repick = true;
+                        }
+                        if w::button(ui, "", "Cancel", true).clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::Remove { id, name, mut delete_data } => {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(icon::TRASH).font(th::icon(24.0)).color(th::DANGER));
+                        w::text(ui, &format!("Remove {name}?"), th::h2(), th::TEXT);
+                    });
+                    ui.add_space(th::S1);
+                    w::muted(ui, "Removes it from the library. The game folder is never touched.");
+                    ui.add_space(th::S2);
+                    ui.horizontal(|ui| {
+                        if w::toggle(ui, &mut delete_data).changed() {
+                            next = Some(Dialog::Remove { id: id.clone(), name: name.clone(), delete_data });
+                        }
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new("Also delete the launcher's data for it").font(th::medium(14.0)).color(th::TEXT));
+                            w::muted(ui, "Its settings, profiles, mods list, frame log and overlay copy. Off (the default): kept, and offered back if you add it again.");
+                        });
+                    });
+                    ui.add_space(th::S3);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if w::danger_button(ui, icon::TRASH, if delete_data { "Remove and delete data" } else { "Remove" }, true).clicked() {
+                            self.confirm_remove(ctx, &id, &name, delete_data);
+                            close = true;
+                        }
+                        if w::button(ui, "", "Cancel", true).clicked() {
+                            close = true;
+                        }
+                    });
+                }
+            }
+        });
+        if let Some(n) = next {
+            self.dialog = Some(n);
+        }
+        if close || repick || resp.should_close() {
+            self.dialog = None;
+        }
+        if repick {
+            self.pick_game_folder();
+        }
+    }
+}
+
+/// A game's card art: its key art cover-fitted with rounded top corners, or the generated glow.
+fn thumb(p: &egui::Painter, art: &Art, r: Rect, t: f32) {
+    let cr = CornerRadius { nw: th::R_MD, ne: th::R_MD, sw: th::R_SM, se: th::R_SM };
+    match &art.key_art {
+        Some((tex, size)) => {
+            let scale = (r.width() / size.x).max(r.height() / size.y);
+            let shown = *size * scale;
+            let uv = Rect::from_center_size(Pos2::new(0.5, 0.5), Vec2::new(r.width() / shown.x, r.height() / shown.y));
+            p.add(egui::epaint::RectShape::filled(r, cr, Color32::WHITE).with_texture(tex.id(), uv));
+        }
+        None => {
+            p.rect_filled(r, cr, th::BG_BASE);
+            let pc = p.with_clip_rect(r);
+            background::radial(&pc, r.left_top() + Vec2::new(r.width() * (0.3 + 0.05 * (t * 0.2).sin()), r.height() * 0.3), r.width() * 0.6, alpha(th::ACCENT, 0.55));
+            background::radial(&pc, r.left_top() + Vec2::new(r.width() * 0.85, r.height() * (0.8 + 0.05 * (t * 0.15).cos())), r.width() * 0.5, alpha(th::ACCENT_2, 0.45));
+            pc.text(r.center(), Align2::CENTER_CENTER, icon::GAME_CONTROLLER, th::icon(42.0), alpha(Color32::WHITE, 0.85));
+        }
+    }
+    if let Some((tex, _)) = &art.logo {
+        let lr = Rect::from_min_size(Pos2::new(r.left() + 12.0, r.bottom() - 60.0), Vec2::splat(48.0));
+        w::glow(p, lr, th::R_MD, Color32::BLACK, 1.0);
+        p.add(egui::epaint::RectShape::filled(lr, CornerRadius::same(th::R_MD), Color32::WHITE).with_texture(tex.id(), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0))));
+    }
+    p.rect_stroke(r, cr, th::stroke(1.0, th::HAIRLINE), StrokeKind::Inside);
 }
 
 fn save_png(path: &std::path::Path, img: &egui::ColorImage) -> Result<(), String> {
@@ -1597,10 +2212,189 @@ fn round_corners() {
         use windows::core::w;
         use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
         use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
-        if let Ok(hwnd) = FindWindowW(None, w!("triumph-rebuild")) {
+        if let Ok(hwnd) = FindWindowW(None, w!("Triumph Launcher")) {
             let pref = DWMWCP_ROUND;
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const _ as *const _, std::mem::size_of_val(&pref) as u32);
         }
     }
 }
 
+
+#[cfg(test)]
+mod smoke {
+    //! The real app's flow, headless: every page, add two games, switch, change a setting, save,
+    //! remove one, "restart" (a new App on the same folder), check the setting persisted, every page
+    //! again. Runs egui frames without a renderer or a window, and creates no D3D12 device.
+    use super::*;
+
+    fn package(root: &std::path::Path, folder: &str, name: &str) -> PathBuf {
+        let d = root.join(folder);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("MicrosoftGame.config"), format!(r#"<Game><Executable Name="placeholder.exe" TargetDeviceFamily="Scarlett" /><ShellVisuals DefaultDisplayName="{name}" /></Game>"#)).unwrap();
+        std::fs::write(d.join("placeholder.exe"), b"MZ").unwrap();
+        d
+    }
+
+    struct Run {
+        ctx: egui::Context,
+        t: f64,
+    }
+    impl Run {
+        fn frames(&mut self, app: &mut App, n: usize) {
+            for _ in 0..n {
+                self.t += 1.0 / 60.0;
+                let input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))),
+                    time: Some(self.t),
+                    ..Default::default()
+                };
+                let _ = self.ctx.run(input, |ctx| app.frame(ctx));
+            }
+        }
+        fn every_page(&mut self, app: &mut App) {
+            for tab in Tab::ALL {
+                app.set_tab(&self.ctx.clone(), tab);
+                self.frames(app, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn the_whole_flow_runs_without_a_panic_and_settings_persist() {
+        let root = std::env::temp_dir().join(format!("triumph-launcher-smoke-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let games = root.join("games-on-disk");
+        let a = package(&games, "a", "Placeholder A");
+        let b = package(&games, "b", "Placeholder B");
+        let app_root = root.join("app");
+        let lock = root.join("MEASURING");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&lock, b"").unwrap();
+
+        let ctx = egui::Context::default();
+        let mut run = Run { ctx: ctx.clone(), t: 0.0 };
+        let mut app = App::new(&ctx, app_root.clone(), None, false);
+        app.lock_override = Some(lock.clone());
+        app.start_check();
+        // an empty library: every page shows its empty state
+        assert_eq!(app.tab, Tab::Library);
+        run.every_page(&mut app);
+
+        // add two games through the same path as the dialog
+        for dir in [&a, &b] {
+            app.open_add(dir.clone());
+            run.frames(&mut app, 2);
+            let Some(Dialog::Add { detection, restore, .. }) = app.dialog.clone() else { panic!("no add dialog") };
+            assert!(matches!(detection, Detection::Supported { .. }));
+            assert!(app.confirm_add(&ctx, dir, &detection, restore));
+            app.dialog = None;
+            run.frames(&mut app, 2);
+        }
+        assert_eq!(app.library.games.len(), 2);
+        assert_eq!(app.library.selected_game().unwrap().name, "Placeholder B");
+        run.every_page(&mut app);
+
+        // switch to A, change a setting, save
+        let ida = app.library.games[0].id.clone();
+        let idb = app.library.games[1].id.clone();
+        app.switch_game(&ctx, &ida);
+        assert_eq!(app.game_dir(), a);
+        let wdt = rebuild_config::find("display.width").unwrap();
+        app.store.model.apply(wdt, Edit::Slide(2560)).unwrap();
+        assert!(app.dirty());
+        run.frames(&mut app, 3);
+        assert!(app.save());
+        assert!(!app.dirty());
+        // B is untouched
+        app.switch_game(&ctx, &idb);
+        assert_eq!(app.store.model.config.int("display.width"), 3840);
+        run.every_page(&mut app);
+
+        // remove B (keeping its data), which was selected: A becomes selected
+        assert!(app.confirm_remove(&ctx, &idb, "Placeholder B", false));
+        assert_eq!(app.library.selected.as_deref(), Some(ida.as_str()));
+        assert_eq!(app.store.model.config.int("display.width"), 2560);
+        run.every_page(&mut app);
+
+        // restart
+        drop(app);
+        let ctx2 = egui::Context::default();
+        let mut run2 = Run { ctx: ctx2.clone(), t: 0.0 };
+        let mut app = App::new(&ctx2, app_root.clone(), None, false);
+        app.lock_override = Some(lock.clone());
+        assert_eq!(app.library.games.len(), 1);
+        assert_eq!(app.library.selected.as_deref(), Some(ida.as_str()));
+        assert_eq!(app.store.model.config.int("display.width"), 2560, "the setting persisted");
+        run2.every_page(&mut app);
+
+        // re-add B: its old settings are offered back
+        app.open_add(b.clone());
+        let Some(Dialog::Add { previous, .. }) = app.dialog.clone() else { panic!() };
+        assert!(previous);
+        app.dialog = None;
+        // remove A with its data: the library is empty again and every page still draws
+        assert!(app.confirm_remove(&ctx2, &ida, "Placeholder A", true));
+        assert!(app.library.games.is_empty());
+        run2.every_page(&mut app);
+        assert!(a.join("MicrosoftGame.config").exists() && b.join("placeholder.exe").exists(), "game folders untouched");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod type_check {
+    //! Every text style lays out a pangram with real glyphs: none blank, none missing. This catches a
+    //! font family order that lets the icon font (which has blank Latin glyphs) win over Inter.
+    use super::*;
+
+    #[test]
+    fn every_text_style_renders_every_glyph() {
+        let ctx = egui::Context::default();
+        th::install(&ctx);
+        let input = || egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))), ..Default::default() };
+        let _ = ctx.run(input(), |_| {});
+        let _ = ctx.run(input(), |_| {});
+        let text = "The quick brown fox jumps over the lazy dog 0123456789 ·&,. THE QUICK BROWN FOX";
+        let styles = [
+            ("body", th::body()),
+            ("small", th::small()),
+            ("regular 14", th::regular(14.0)),
+            ("medium 13.5 (buttons, sidebar)", th::medium(13.5)),
+            ("semibold 16 (h2)", th::semibold(16.0)),
+            ("semibold 26 (h1)", th::h1().0),
+            ("bold 40 (display)", th::display().0),
+            ("bold 36 (numerals)", th::numerals().0),
+            ("caption", th::caption().0),
+            ("mono", th::mono(12.5)),
+        ];
+        let mut bad = Vec::new();
+        ctx.fonts(|f| {
+            for (name, font) in &styles {
+                let g = f.layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE);
+                let glyphs: Vec<_> = g.rows.iter().flat_map(|r| r.glyphs.iter()).collect();
+                if glyphs.len() != text.chars().count() {
+                    bad.push(format!("{name}: {} glyphs for {} chars", glyphs.len(), text.chars().count()));
+                }
+                for gl in glyphs {
+                    if gl.chr == ' ' {
+                        continue;
+                    }
+                    if !f.has_glyph(font, gl.chr) {
+                        bad.push(format!("{name}: no glyph for {:?}", gl.chr));
+                    } else if gl.uv_rect.is_nothing() || gl.uv_rect.size.x <= 0.0 || gl.uv_rect.size.y <= 0.0 {
+                        bad.push(format!("{name}: blank glyph for {:?}", gl.chr));
+                    }
+                }
+            }
+            // and the icon family draws every icon with a shape
+            for (n, s) in ui::icons::ALL {
+                let g = f.layout_no_wrap(s.to_string(), th::icon(16.0), Color32::WHITE);
+                let gl = &g.rows[0].glyphs[0];
+                if gl.uv_rect.is_nothing() {
+                    bad.push(format!("icon {n}: blank"));
+                }
+            }
+        });
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+}

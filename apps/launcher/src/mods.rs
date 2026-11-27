@@ -1,10 +1,8 @@
 //! U4: mods. A mod is a folder `mods/<name>/` whose files replace title files by relative path. The
 //! order is the `[[mods]]` list in `rebuild.toml`; later mods win. Conflicts (one path provided by two
-//! or more enabled mods) are found by walking the folders, case-insensitively like the console, until
-//! lane `vfs`'s crate merges and provides `conflicts()`.
+//! or more enabled mods) come from lane `vfs`'s `ModSet::conflicts`, case-insensitive like the console.
 
 use rebuild_config::Mod;
-use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,49 +57,25 @@ pub fn move_down(entries: &mut [Entry], i: usize) {
     }
 }
 
-/// Every file under a mod folder, as a relative path with `/` separators.
-pub fn files(mod_dir: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut stack = vec![(mod_dir.to_path_buf(), String::new())];
-    while let Some((dir, rel)) = stack.pop() {
-        for e in std::fs::read_dir(&dir).into_iter().flatten().filter_map(|e| e.ok()) {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let r = if rel.is_empty() { name } else { format!("{rel}/{name}") };
-            match e.file_type() {
-                Ok(t) if t.is_dir() => stack.push((e.path(), r)),
-                Ok(t) if t.is_file() => out.push(r),
-                _ => {}
-            }
-        }
-    }
-    out.sort();
-    out
+pub use rebuild_vfs::Conflict;
+
+/// The mods as lane `vfs`'s `ModSet`, in this list's order (present folders only).
+pub fn mod_set(mods_dir: &Path, entries: &[Entry]) -> rebuild_vfs::ModSet {
+    let found = rebuild_vfs::ModSet::discover(mods_dir).unwrap_or_default();
+    let mods = entries
+        .iter()
+        .filter(|e| e.present)
+        .filter_map(|e| {
+            let m = found.mods.iter().find(|m| m.name.eq_ignore_ascii_case(&e.name))?;
+            Some(rebuild_vfs::Mod { name: e.name.clone(), root: m.root.clone(), enabled: e.enabled })
+        })
+        .collect();
+    rebuild_vfs::ModSet { mods }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Conflict {
-    /// as the first provider spells it
-    pub path: String,
-    /// enabled mods providing it, in load order
-    pub providers: Vec<String>,
-    /// the last provider: its file is the one the title sees
-    pub winner: String,
-}
-
-/// Paths provided by more than one enabled, present mod; sorted by path.
+/// Paths provided by more than one enabled, present mod (`rebuild_vfs::ModSet::conflicts`).
 pub fn conflicts(mods_dir: &Path, entries: &[Entry]) -> Vec<Conflict> {
-    let mut by_path: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
-    for e in entries.iter().filter(|e| e.enabled && e.present) {
-        for f in files(&mods_dir.join(&e.name)) {
-            let slot = by_path.entry(f.to_lowercase()).or_insert_with(|| (f.clone(), Vec::new()));
-            slot.1.push(e.name.clone());
-        }
-    }
-    by_path
-        .into_values()
-        .filter(|(_, p)| p.len() > 1)
-        .map(|(path, providers)| Conflict { path, winner: providers.last().unwrap().clone(), providers })
-        .collect()
+    mod_set(mods_dir, entries).conflicts().unwrap_or_default()
 }
 
 #[cfg(test)]

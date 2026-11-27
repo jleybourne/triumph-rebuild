@@ -45,8 +45,7 @@ pub const GLASS: Color32 = rgb(0x0C, 0x0E, 0x14);
 pub fn glass() -> Color32 {
     alpha(GLASS, 0.80)
 }
-/// The window-wide grain, kept near invisible (about 2.5 %).
-pub const GRAIN: f32 = 0.22;
+
 
 // radius
 pub const R_SM: u8 = 8;
@@ -88,6 +87,10 @@ pub fn semibold(size: f32) -> FontId {
 }
 pub fn bold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("bold".into()))
+}
+/// Phosphor icons on their own.
+pub fn icon(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name("icons".into()))
 }
 pub fn mono(size: f32) -> FontId {
     FontId::new(size, FontFamily::Monospace)
@@ -133,15 +136,16 @@ pub fn install(ctx: &egui::Context) {
     add(&mut fonts, "inter-bold", include_bytes!("../../assets/fonts/Inter-Bold.ttf"));
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     let fallback: Vec<String> = fonts.families[&FontFamily::Proportional].clone();
-    // Inter first, then Phosphor icons, then egui's emoji faces
-    let mut prop = vec!["inter".to_string()];
-    prop.extend(fallback.iter().filter(|f| *f != "Ubuntu-Light").cloned());
-    fonts.families.insert(FontFamily::Proportional, prop.clone());
-    for (fam, face) in [("medium", "inter-medium"), ("semibold", "inter-semibold"), ("bold", "inter-bold")] {
+    // Inter first, then Phosphor (for icons inside text), then egui's emoji faces
+    let rest: Vec<String> = fallback.iter().filter(|f| *f != "Ubuntu-Light").cloned().collect();
+    for (fam, face) in [(FontFamily::Proportional, "inter"), (FontFamily::Name("medium".into()), "inter-medium"), (FontFamily::Name("semibold".into()), "inter-semibold"), (FontFamily::Name("bold".into()), "inter-bold")] {
         let mut v = vec![face.to_string()];
-        v.extend(prop.iter().skip(1).cloned());
-        fonts.families.insert(FontFamily::Name(fam.into()), v);
+        v.extend(rest.iter().cloned());
+        fonts.families.insert(fam, v);
     }
+    // standalone icons use Phosphor alone: Inter has private-use alternates that would win, and
+    // Phosphor has blank Latin glyphs, so neither can go first in a shared family
+    fonts.families.insert(FontFamily::Name("icons".into()), vec!["phosphor".to_string()]);
     if let Some(m) = fonts.families.get_mut(&FontFamily::Monospace) {
         m.push("phosphor".into());
     }

@@ -7,6 +7,7 @@ use rebuild_config::{Apply, Config, Kind, Setting, Tier, Value, REGISTRY};
 /// The launcher's tabs, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
+    Library,
     Play,
     Display,
     Title,
@@ -18,11 +19,12 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 8] =
-        [Tab::Play, Tab::Display, Tab::Title, Tab::Features, Tab::Mods, Tab::Diagnostics, Tab::Profiles, Tab::About];
+    pub const ALL: [Tab; 9] =
+        [Tab::Library, Tab::Play, Tab::Display, Tab::Title, Tab::Features, Tab::Mods, Tab::Diagnostics, Tab::Profiles, Tab::About];
 
     pub fn label(self) -> &'static str {
         match self {
+            Tab::Library => "Library",
             Tab::Play => "Play",
             Tab::Display => "Display & upscaler",
             Tab::Title => "Title settings",

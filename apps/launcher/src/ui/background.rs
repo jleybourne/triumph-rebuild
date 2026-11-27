@@ -1,21 +1,21 @@
-//! The moving background, the frosted-glass grain, and the Play hero's key art.
+//! The moving background and the Play hero's key art. No texture or grain anywhere.
 //!
 //! The background is a vertex-coloured mesh: three soft glows in the accent family drift slowly over the
-//! base colour. The grain is a small generated noise texture tiled over glass panels. Key art is decoded
+//! base colour. Key art is decoded
 //! at run time from the game folder (read-only) and never copied anywhere.
 
 use super::theme::{self, alpha, lerp};
 use eframe::egui::{self, Color32, ColorImage, Mesh, Pos2, Rect, TextureHandle, TextureOptions, Vec2};
 
 pub struct Art {
-    pub noise: TextureHandle,
     pub key_art: Option<(TextureHandle, Vec2)>,
     pub logo: Option<(TextureHandle, Vec2)>,
 }
 
 impl Art {
     pub fn new(ctx: &egui::Context) -> Art {
-        Art { noise: noise_texture(ctx), key_art: None, logo: None }
+        let _ = ctx;
+        Art { key_art: None, logo: None }
     }
 
     pub fn load_title(&mut self, ctx: &egui::Context, visuals: &rebuild_launcher::gamemeta::Visuals) {
@@ -29,30 +29,6 @@ impl Art {
         self.key_art = visuals.splash.as_deref().and_then(|p| load(p, "key-art"));
         self.logo = visuals.logo.as_deref().and_then(|p| load(p, "title-logo"));
     }
-}
-
-/// 128 x 128 grey grain, tiled.
-fn noise_texture(ctx: &egui::Context) -> TextureHandle {
-    let n = 128usize;
-    let mut s: u32 = 0x9e37_79b9;
-    let px: Vec<Color32> = (0..n * n)
-        .map(|_| {
-            s ^= s << 13;
-            s ^= s >> 17;
-            s ^= s << 5;
-            let v = (s >> 24) as u8;
-            Color32::from_white_alpha(v / 9)
-        })
-        .collect();
-    ctx.load_texture("grain", ColorImage { size: [n, n], pixels: px }, TextureOptions::LINEAR_REPEAT)
-}
-
-/// Grain over a rect (glass).
-pub fn grain(p: &egui::Painter, art: &Art, rect: Rect, strength: f32) {
-    let uv = Rect::from_min_size(Pos2::ZERO, rect.size() / 128.0);
-    let mut m = Mesh::with_texture(art.noise.id());
-    m.add_rect_with_uv(rect, uv, Color32::from_white_alpha((strength * 255.0) as u8));
-    p.add(m);
 }
 
 /// The full-window background: base colour plus three drifting glows.
@@ -138,7 +114,7 @@ pub fn hero(p: &egui::Painter, art: &Art, rect: Rect, t: f32) {
     radial(p, rect.left_top() + Vec2::new(w * (0.94 + 0.03 * (t * 0.08).cos()), h * (0.12 + 0.04 * (t * 0.06).sin())), w * 0.30, alpha(theme::ACCENT_2, 0.30));
     radial(p, rect.left_top() + Vec2::new(w * (0.48 + 0.05 * (t * 0.05).sin()), h * 0.95), w * 0.34, alpha(theme::rgb(0xB0, 0x4C, 0xE8), 0.16));
     if let Some((tex, size)) = &art.key_art {
-        let area = Rect::from_min_max(Pos2::new(rect.left() + w * 0.26, rect.top()), rect.max);
+        let area = Rect::from_min_max(Pos2::new(rect.left() + w * 0.42, rect.top()), rect.max);
         let scale = (area.width() / size.x).max(area.height() / size.y) * (1.05 + 0.012 * (t * 0.15).sin());
         let shown = *size * scale;
         let drift = Vec2::new(8.0 * (t * 0.07).sin(), 5.0 * (t * 0.05).cos());
@@ -167,8 +143,28 @@ pub fn hero(p: &egui::Painter, art: &Art, rect: Rect, t: f32) {
         }
         p.add(m);
     }
-    // the reading area: dark on the left, clearing by 60 % of the width
-    horizontal_fade(p, Rect::from_min_max(rect.min, Pos2::new(rect.left() + w * 0.62, rect.bottom())), alpha(theme::BG_BASE, 0.86), Color32::TRANSPARENT);
+    // the reading area: dark on the left, clearing by 85 % of the width, and itself fading out towards
+    // the bottom so the hero has no edge
+    let (cols, rows) = (12u32, 10u32);
+    let mut m = Mesh::default();
+    let sw = w * 0.85;
+    for j in 0..=rows {
+        for i in 0..=cols {
+            let (u, v) = (i as f32 / cols as f32, j as f32 / rows as f32);
+            // at least 80 % over the left half, where the title, the meta line and Launch sit
+            let a = 0.94 * (1.0 - smooth(0.55, 1.0, u)) * (1.0 - smooth(0.6, 1.0, v));
+            m.colored_vertex(Pos2::new(rect.left() + u * sw, rect.top() + v * h), alpha(theme::BG_BASE, a));
+        }
+    }
+    let wv = cols + 1;
+    for j in 0..rows {
+        for i in 0..cols {
+            let a = j * wv + i;
+            m.add_triangle(a, a + 1, a + wv);
+            m.add_triangle(a + 1, a + wv + 1, a + wv);
+        }
+    }
+    p.add(m);
     // and the top, under the title bar
     vertical_fade(p, Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.top() + 72.0)), alpha(theme::BG_BASE, 0.55), Color32::TRANSPARENT);
 }
