@@ -101,6 +101,44 @@ Definitions (in `crates/shader/src/features.rs`):
   EXEC. An approximation without the CFG; pixel and mesh programs that run most of their body under one
   narrowing (helper lanes, the NGG `lane < count` guard) make the share high.
 
+## S5 — the oracle set
+
+```powershell
+# 1. the fork's own offline translator, the build that made its 25,694 / 25,694 census
+#    (wt-bisect targetn\diagictory.exe, sha256 b744f584...8c1b), one thread, a fresh cache:
+$env:VICTORY_CACHE_DIR = 'D:ictory-dataebuild-oracle-work\cache'
+victory.exe translate --warm all --jobs 1 <game>\shaders.rpf          # 1,180 s
+# 2. pair the entries with hashes, write the oracle and its index
+$env:REBUILD_ORACLE_DIR = 'D:ictory-dataebuild-oracle'; $env:REBUILD_FORK_EXE = '<that victory.exe>'
+cargo run --release --bin oracle -- --cache D:ictory-dataebuild-oracle-work\cache --verify 50
+```
+
+**Built:** `apps/rebuild/src/bin/oracle.rs`. The fork's shader cache (`cache-fx`) cannot be used: its key is
+BLAKE3 of the converter id, a 32-byte fingerprint of the fork's build and the container, so an entry
+cannot be named from a hash without that build. So the fork's own `--warm` translates every container
+one after another in file order into an empty cache, and `oracle` pairs the entries, by creation time,
+with the containers it expects in the same order. The pairing is accepted only if the counts are equal
+and every entry's stage is its container's.
+
+**Measured:**
+
+```
+warm run      25,889 containers: 25,694 translated, 195 refused (the ES+GS-only containers) · 1,180 s, 1 thread
+pairing       25,694 entries for 25,694 expected · 0 stage disagreements · accepted
+spot check    50 of 50 programs re-translated alone, each into its own cache: byte-identical
+oracle        25,694 present · 0 missing · 854,844,264 bytes of DXIL (1.8 GB with the entries)
+index         agents/shader-oracle.csv: hash, stage, present, dxil_bytes, entry_bytes
+read-only     shaders.rpf unchanged
+```
+
+Files, outside git: `D:ictory-dataebuild-oracle\<hash>.dxil` (the DXIL the fork emits) and `<hash>.vsh`
+(the whole cache entry: DXIL plus the fork's root bindings, user-data, samplers; format `VSH1` in the
+fork's `victory-gpu/src/shader_cache.rs`). The translation is the host-agnostic one (`--warm` makes no
+device; the fork's runs on a 32-lane card may differ where `VICTORY_HOST_WAVE`/`VICTORY_VIEW_LIMIT` apply).
+
+A first warm with the fork's newer `targeteleaseictory.exe` gave 25,636 (its 58 known refusals), so it
+was not used.
+
 ## Decided
 
 - The census counts all 26,084 native programs, and reports the 25,694 VS+PS+CS+MS beside it, because ES
@@ -110,7 +148,7 @@ Definitions (in `crates/shader/src/features.rs`):
 
 ## Next
 
-- S5 (the oracle set), added by the lead after this lane started: see below once done.
+- S5 closed (below). The lane stops here.
 - The lead's: GFX10 → `sir`. The field model gives every operand by name (`Decoded::get`, `enc::src`).
 
 ## For the lead

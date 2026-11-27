@@ -31,6 +31,8 @@ pub struct Walk {
     pub containers: usize,
     pub no_dxil: usize,
     pub duplicates: usize,
+    /// Every container in file order: its hash and its `DXIL` part's hash.
+    pub order: Vec<(String, String)>,
     /// Each duplicate container's hash and the code hash of the kept one.
     pub aliases: Vec<(String, String)>,
     /// Native blob errors by message.
@@ -123,6 +125,7 @@ pub fn walk(file: &[u8], threads: usize) -> Walk {
             }
             Found::Container { hash, code, programs } => {
                 w.containers += 1;
+                w.order.push((hash.clone(), code.to_hex()[..8].to_owned()));
                 if !seen.insert(code) {
                     w.duplicates += 1;
                     w.aliases.push((hash, code.to_hex()[..8].to_owned()));
