@@ -314,9 +314,9 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, second lead session: all 11 helper PRs merged (#1-#13); round 2 of the lanes in section 5
-progress  46 % (progress.md) · shaders 0 / 25,694 counted (all decode byte-exact; they count once translations match the oracle)
-tests     238 green (4 ignored), 0 warnings: cargo test --release
+updated   2026-11-27, second lead session: helper PRs #1-#13 merged and bound; translation started (1,360 / 1,798 v0 PS compile); game folder frozen for helpers
+progress  47 % (progress.md) · shaders 0 / 25,694 counted (all decode byte-exact; they count once translations match the oracle)
+tests     250 green (4 ignored), 0 warnings: cargo test --release
 ```
 
 | build | state | where | proof |
@@ -326,14 +326,14 @@ tests     238 green (4 ignored), 0 warnings: cargo test --release
 | 0 (c) title GPU time | ⏸️ needs a frame (Build 5) | — | — |
 | 1 tiles at console addresses | ✅ | `crates/uma/src/{lib,tiles,arena}.rs`, `gputest --tiled/--arena/--scale` | [runs/build1-tiles.md](runs/build1-tiles.md) |
 | 2 upload ring + labels | ✅ | `crates/uma/src/{ring,labels}.rs`, `gputest --ring/--labels` | [ring](runs/build2-ring.md) · [labels](runs/build2-labels.md) |
-| 3 loader + runtime | 🔄 loader ✅ (PR #1), files ✅ (`vfs`, PR #3), input ✅ (PR #2); kernel ⏳ | `crates/loader`, `imports` | `agents/loader.md`, `agents/loader-imports.csv` |
-| 4 shaders | 🔄 core: design, lane model, HLSL emission proven on the card; front end in lane `shader` | `crates/sir`, `sirtest`, [design](docs/design/shader-ir.md) | [runs/build4-sirtest.md](runs/build4-sirtest.md) |
+| 3 loader + runtime | 🔄 the title's code runs (16/16 DLL entries, exe entry 60 s); files, audio, DirectStorage, xg bound; drives G:/T:/S:; stack sampler built; GDK (lane `gdk`) and the wait ⏳ | `crates/loader`, `crates/runtime`, `runtitle` | [startup](runs/build3-startup.md) |
+| 4 shaders | 🔄 front end closed (decoder, oracle); lifter: ALU, PS IO, resources; 1,360 / 1,798 v0 PS compile; VS, CS, control flow, oracle check ⏳ | `crates/sir/src/lift*`, `translate`, [design](docs/design/shader-ir.md) | [ps](runs/build4-ps.md) · [lift](runs/build4-lift.md) · [coverage](runs/build4-coverage.md) |
 | 5 device, lists, present | ⏳ (translator core done in `crates/xlist`) | — | — |
 | 6 list translation | 🔄 core built | `crates/xlist` | Build 0 (b) |
 | 7 upscaler | ⏳ (plan decision 5 corrected) | — | — |
 | 8 pacing · 9 AMD testers | ⏳ | — | — |
 | helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | merged: all of round 1 (#1-#13). **Round 2 (section 5): new lane `gdk` (G1-G4), `audio` A5, `files` F4-F5, `shader` S6, `launcher` U6** | their pull requests |
-| launcher track | 🔄 C1 registry built; launcher app in lane `launcher` | `crates/config`, [design](docs/design/launcher.md) | 6 unit tests |
+| launcher track | 🔄 C1 registry (settings never replaced); L1-L4 launcher merged (PR #13); C2 and L5 ⏳ | `crates/config`, `apps/launcher`, [design](docs/design/launcher.md) | config 7 tests, launcher 34 |
 
 ## 9. Taking over as lead
 
@@ -371,7 +371,7 @@ If the owner hands you the whole job, you are the lead. **Start with [`claude-ma
 |:--:|:--|:--|
 | 1 | ✅ `sir`: live-mask analysis (done: 601 GPU runs exact, 182 host branches + 124 predicated) | — |
 | 2 | ✅ `sir`: memory lowering and native 16-bit (done: 342 loads + 331 stores through tiled windows and 650 half ops exact on the card) | — |
-| 3 | merge lane `shader` (S1-S4), then GFX10 → `sir`: CFG, SSA, structurize; agnostic programs first | census column "emitted"; the shader bar in `progress.md` starts moving |
+| 3 | 🔄 lane `shader` merged; GFX10 → HLSL lifter (`crates/sir/src/lift*`): v0 PS 1,360 / 1,798 compile; next VS, CS, then structurize | the shader bar in `progress.md` starts moving |
 | 4 | oracle diff harness against the fork's translations, per hash | programs count toward 25,694 only when they match |
 | 5 | ✅ lanes `loader`, `vfs`, `input` merged; ✅ runtime census (89.5 % host). Build 3's second half, now 73 functions: kernel (threads, events, waits, timers, TLS), files with a write overlay, the GDK discovery loop from `agents/loader-imports.csv` **plus every `GetProcAddress` miss** | the title's startup path runs to its first render call |
 | 5b | ✅ the title's images map and bind: 97.5 % (`maptitle`). Next: D3D12.X device creation (`d3d12_xs`, 5), then run the title's startup to its first render call | the startup path reaches a render call |

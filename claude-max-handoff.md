@@ -82,9 +82,14 @@ The owner's rules, in their own words:
    - Wire in: our tiles (Build 1) for GPU-owned resources, the ring (Build 2) for
      `exports::graphics_regions()`, labels into title memory, physical pages read in place, `sir` for shaders,
      and the frame line. Then Build 0 (c), the title's GPU time.
-3. **Shaders:** when lane `shader` merges (S1-S5: census, GFX10 decoder, oracle set), do section 9 step 3 of
-   `secondary-agent.md`: GFX10 → `sir` (CFG, SSA, structurize), agnostic programs first, and start the shader bar.
-0. **Now (before step 1): bind the merged crates in `crates/runtime`** (all built and merged, none bound):
+3. **Shaders (in progress, the work while the title waits):** `translate ps` over the corpus copy gives
+   1,360 / 1,798 v0 pixel shaders translated and compiled (`runs/build4-ps.md`). Next, by blocker count:
+   `image_sample` with cube maps or 16-bit/NSA forms, `v_interp_p1ll_f16` (16-bit inputs), `s_brev_b32`,
+   `image_store`, `ds_swizzle_b32`, root descriptors (`s_load` from a 64-bit address, the fork's root CBV/SRV
+   space). Then vertex shaders (`s_swappc_b64` fetch, `exp pos/param`), compute (thread ids, LDS), the S6
+   `oraclediff` interface check, and the GPU execution check that makes programs count. Use
+   `REBUILD_TRANSLATE_DUMP=<reason>` to write refused programs' lifted bodies and root layouts.
+0. ✅ **Done (2026-11-27): the merged crates are bound in `crates/runtime`:**
    - `rebuild_winfiles`: all 22 overrides (`install(Files::new(vfs, r"G:\"))`, `override_export(name)` in
      `HostResolver`), with the 5 extra (`FindNextFileW/A`, `FindClose`, `SetFileAttributesW`, `GetTempPathW`)
    - `rebuild_audio` (19), `rebuild_dstorage` (`DStorageGetFactory`, `Pages` over `physical` with a retry),
