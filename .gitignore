@@ -1,2 +1,6 @@
 target/
 agents/MEASURING
+
+# GPU locks held by the lead and helper lanes (never committed)
+agents/CARD
+agents/MEASURING
