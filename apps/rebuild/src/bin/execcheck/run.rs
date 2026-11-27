@@ -537,6 +537,7 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
     let groups = [(64 / t[0].max(1)).clamp(1, 4), (64 / t[1].max(1)).clamp(1, 4), 1];
     let mut diff = Diff::default();
     let mut per_set = Vec::new();
+    let mut racing = false;
     for set in 0..SETS {
         if skip.contains(&set) {
             per_set.push(format!("set{set} did not complete"));
@@ -588,7 +589,13 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
         step("descriptors");
         let all: Vec<&Res> = bound.iter().map(|(_, b)| &b.res).chain(tres.iter()).collect();
         let mut outs: Vec<Vec<Vec<u8>>> = Vec::new();
-        for (pso, rs) in [(&ours, &ours_rs), (&theirs, &oracle_rs)] {
+        // ours, the oracle's, and (only when they differ) ours again: a program whose own runs differ writes
+        // racing values (many lanes or pixels to one place), and is named so
+        for side in 0..3 {
+            if side == 2 && !all.iter().enumerate().any(|(k, r)| r.written && outs[0][k] != outs[1][k]) {
+                break;
+            }
+            let (pso, rs) = if side == 1 { (&theirs, &oracle_rs) } else { (&ours, &ours_rs) };
             g.begin();
             for r in &all {
                 g.upload(r);
@@ -630,6 +637,9 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
                 compare(&mut d, k, &r.init, &outs[0][k], &outs[1][k]);
             }
         }
+        if outs.len() == 3 && all.iter().enumerate().any(|(k, r)| r.written && outs[0][k] != outs[2][k]) {
+            racing = true;
+        }
         per_set.push(format!("set{set} {}/{}w {}d", d.changed, d.words, d.differ));
         diff.words += d.words;
         diff.changed += d.changed;
@@ -643,6 +653,9 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
         }
     }
     let (verdict, mut reason) = diff.verdict();
+    if verdict == "differ" && racing {
+        reason = format!("racing writes (our own runs differ); {reason}");
+    }
     // named: the oracle samples level 0 where a compute program samples with implicit derivatives (ours takes them
     // from the host quad, whose layout is not the console's either)
     if verdict == "differ" && cs && [".Sample(", ".SampleBias(", ".SampleCmp(", "CalculateLevelOfDetail"].iter().any(|s| p.src.contains(s)) {
