@@ -83,8 +83,34 @@ fn reached_device(args: &[u64; 4]) {
     let started = unsafe { STARTED }.unwrap_or_else(Instant::now);
     println!("REACHED   the first render call: D3D12XboxCreateDevice{args:x?}");
     write_summary("reached", "the first render call: D3D12XboxCreateDevice");
-    report(started);
-    std::process::exit(0);
+    let _ = started;
+    // Build 5: the device exists now; the title runs on until the deadline and the trap list names what it called
+    REACHED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+static REACHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The device slots the title called that are not written yet, first called first.
+fn device_report() {
+    if !REACHED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let t = rebuild_runtime::device::traps();
+    println!("device    {} slots called that are not written yet (first call, ms after the device):", t.len());
+    for (off, name, n, ms) in t {
+        println!("  {off:#05x}  {name:<36} {n:>8}×  first at {ms:>9.3} ms");
+    }
+    let q = rebuild_runtime::queue::traps();
+    if !q.is_empty() {
+        println!("queue     {} slots called that are not written yet:", q.len());
+        for (off, name, n, ms) in q {
+            println!("  {off:#05x}  {name:<36} {n:>8}×  first at {ms:>9.3} ms");
+        }
+    }
+    let (n, iid) = rebuild_runtime::device::unknown_iid();
+    if n > 0 {
+        println!("  QueryInterface: {n} asks for interfaces the device does not serve; last {iid:02x?}");
+    }
 }
 
 /// Title DLLs in an order where each comes after the title DLLs it imports.
@@ -224,6 +250,7 @@ fn main() {
         return;
     }
     crash::install(title.images.iter().map(|l| (l.name.clone(), l.base, l.image.size_of_image as u64)).collect());
+    crash::on_fatal(device_report);
     // the title's code assumes its TLS block is slot 0 (an exe's): give it slot 0 before any thread runs
     if let Some(tls) = &exe.image.tls {
         let index = (exe.base + (tls.index_va - exe.image.image_base)) as *mut u32;
@@ -335,11 +362,16 @@ fn main() {
             println!("EXITED    the title's entry returned {code:#x} before a render call");
             write_summary("exited", &format!("entry returned {code:#x} before a render call"));
         }
+        None if REACHED.load(std::sync::atomic::Ordering::Relaxed) => {
+            println!("DEADLINE  {seconds} s with the device");
+            write_summary("deadline", &format!("ran {seconds} s with the device"));
+        }
         None => {
             println!("TIMEOUT   no render call within {seconds} s");
             write_summary("timeout", &format!("no render call within {seconds} s"));
         }
     }
+    device_report();
     if sample.is_some() {
         println!("threads   every thread of the process, innermost frames first:");
         for (id, h) in sampler::threads() {

@@ -125,6 +125,11 @@ pub mod host {
     pub fn virtual_alloc(x: &mut Xmem, base: u64, size: u64, kind: u32, flags: u64, protect: u32) -> u64 {
         let graphics = is_graphics(flags);
         let mut kind = kind & !(PAGES_2M | PAGES_64K_BIT);
+        // no address: a commit is a reserve and a commit (Windows' rule, which the title relies on). We place at an
+        // exact address we found, where a commit alone would fail, so the reserve is made explicit.
+        if base == 0 {
+            kind |= MEM_RESERVE.0;
+        }
         let protect = match protect & HOST_PROTECTION {
             0 => PAGE_NOACCESS.0,
             p => p,
@@ -237,6 +242,19 @@ mod tests {
         assert_eq!(w[1], (2 * WINDOW, 3 * WINDOW - 1));
         // bigger than a window: refused
         assert_eq!(candidate_windows((WINDOW, (1 << 40) - 1), WINDOW + 1).count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_commit_without_an_address_reserves_too() {
+        use windows::Win32::System::Memory::{MEM_COMMIT, MEM_RELEASE, PAGE_READWRITE};
+        let mut x = Xmem::default();
+        // as the title asks at device creation: commit 64 KiB, graphics, no address, no reserve flag
+        let a = host::virtual_alloc(&mut x, 0, 64 << 10, MEM_COMMIT.0 | PAGES_2M | PAGES_64K_BIT, GRAPHICS | 0x280, PAGE_READWRITE.0 | 0x42400);
+        assert_ne!(a, 0, "placed and committed");
+        unsafe { (a as *mut u64).write_volatile(7) };
+        assert!(x.find(a).is_some(), "recorded as a region");
+        assert!(host::virtual_free(&mut x, a, 0, MEM_RELEASE.0));
     }
 
     #[test]

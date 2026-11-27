@@ -16,7 +16,9 @@
 #[cfg(windows)]
 pub mod budget;
 pub mod limits;
+pub mod device;
 pub mod drives;
+pub mod queue;
 #[cfg(windows)]
 pub mod exports;
 #[cfg(windows)]

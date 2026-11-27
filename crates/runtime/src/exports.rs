@@ -362,10 +362,11 @@ pub extern "system" fn D3D12XboxCreateDevice(a: u64, b: u64, c: u64, d: u64) -> 
         let w = unsafe { std::slice::from_raw_parts(b as *const u32, 16) };
         eprintln!("  params {:08x?}", w);
     }
+    let hr = crate::device::create(c as *const [u8; 16], d as *mut *mut c_void);
     if let Some(f) = *ON_DEVICE.lock().unwrap() {
         f(&[a, b, c, d]);
     }
-    0x8000_4005u32 as i32 // E_FAIL
+    hr
 }
 
 /// `D3D12ConfigureVirtualMemoryX(*{flags u32, page_table_pages u32, preserved_bytes u32, pad; out lowest u64,

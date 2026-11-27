@@ -160,13 +160,34 @@ unsafe fn report_inner(kind: &str, p: *const EXCEPTION_POINTERS) {
     }
 }
 
+/// Called once at the first fatal-looking exception (a breakpoint the title raises, a fail-fast), after the
+/// report: the caller prints what it knows then (the device's trap list). Set by the run.
+static ON_FATAL: OnceLock<fn()> = OnceLock::new();
+
+pub fn on_fatal(f: fn()) {
+    let _ = ON_FATAL.set(f);
+}
+
+const STATUS_BREAKPOINT: u32 = 0x8000_0003;
+const STATUS_STACK_BUFFER_OVERRUN: u32 = 0xC000_0409; // __fastfail
+
 unsafe extern "system" fn first_chance(p: *mut EXCEPTION_POINTERS) -> i32 {
     let code = unsafe { (*(*p).ExceptionRecord).ExceptionCode };
     if code == EXCEPTION_ACCESS_VIOLATION && FIRST_CHANCE.fetch_add(1, Ordering::Relaxed) < 4 {
         unsafe { report("first-chance", p) };
     }
+    // a title assert (int3) or a fail-fast ends the run without reaching the unhandled filter: report it here
+    let c = code.0 as u32;
+    if (c == STATUS_BREAKPOINT || c == STATUS_STACK_BUFFER_OVERRUN) && FATAL.fetch_add(1, Ordering::Relaxed) == 0 {
+        unsafe { report(if c == STATUS_BREAKPOINT { "breakpoint (a title assert)" } else { "fail-fast" }, p) };
+        if let Some(f) = ON_FATAL.get() {
+            f();
+        }
+    }
     EXCEPTION_CONTINUE_SEARCH
 }
+
+static FATAL: AtomicU32 = AtomicU32::new(0);
 
 unsafe extern "system" fn unhandled(p: *const EXCEPTION_POINTERS) -> i32 {
     let code: NTSTATUS = unsafe { (*(*p).ExceptionRecord).ExceptionCode };

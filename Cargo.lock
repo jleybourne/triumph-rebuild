@@ -2174,6 +2174,7 @@ name = "rebuild-runtime"
 version = "0.1.0"
 dependencies = [
  "rebuild-audio",
+ "rebuild-d3d12x",
  "rebuild-dstorage",
  "rebuild-gdk",
  "rebuild-loader",
