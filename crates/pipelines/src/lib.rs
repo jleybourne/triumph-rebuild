@@ -15,15 +15,21 @@
 //! - [`stream`]: the title's pipeline state streams (device 0x2b0) and graphics descriptions (0x50) as a `Desc`.
 //! - [`session`]: the pipelines a session used, for the next session's prewarm.
 //! - [`sidecar`]: the translator's `<hash>.<stage>.samplers` files.
+//! - [`translate`]: one console program to DXIL (the `translate v1` path), for the binary and for programs
+//!   the library does not hold.
+//! - [`ondemand`]: those programs, translated on a pool worker when the title first creates them, cached on
+//!   disk for the next session.
 
 pub mod bindings;
 pub mod layout;
 pub mod library;
+pub mod ondemand;
 pub mod pool;
 pub mod session;
 pub mod sidecar;
 pub mod state;
 pub mod stream;
+pub mod translate;
 
 #[cfg(windows)]
 pub mod d3d;

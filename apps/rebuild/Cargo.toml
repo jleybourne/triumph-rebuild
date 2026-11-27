@@ -13,6 +13,7 @@ rebuild-sir = { path = "../../crates/sir" }
 rebuild-runtime = { path = "../../crates/runtime" }
 rebuild-upscale = { path = "../../crates/upscale" }
 rebuild-shader = { path = "../../crates/shader" }
+rebuild-pipelines = { path = "../../crates/pipelines" }
 rebuild-winfiles = { path = "../../crates/winfiles" }
 
 [target.'cfg(windows)'.dependencies]

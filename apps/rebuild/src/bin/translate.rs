@@ -174,24 +174,16 @@ fn lift_report(picked: &[(HwStage, BTreeSet<&'static str>, Vec<String>, usize)])
     println!("  ({} untranslated opcodes in all)", v.len());
 }
 
-fn dxc() -> Option<std::path::PathBuf> {
-    if let Some(p) = std::env::var_os("REBUILD_DXC") {
-        return Some(p.into());
-    }
-    let root = std::path::PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\bin");
-    let mut v: Vec<_> = std::fs::read_dir(root).ok()?.filter_map(|e| e.ok().map(|e| e.path().join("x64").join("dxc.exe"))).filter(|p| p.exists()).collect();
-    v.sort();
-    v.pop()
-}
-
 /// The v0 pixel shaders: lifted with IO, assembled, compiled.
 /// `ps` (pixel shaders) or `vs` (vertex shaders that run as the hardware VS): lift with IO, assemble, compile.
 /// `v1`: every agnostic program of the stage, with control flow, through `lift_program`.
 fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
     let vs = kind == "vs";
+    use rebuild_pipelines::sidecar;
+    use rebuild_pipelines::translate::{self, Refused};
     use rebuild_shader::native::StageIo;
     use rebuild_shader::signature;
-    let dxc = dxc().expect("dxc.exe (Windows SDK) or REBUILD_DXC");
+    let dxc = translate::dxc_path().expect("dxc.exe (Windows SDK) or REBUILD_DXC");
     let out = std::path::PathBuf::from(std::env::var("REBUILD_TRANSLATE_OUT").unwrap_or_else(|_| r"D:\victory-data\translate".into()));
     std::fs::create_dir_all(&out).expect("output folder");
     let next = AtomicUsize::new(0);
@@ -223,58 +215,24 @@ fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
                         continue;
                     }
                     total.fetch_add(1, Ordering::Relaxed);
-                    let bind = rebuild_sir::lift::Bindings { hw: p.native.stage, layout: &p.native.layout, used: &p.native.used };
                     let split = if row.blocks == 1 { &single } else { &multi };
                     split[0].fetch_add(1, Ordering::Relaxed);
-                    let wave64 = p.native.wave64;
-                    let lift = |insts: &[gfx10::Instruction], st| {
-                        if v1 {
-                            rebuild_sir::lift::lift_program(insts, st, Some(bind), wave64)
-                        } else {
-                            rebuild_sir::lift::lift_stage(insts, st, Some(bind))
-                        }
-                    };
                     let bump = |k: String| *tally.lock().unwrap().entry(k).or_default() += 1;
-                    let Ok(insts) = gfx10::decode(&p.native.patched_code()) else {
-                        bump("patched code does not decode".into());
-                        continue;
-                    };
-                    // compute programs have no signatures
-                    let sig = |b: &[u8]| if kind == "cs" { Ok(Vec::new()) } else { signature::parse(b) };
-                    let (Ok(isg1), Ok(osg1)) = (sig(&p.isg1), sig(&p.osg1)) else {
-                        bump("signature unreadable".into());
-                        continue;
-                    };
-                    let (l, result) = match &p.native.io {
-                        StageIo::Ps { inputs, input_addr, .. } => {
-                            let stage = || rebuild_sir::lift::PsStage { inputs, input_addr: *input_addr };
-                            let l = lift(&insts, rebuild_sir::lift::Stage::Ps(stage()));
-                            let r = rebuild_sir::lift::ps_program(&l, &stage(), Some(&bind), &isg1, &osg1);
-                            (l, r)
-                        }
-                        StageIo::Vs { inputs, outputs } => {
-                            let stage = || rebuild_sir::lift::VsStage { inputs, outputs };
-                            let l = lift(&insts, rebuild_sir::lift::Stage::Vs(stage()));
-                            let r = rebuild_sir::lift::vs_program(&l, &stage(), Some(&bind), &isg1, &osg1);
-                            (l, r)
-                        }
-                        StageIo::Cs(io) => {
-                            let l = lift(&insts, rebuild_sir::lift::Stage::Cs(*io));
-                            let r = rebuild_sir::lift::cs_program(&l, io, Some(&bind));
-                            (l, r)
-                        }
-                        _ => unreachable!(),
-                    };
-                    let inputs = &p.native.io;
-                    let src = match result {
-                        Ok(s) => s,
-                        Err(e) => {
+                    // the same lift and assembly the runtime runs on demand (rebuild_pipelines::translate)
+                    let h = match translate::lift_hlsl(&p.native, &p.isg1, &p.osg1, v1) {
+                        Ok(h) => h,
+                        Err(Refused { reason: e, body }) => {
+                            if e == "patched code does not decode" || e == "signature unreadable" {
+                                bump(e);
+                                continue;
+                            }
                             // REBUILD_TRANSLATE_DUMP=<text>: write refused programs whose reason contains it
                             if let Ok(want) = std::env::var("REBUILD_TRANSLATE_DUMP") {
                                 if e.contains(&want) {
+                                    let isg1 = signature::parse(&p.isg1).unwrap_or_default();
                                     let txt = format!(
                                         "{e}\nlayout {:#?}\nused {:#?}\ninputs {:?}\nisg1 {:?}\n--- lifted\n{}",
-                                        p.native.layout, p.native.used, inputs, isg1, l.body
+                                        p.native.layout, p.native.used, p.native.io, isg1, body
                                     );
                                     let _ = std::fs::write(out.join(format!("{}.fail.txt", p.hash)), txt);
                                 }
@@ -293,31 +251,19 @@ fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
                     let ext = kind;
                     let hl = out.join(format!("{}.{ext}.hlsl", p.hash));
                     let obj = out.join(format!("{}.{ext}.dxil", p.hash));
-                    std::fs::write(&hl, &src).expect("write hlsl");
+                    std::fs::write(&hl, &h.src).expect("write hlsl");
                     // the immediate samplers beside the program, so a pipeline build need not re-read the archive:
-                    // `<hash>.<stage>.samplers` = count (u32 LE), then 4 u32 LE words per sampler, in register order
-                    let mut sm = (l.immediate_samplers.len() as u32).to_le_bytes().to_vec();
-                    for w in l.immediate_samplers.iter().flatten() {
-                        sm.extend(w.to_le_bytes());
-                    }
-                    // then one u32: bit k set when sampler k is read by a comparison (SampleCmp*)
-                    let cmp = l.immediate_compare.iter().filter(|k| **k < 32).fold(0u32, |m, k| m | 1 << k);
-                    sm.extend(cmp.to_le_bytes());
-                    std::fs::write(out.join(format!("{}.{ext}.samplers", p.hash)), sm).expect("write samplers");
-                    let r = std::process::Command::new(&dxc)
-                        .args(["-T", &format!("{kind}_6_6"), "-E", "main", "-O3", "-enable-16bit-types", "-Fo"])
-                        .arg(&obj)
-                        .arg(&hl)
-                        .output()
-                        .expect("run dxc");
-                    if r.status.success() {
-                        compiled.fetch_add(1, Ordering::Relaxed);
-                        split[1].fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        let err = String::from_utf8_lossy(&r.stderr);
-                        let first = err.lines().find(|l| l.contains("error")).unwrap_or("dxc failed").to_string();
-                        bump("dxc error".into());
-                        failures.lock().unwrap().push((p.hash.clone(), first));
+                    // `<hash>.<stage>.samplers` (rebuild_pipelines::sidecar)
+                    std::fs::write(out.join(format!("{}.{ext}.samplers", p.hash)), sidecar::encode(&h.samplers)).expect("write samplers");
+                    match translate::compile_file(&dxc, h.stage, &hl, &obj) {
+                        Ok(()) => {
+                            compiled.fetch_add(1, Ordering::Relaxed);
+                            split[1].fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(first) => {
+                            bump("dxc error".into());
+                            failures.lock().unwrap().push((p.hash.clone(), first));
+                        }
                     }
                 }
             });

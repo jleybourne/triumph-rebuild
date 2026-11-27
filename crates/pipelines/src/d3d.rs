@@ -116,9 +116,51 @@ pub struct Gpu {
     pub adapter: String,
 }
 
+/// The lanes' exclusive hold on the card (`agents\CARD`, created new; removed on drop, so also on a panic). Taken
+/// only while `agents\MEASURING` is absent.
+pub struct CardLock(std::path::PathBuf);
+
+/// The agents folder of the lead's tree, where `MEASURING` and `CARD` live.
+pub const AGENTS: &str = r"D:\Developer\triumph-rebuild\agents";
+
+impl CardLock {
+    /// The lock, or why not (the measurement lock is present, or another lane holds the card).
+    pub fn take() -> Result<CardLock, String> {
+        let dir = std::path::Path::new(AGENTS);
+        if dir.join("MEASURING").exists() {
+            return Err("the measurement lock is present".into());
+        }
+        let p = dir.join("CARD");
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+            Ok(mut f) => {
+                use std::io::Write;
+                let _ = writeln!(f, "rebuild-pipelines pid {}", std::process::id());
+                Ok(CardLock(p))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err("another lane holds the card (agents\\CARD)".into()),
+            Err(e) => Err(format!("{}: {e}", p.display())),
+        }
+    }
+}
+
+impl Drop for CardLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 impl Gpu {
     /// `debug`: the D3D12 debug layer, whose messages give refusal reasons (slower; not for timing).
     pub fn new(debug: bool) -> Result<Gpu, String> {
+        Self::create(debug, false)
+    }
+
+    /// WARP, the software rasterizer: correctness checks without the card.
+    pub fn warp() -> Result<Gpu, String> {
+        Self::create(false, true)
+    }
+
+    fn create(debug: bool, warp: bool) -> Result<Gpu, String> {
         unsafe {
             if debug {
                 let mut d: Option<ID3D12Debug> = None;
@@ -126,7 +168,13 @@ impl Gpu {
                 d.ok_or("debug layer")?.EnableDebugLayer();
             }
             let mut device: Option<ID3D12Device> = None;
-            D3D12CreateDevice(None::<&windows::core::IUnknown>, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(|e| format!("device: {e}"))?;
+            if warp {
+                let f: windows::Win32::Graphics::Dxgi::IDXGIFactory4 = windows::Win32::Graphics::Dxgi::CreateDXGIFactory1().map_err(|e| format!("DXGI factory: {e}"))?;
+                let a: windows::Win32::Graphics::Dxgi::IDXGIAdapter = f.EnumWarpAdapter().map_err(|e| format!("WARP adapter: {e}"))?;
+                D3D12CreateDevice(&a, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(|e| format!("WARP device: {e}"))?;
+            } else {
+                D3D12CreateDevice(None::<&windows::core::IUnknown>, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(|e| format!("device: {e}"))?;
+            }
             let device = device.ok_or("no device")?;
             let mut sm = D3D12_FEATURE_DATA_SHADER_MODEL { HighestShaderModel: D3D_SHADER_MODEL_6_6 };
             device
