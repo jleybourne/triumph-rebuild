@@ -1,0 +1,261 @@
+//! U1: the settings widgets, generated from the registry. Nothing here names a setting: every widget,
+//! badge and range comes from `rebuild_config::REGISTRY`, so a new registry entry appears in the
+//! launcher without a line changed here.
+
+use rebuild_config::{Apply, Config, Kind, Setting, Tier, Value, REGISTRY};
+
+/// The launcher's tabs, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Tab {
+    Play,
+    Display,
+    Title,
+    Features,
+    Mods,
+    Diagnostics,
+    Profiles,
+    About,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 8] =
+        [Tab::Play, Tab::Display, Tab::Title, Tab::Features, Tab::Mods, Tab::Diagnostics, Tab::Profiles, Tab::About];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Play => "Play",
+            Tab::Display => "Display & upscaler",
+            Tab::Title => "Title settings",
+            Tab::Features => "Features",
+            Tab::Mods => "Mods",
+            Tab::Diagnostics => "Diagnostics",
+            Tab::Profiles => "Profiles",
+            Tab::About => "About",
+        }
+    }
+}
+
+/// Which tab a registry group is shown on. A group the launcher does not know yet goes to Features,
+/// so no registry entry is ever hidden.
+pub fn tab_of(group: &str) -> Tab {
+    match group {
+        "game" => Tab::Play,
+        "display" | "upscaler" => Tab::Display,
+        "title" => Tab::Title,
+        "diagnostics" => Tab::Diagnostics,
+        _ => Tab::Features,
+    }
+}
+
+pub fn settings_in(tab: Tab) -> impl Iterator<Item = &'static Setting> {
+    REGISTRY.iter().filter(move |s| tab_of(s.group()) == tab)
+}
+
+/// The widget a setting gets, from its kind alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Widget {
+    Checkbox,
+    Slider { min: i64, max: i64 },
+    Dropdown { options: &'static [&'static str] },
+    PathPicker,
+}
+
+pub fn widget(s: &Setting) -> Widget {
+    match s.kind {
+        Kind::Bool => Widget::Checkbox,
+        Kind::Int { min, max } => Widget::Slider { min, max },
+        Kind::Choice { options } => Widget::Dropdown { options },
+        Kind::Path => Widget::PathPicker,
+    }
+}
+
+/// What the UI shows beside a setting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Badges {
+    /// "live" or "restart"
+    pub apply: &'static str,
+    /// shown with a warning
+    pub experimental: bool,
+    /// differs from the default: the reset button is enabled
+    pub changed: bool,
+}
+
+/// A widget's state, as the UI holds it while drawing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Edit {
+    Toggle(bool),
+    Slide(i64),
+    /// index into the dropdown's options
+    Pick(usize),
+    Text(String),
+}
+
+/// The settings being edited: a `Config` plus the last refusal, shown under the widget that caused it.
+#[derive(Debug, Clone)]
+pub struct Model {
+    pub config: Config,
+    pub refusal: Option<(&'static str, String)>,
+}
+
+impl Model {
+    pub fn new(config: Config) -> Model {
+        Model { config, refusal: None }
+    }
+
+    pub fn badges(&self, s: &Setting) -> Badges {
+        Badges {
+            apply: match s.apply {
+                Apply::Live => "live",
+                Apply::Restart => "restart",
+            },
+            experimental: s.tier == Tier::Experimental,
+            changed: self.config.get(s.key) != s.default.value(),
+        }
+    }
+
+    /// The widget state for a setting's current value.
+    pub fn current(&self, s: &Setting) -> Edit {
+        match (widget(s), self.config.get(s.key)) {
+            (Widget::Checkbox, Value::Bool(b)) => Edit::Toggle(b),
+            (Widget::Slider { .. }, Value::Int(i)) => Edit::Slide(i),
+            (Widget::Dropdown { options }, Value::Choice(c)) => {
+                Edit::Pick(options.iter().position(|o| *o == c).unwrap_or(0))
+            }
+            (Widget::PathPicker, Value::Path(p)) => Edit::Text(p),
+            (w, v) => unreachable!("{}: widget {w:?} holds {v:?}", s.key),
+        }
+    }
+
+    /// Apply a widget edit. A refused value keeps the old one and records the reason for the UI.
+    pub fn apply(&mut self, s: &'static Setting, e: Edit) -> Result<(), String> {
+        let v = match (widget(s), e) {
+            (Widget::Checkbox, Edit::Toggle(b)) => Value::Bool(b),
+            (Widget::Slider { .. }, Edit::Slide(i)) => Value::Int(i),
+            (Widget::Dropdown { options }, Edit::Pick(i)) => {
+                Value::Choice(options.get(i).ok_or_else(|| format!("{}: no option {i}", s.key))?.to_string())
+            }
+            (Widget::PathPicker, Edit::Text(t)) => Value::Path(t),
+            (w, e) => return Err(format!("{}: {e:?} does not fit a {w:?}", s.key)),
+        };
+        match self.config.set(s.key, v) {
+            Ok(()) => {
+                if self.refusal.as_ref().is_some_and(|(k, _)| *k == s.key) {
+                    self.refusal = None;
+                }
+                Ok(())
+            }
+            Err(why) => {
+                self.refusal = Some((s.key, why.clone()));
+                Err(why)
+            }
+        }
+    }
+
+    pub fn reset(&mut self, s: &Setting) {
+        self.config.reset(s.key);
+        if self.refusal.as_ref().is_some_and(|(k, _)| *k == s.key) {
+            self.refusal = None;
+        }
+    }
+
+    /// Save to `rebuild.toml`; the text written is checked by `Config::parse` before it lands.
+    pub fn save(&self, path: &std::path::Path) -> Result<(), String> {
+        let text = self.config.to_toml();
+        let back = Config::parse(&text)?;
+        if !back.problems.is_empty() {
+            return Err(format!("not saved: {}", back.problems.join("; ")));
+        }
+        crate::write_atomic(path, &text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+}
+
+/// A valid value other than the default, for each widget: what a user could pick. Used by the tests.
+pub fn other_value(s: &Setting) -> Edit {
+    let refused = |v: &Value| s.refused.iter().any(|(r, _)| r.value() == *v);
+    match (widget(s), s.default.value()) {
+        (Widget::Checkbox, Value::Bool(b)) => Edit::Toggle(!b),
+        (Widget::Slider { min, max }, Value::Int(d)) => {
+            let pick = (min..=max).rev().find(|i| *i != d && !refused(&Value::Int(*i))).expect("a second value");
+            Edit::Slide(pick)
+        }
+        (Widget::Dropdown { options }, Value::Choice(d)) => {
+            Edit::Pick(options.iter().position(|o| *o != d).expect("a second option"))
+        }
+        (Widget::PathPicker, _) => Edit::Text(format!(r"C:\picked\{}", s.key)),
+        (w, v) => unreachable!("{}: {w:?} with default {v:?}", s.key),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_registry_entry_has_a_widget_and_a_tab() {
+        let mut shown = 0;
+        for t in Tab::ALL {
+            shown += settings_in(t).count();
+        }
+        assert_eq!(shown, REGISTRY.len(), "every entry on exactly one tab");
+        for s in REGISTRY {
+            let m = Model::new(Config::parse("").unwrap());
+            // the widget state for the default reads back as the default
+            let e = m.current(s);
+            let mut m2 = m.clone();
+            m2.apply(s, e).unwrap();
+            assert_eq!(m2.config.changed().count(), 0, "{}", s.key);
+            assert!(!m.badges(s).changed);
+        }
+    }
+
+    /// U1 closes here: every registry entry is edited through the UI model, saved, and read back by
+    /// `Config::parse` with 0 problems and the same values.
+    #[test]
+    fn every_registry_entry_round_trips_through_the_ui_model() {
+        let dir = crate::temp_dir("model");
+        let path = dir.join("rebuild.toml");
+        let mut m = Model::new(Config::parse("").unwrap());
+        m.config.profile = "round-trip".into();
+        for s in REGISTRY {
+            let e = other_value(s);
+            m.apply(s, e.clone()).unwrap_or_else(|why| panic!("{}: {why}", s.key));
+            assert_eq!(m.current(s), e, "{} reads back", s.key);
+            assert!(m.badges(s).changed, "{}", s.key);
+        }
+        assert_eq!(m.config.changed().count(), REGISTRY.len());
+        m.save(&path).unwrap();
+        let back = Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(back.problems.is_empty(), "{:#?}", back.problems);
+        assert_eq!(back, m.config);
+        // and resetting every entry through the UI gives an all-default file
+        for s in REGISTRY {
+            m.reset(s);
+        }
+        m.save(&path).unwrap();
+        let back = Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back.changed().count(), 0);
+        assert!(back.problems.is_empty());
+    }
+
+    #[test]
+    fn a_refused_value_keeps_the_old_one_and_shows_why() {
+        let mut m = Model::new(Config::parse("").unwrap());
+        let fsr = rebuild_config::find("title.fsr_quality").unwrap();
+        assert!(m.apply(fsr, Edit::Slide(4)).is_err());
+        assert_eq!(m.current(fsr), Edit::Slide(3));
+        let (k, why) = m.refusal.clone().unwrap();
+        assert_eq!(k, "title.fsr_quality");
+        assert!(why.contains("black screen"));
+        m.apply(fsr, Edit::Slide(2)).unwrap();
+        assert!(m.refusal.is_none());
+    }
+
+    #[test]
+    fn a_stable_profile_refuses_experimental_widgets() {
+        let mut m = Model::new(Config::parse("stable_only = true").unwrap());
+        for s in REGISTRY.iter().filter(|s| s.tier == Tier::Experimental) {
+            assert!(m.badges(s).experimental);
+            assert!(m.apply(s, other_value(s)).is_err(), "{}", s.key);
+        }
+    }
+}
