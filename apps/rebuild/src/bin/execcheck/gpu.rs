@@ -81,7 +81,14 @@ impl Gpu {
             if debug && !card {
                 let mut d: Option<ID3D12Debug> = None;
                 D3D12GetDebugInterface(&mut d).map_err(|e| format!("debug layer: {e}"))?;
-                d.ok_or("debug layer")?.EnableDebugLayer();
+                let d = d.ok_or("debug layer")?;
+                d.EnableDebugLayer();
+                // REBUILD_EXEC_GBV: GPU-based validation too (slow; for one program that loses the device)
+                if std::env::var_os("REBUILD_EXEC_GBV").is_some() {
+                    if let Ok(d1) = d.cast::<ID3D12Debug1>() {
+                        d1.SetEnableGPUBasedValidation(true);
+                    }
+                }
             }
             let base = if card { rebuild_pipelines::d3d::Gpu::new(debug)? } else { rebuild_pipelines::d3d::Gpu::warp()? };
             let device = base.device.clone();
@@ -378,7 +385,7 @@ impl Gpu {
         }
         if self.lost() {
             let why = unsafe { self.device.GetDeviceRemovedReason() };
-            return Err(format!("device removed: {why:?}"));
+            return Err(format!("device removed: {why:?} {}", self.reason(windows::core::Error::empty())));
         }
         Ok(())
     }

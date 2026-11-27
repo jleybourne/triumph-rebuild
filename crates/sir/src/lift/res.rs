@@ -303,7 +303,16 @@ impl Lifter<'_> {
         let soff = self.usrc(d, "soffset")?;
         let (idxen, offen) = (d.get("idxen")? == 1, d.get("offen")? == 1);
         let uav = store || self.desc_is_uav(rsrc);
-        self.use_desc(rsrc, if uav { View::RwRaw } else { View::Raw }, if idxen { (d.get("offset")? + u32::from(n) * 4).min(255) as u8 } else { 0 });
+        // a load through a constant buffer's descriptor (the title's root signature says CBV) reads the host's CBV
+        let cbv = !store && self.desc_kind(rsrc) == Some(ResourceType::Cbv);
+        let view = if cbv {
+            View::Cbv
+        } else if uav {
+            View::RwRaw
+        } else {
+            View::Raw
+        };
+        self.use_desc(rsrc, view, if idxen { (d.get("offset")? + u32::from(n) * 4).min(255) as u8 } else { 0 });
         let vaddr = d.get("vaddr")? as u16;
         let mut addr = format!("{}u + {soff}", d.get("offset")?);
         // with idxen, vaddr is the index and vaddr + 1 the offset (when offen)
@@ -339,8 +348,16 @@ impl Lifter<'_> {
             let _ = writeln!(self.out.body, "    {{ RWByteAddressBuffer b = ResourceDescriptorHeap[s{rsrc}];{sh} if ({cond}) b.{st}({addr}, {value}); }}");
             return Some(());
         }
-        let rw = if uav { "RW" } else { "" };
-        let _ = writeln!(self.out.body, "    {{ {rw}ByteAddressBuffer b = ResourceDescriptorHeap[s{rsrc}];{sh} uint{ty} r = b.{load}({addr});{guard}");
+        if cbv {
+            // dword k of the access at byte a: row a / 16, component a / 4 % 4
+            self.out.uses_cb = true;
+            let parts: Vec<String> = (0..n).map(|k| format!("c.d[(a + {}u) >> 4][((a + {}u) >> 2) & 3]", 4 * k, 4 * k)).collect();
+            let r = if n == 1 { parts[0].clone() } else { format!("uint{n}({})", parts.join(", ")) };
+            let _ = writeln!(self.out.body, "    {{ ConstantBuffer<SirCb> c = ResourceDescriptorHeap[s{rsrc}];{sh} uint a = {addr}; uint{ty} r = {r};{guard}");
+        } else {
+            let rw = if uav { "RW" } else { "" };
+            let _ = writeln!(self.out.body, "    {{ {rw}ByteAddressBuffer b = ResourceDescriptorHeap[s{rsrc}];{sh} uint{ty} r = b.{load}({addr});{guard}");
+        }
         for k in 0..n {
             let e = if n == 1 { "r".to_string() } else { format!("r.{}", ["x", "y", "z", "w"][k as usize]) };
             self.vwrite_raw(vdata + k, e);

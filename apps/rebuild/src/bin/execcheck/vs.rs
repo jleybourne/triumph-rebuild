@@ -80,8 +80,8 @@ pub fn setup(ours_in: &[Element], oracle_in: &[Element], outs: &[Element]) -> Re
         if bytes_per(e.comp) == 2 {
             return Err("16-bit vertex outputs are not captured by stream output".into());
         }
-        let start = e.mask.trailing_zeros() as u8;
-        let count = (8 - e.mask.leading_zeros()) as u8 - start;
+        // stream output names a semantic's own components from 0, wherever the element sits in its register
+        let (start, count) = (0u8, e.mask.count_ones() as u8);
         caps.push(Captured { name: CString::new(e.name.as_str()).map_err(|e| e.to_string())?, index: e.index, start, count });
         so_stride += 4 * count as u32;
     }

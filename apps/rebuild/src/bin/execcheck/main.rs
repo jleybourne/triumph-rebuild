@@ -368,7 +368,7 @@ fn main() {
                     if g.lost() {
                         // the device went with this input set: no row; the supervisor records the set (`current`)
                         // and runs the program again without it
-                        eprintln!("execcheck: device lost on {}", std::fs::read_to_string(out.join("current")).unwrap_or_default());
+                        eprintln!("execcheck: device lost on {}: {}", std::fs::read_to_string(out.join("current")).unwrap_or_default(), r.detail);
                         drop(card);
                         std::process::exit(3);
                     }

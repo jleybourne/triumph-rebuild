@@ -522,7 +522,7 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
     // as many as fit
     let mut shadow = vec![0u8; super::gpu::HEAP_SLOTS as usize * 16];
     for (slot, v) in &pl.slots {
-        if matches!(v, View::Raw | View::RwRaw) {
+        if matches!(v, View::Raw | View::RwRaw) || (*v == View::Cbv && pl.strides.contains_key(slot)) {
             let stride = pl.strides.get(slot).copied().unwrap_or(16);
             let at = *slot as usize * 16;
             shadow[at..at + 4].copy_from_slice(&stride.to_le_bytes());
