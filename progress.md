@@ -1,7 +1,7 @@
 # Progress
 
 ```
-work toward 30 fps   [█████████░░░░░░░░░░░]  46 %
+work toward 30 fps   [█████████░░░░░░░░░░░]  47 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (all 25,694 decoded byte-exact; oracle complete; fork reference: 25,694 translated, 7 pipelines refused)
 runtime functions    [█████████░░░░░░░░░░░]  32 / 73 ours built (xmem, modules, memory, process); 624 more bind to the host directly
 launcher track       [███░░░░░░░░░░░░░░░░░]  1 / 7 steps (C1 settings registry; the mods tab's file system is merged); does not count toward the fps %
@@ -22,14 +22,14 @@ second row and is the number that counts.
 | 0 | three answers before more code | 10 | 70 % | 7.0 | (a) upload **done**; (b) translation **done**: 0.43 µs a draw; (c) blocked until the title renders (moved to Build 5) |
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
-| 3 | PE loader + console runtime | 15 | 80 % | 12.0 | loader, vfs, input merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides (32 / 73 ours); the title's code runs; files (22), audio, DirectStorage, xg built in lanes and merged, binding next |
-| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 35 % | 5.25 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; **front end closed**: 25,694 programs decode byte-exact, oracle set complete (PRs #5, #10) |
+| 3 | PE loader + console runtime | 15 | 85 % | 12.75 | loader, vfs, input merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides (32 / 73 ours); the title's code runs; files (22), audio, DirectStorage, xg built in lanes and merged, binding next |
+| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 40 % | 6.0 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; **front end closed**: 25,694 programs decode byte-exact, oracle set complete (PRs #5, #10) |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 30 % | 3.0 | DLSS (PR #4) and FSR 3.1.6 (PR #8) standalone on a synthetic scene, one conventions table; wiring to the title's pass todo |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **46.05 ≈ 46 %** | |
+| | **total** | **100** | | **47.55 ≈ 47 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -82,6 +82,38 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Runtime bound to the merged lanes; settings never replaced; shader translation started: 427 pixel shaders compile
+
+```
+[█████████░░░░░░░░░░░]  47 %   (was 46 %: +0.75 Build 3, +0.75 Build 4)
+runtime     files (27), audio (19), DirectStorage (1), xg (2) bound; drives G:/T:/S:; stack sampler in runtitle
+shaders     0 / 25,694 counted (oracle match needed); v0 pixel shaders: 427 / 1,798 translated and compiled by DXC
+measured fps   none yet
+```
+
+- **Built (Build 3):** the runtime binds what the lanes built. File overrides (27) go through one shared vfs
+  with DirectStorage, audio (19), DirectStorage (page destinations over the title's physical frames, with the
+  fork's retry), and the xg texture computer behind its 13-slot vtable. The drives are `G:` read-only, `T:`
+  emptied every run and `S:` storage. `runtitle` has a stack sampler that names where the title's main
+  thread waits.
+- **Built (settings):** `crates/config` never replaces a user's setting. Explicit values are kept even when
+  equal to the default, unknown, wrong-typed and refused entries are written back as they were, and the
+  schema is never lowered. Six registry entries the lanes asked for were added.
+- **Built (Build 4):** the GFX10 lifter (`crates/sir/src/lift.rs`): registers as HLSL variables, EXEC per
+  lane, about 150 ALU forms with the console's float semantics. Pixel shader IO (`lift/io.rs`):
+  interpolation, exports, discard, signatures by semantic.
+- **Measured:** opcode coverage of the v0 set ([`runs/build4-coverage.md`](runs/build4-coverage.md)): 119
+  opcodes cover 95.6 %. ALU: nothing left in the v0 set ([`runs/build4-lift.md`](runs/build4-lift.md)).
+  **427 of 1,798 v0 pixel shaders translate and compile** ([`runs/build4-ps.md`](runs/build4-ps.md)).
+  Tests: 250 green, 0 warnings.
+- **Decided:** translation design in `docs/design/shader-ir.md` (registers as variables, DXC builds the SSA;
+  predication; the fork's interface). BCPack (owner): our decoder, tables outside git, a decode cache.
+- **Incident:** a helper overwrote a game file with a shell wildcard. The owner is re-dumping it, helpers
+  are frozen out of the game folder, and the folder goes read-only once it is restored. The shader corpus
+  is now read from a copy outside the game folder.
+- **Next:** resource tracing (descriptor loads from root parameters), which unblocks 1,364 more pixel
+  shaders; then vertex shaders. The title runs again once the file is restored.
 
 ### 2026-11-27 — Second lead session: all 11 helper PRs merged (shader decoder, FSR, files, audio, DirectStorage, xg, launcher); round 2 of the lanes
 

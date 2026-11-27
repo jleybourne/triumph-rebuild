@@ -6,7 +6,9 @@
 //! (straight-line, agnostic programs; `docs/design/shader-ir.md`), every opcode and how many programs use it,
 //! then the greedy order: implement opcodes in this order and this many programs become fully covered.
 //! `lift` runs the translator (`rebuild_sir::lift`) over the same set: programs with nothing left
-//! untranslated, and the untranslated opcodes by how many programs they block.
+//! untranslated, and the untranslated opcodes by how many programs they block. `ps` lifts the v0 pixel
+//! shaders with their inputs and outputs, assembles each program from its signatures and compiles it with
+//! DXC (`ps_6_6`, `-O3`), outputs under `REBUILD_TRANSLATE_OUT` (default `D:\victory-data\translate`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -85,6 +87,7 @@ fn main() {
     match mode.as_str() {
         "coverage" => coverage(&picked.iter().map(|(s, o, _, _)| (*s, o.clone())).collect::<Vec<_>>()),
         "lift" => lift_report(&picked),
+        "ps" => ps_report(&walk),
         m => {
             eprintln!("translate: unknown mode {m}");
             std::process::exit(2);
@@ -156,4 +159,104 @@ fn lift_report(picked: &[(HwStage, BTreeSet<&'static str>, Vec<String>, usize)])
         println!("  {n:<36} {c:>6}  {:>6}", alone.get(n).copied().unwrap_or(0));
     }
     println!("  ({} untranslated opcodes in all)", v.len());
+}
+
+fn dxc() -> Option<std::path::PathBuf> {
+    if let Some(p) = std::env::var_os("REBUILD_DXC") {
+        return Some(p.into());
+    }
+    let root = std::path::PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\bin");
+    let mut v: Vec<_> = std::fs::read_dir(root).ok()?.filter_map(|e| e.ok().map(|e| e.path().join("x64").join("dxc.exe"))).filter(|p| p.exists()).collect();
+    v.sort();
+    v.pop()
+}
+
+/// The v0 pixel shaders: lifted with IO, assembled, compiled.
+fn ps_report(walk: &census::Walk) {
+    use rebuild_shader::native::StageIo;
+    use rebuild_shader::signature;
+    let dxc = dxc().expect("dxc.exe (Windows SDK) or REBUILD_DXC");
+    let out = std::path::PathBuf::from(std::env::var("REBUILD_TRANSLATE_OUT").unwrap_or_else(|_| r"D:\victory-data\translate".into()));
+    std::fs::create_dir_all(&out).expect("output folder");
+    let next = AtomicUsize::new(0);
+    let tally: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
+    let compiled = AtomicUsize::new(0);
+    let total = AtomicUsize::new(0);
+    let failures: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+    std::thread::scope(|s| {
+        for _ in 0..8 {
+            s.spawn(|| {
+                let mut f = Findings::default();
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(p) = walk.programs.get(i) else { break };
+                    let StageIo::Ps { inputs, input_addr, .. } = &p.native.io else { continue };
+                    let row = features::analyse(&p.native, &mut f);
+                    if row.blocks != 1 || row.class() != WaveClass::Agnostic || row.decode_error.is_some() {
+                        continue;
+                    }
+                    total.fetch_add(1, Ordering::Relaxed);
+                    let bump = |k: String| *tally.lock().unwrap().entry(k).or_default() += 1;
+                    let Ok(insts) = gfx10::decode(&p.native.patched_code()) else {
+                        bump("patched code does not decode".into());
+                        continue;
+                    };
+                    let stage = rebuild_sir::lift::PsStage { inputs, input_addr: *input_addr };
+                    let l = rebuild_sir::lift::lift_stage(&insts, rebuild_sir::lift::Stage::Ps(stage));
+                    let stage = rebuild_sir::lift::PsStage { inputs, input_addr: *input_addr };
+                    let (Ok(isg1), Ok(osg1)) = (signature::parse(&p.isg1), signature::parse(&p.osg1)) else {
+                        bump("signature unreadable".into());
+                        continue;
+                    };
+                    let src = match rebuild_sir::lift::ps_program(&l, &stage, &isg1, &osg1) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let key = if e.starts_with("untranslated") {
+                                e
+                            } else if e.starts_with("reads user data") {
+                                "reads user data (root parameters)".to_string()
+                            } else {
+                                format!("io: {e}")
+                            };
+                            bump(key.split(" row ").next().unwrap().to_string());
+                            continue;
+                        }
+                    };
+                    let hl = out.join(format!("{}.ps.hlsl", p.hash));
+                    let obj = out.join(format!("{}.ps.dxil", p.hash));
+                    std::fs::write(&hl, &src).expect("write hlsl");
+                    let r = std::process::Command::new(&dxc)
+                        .args(["-T", "ps_6_6", "-E", "main", "-O3", "-enable-16bit-types", "-Fo"])
+                        .arg(&obj)
+                        .arg(&hl)
+                        .output()
+                        .expect("run dxc");
+                    if r.status.success() {
+                        compiled.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        let err = String::from_utf8_lossy(&r.stderr);
+                        let first = err.lines().find(|l| l.contains("error")).unwrap_or("dxc failed").to_string();
+                        bump("dxc error".into());
+                        failures.lock().unwrap().push((p.hash.clone(), first));
+                    }
+                }
+            });
+        }
+    });
+    let (n, ok) = (total.load(Ordering::Relaxed), compiled.load(Ordering::Relaxed));
+    println!("translate ps — v0 pixel shaders, lifted with IO and compiled by DXC (ps_6_6, -O3)");
+    println!("programs  {n} · compiled {ok} ({:.1} %)", 100.0 * ok as f64 / n.max(1) as f64);
+    let mut v: Vec<_> = tally.into_inner().unwrap().into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    println!("\n  not compiled, by first reason          programs");
+    for (k, c) in v.iter().take(30) {
+        println!("  {k:<40} {c:>6}");
+    }
+    let f = failures.into_inner().unwrap();
+    if !f.is_empty() {
+        println!("\n  dxc errors (first 10):");
+        for (h, e) in f.iter().take(10) {
+            println!("  {h}  {e}");
+        }
+    }
 }

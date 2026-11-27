@@ -21,6 +21,10 @@ pub struct Program {
     /// The `DXIL` part's hash (8 hex digits): what deduplication keys on.
     pub code_hash: String,
     pub native: NativeProgram,
+    /// The container's input and output signature parts (`ISG1`, `OSG1`; empty if absent): what the
+    /// stage's inputs and outputs are called, which a host pipeline links by.
+    pub isg1: Vec<u8>,
+    pub osg1: Vec<u8>,
 }
 
 #[derive(Debug, Default)]
@@ -53,6 +57,8 @@ enum Found {
         hash: String,
         code: blake3::Hash,
         programs: Result<Vec<NativeProgram>, String>,
+        isg1: Vec<u8>,
+        osg1: Vec<u8>,
     },
 }
 
@@ -67,6 +73,8 @@ fn examine(bytes: &[u8]) -> Found {
         hash: blake3::hash(bytes).to_hex()[..16].to_owned(),
         code: blake3::hash(dxil.data),
         programs: native_programs(dxil.data).map_err(|e| e.to_string()),
+        isg1: container.part(FourCC::ISG1).map(|p| p.data.to_vec()).unwrap_or_default(),
+        osg1: container.part(FourCC::OSG1).map(|p| p.data.to_vec()).unwrap_or_default(),
     }
 }
 
@@ -123,7 +131,7 @@ pub fn walk(file: &[u8], threads: usize) -> Walk {
                 w.containers += 1;
                 w.no_dxil += 1;
             }
-            Found::Container { hash, code, programs } => {
+            Found::Container { hash, code, programs, isg1, osg1 } => {
                 w.containers += 1;
                 w.order.push((hash.clone(), code.to_hex()[..8].to_owned()));
                 if !seen.insert(code) {
@@ -138,6 +146,8 @@ pub fn walk(file: &[u8], threads: usize) -> Walk {
                             hash: hash.clone(),
                             code_hash: code_hash.clone(),
                             native,
+                            isg1: isg1.clone(),
+                            osg1: osg1.clone(),
                         }));
                     }
                     Err(e) => *w.native_errors.entry(e).or_default() += 1,

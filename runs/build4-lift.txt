@@ -10,7 +10,6 @@ programs  2881 · fully translated 5 (0.2 %)
   v_interp_p1_f32                        1376       0
   v_interp_p2_f32                        1376       0
   s_load_dwordx8                         1122       0
-  s_wqm_b64                               884       0
   image_sample                            876       0
   s_swappc_b64                            765       0
   s_buffer_load_dwordx4                   596       0
@@ -45,4 +44,5 @@ programs  2881 · fully translated 5 (0.2 %)
   ds_add_u32                                8       0
   image_sample_b                            8       0
   s_barrier                                 8       0
-  (79 untranslated opcodes in all)
+  ds_read2_b32                              7       0
+  (78 untranslated opcodes in all)

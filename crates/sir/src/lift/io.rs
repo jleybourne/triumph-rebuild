@@ -1,0 +1,331 @@
+//! Stage inputs and outputs: pixel shaders first.
+//!
+//! A pixel shader gets the VGPRs `SPI_PS_INPUT_ADDR` enables, in the hardware's fixed order (barycentric
+//! pairs per mode, then position, front face, ancillary, coverage). `v_interp_p1` / `v_interp_p2` evaluate
+//! one channel of an attribute from a barycentric pair; on the host the rasteriser interpolates, so both
+//! read the interpolated input, with the HLSL interpolation modifier of the pair they use.
+//! `v_interp_mov_f32` reads one vertex's value: a `nointerpolation` input. Exports carry 32-bit values
+//! (the code is export-patched, `NativeProgram::patched_code`): `mrt<n>` is render target n and `mrtz` the
+//! depth. A lane whose EXEC bit is clear at the export that ends the program is discarded.
+//!
+//! Inputs and outputs are named by the container's own signature (`ISG1`, `OSG1`), by register row, so a
+//! host pipeline links stages by semantic exactly as the title's did.
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+
+use rebuild_shader::gfx10::enc::Decoded;
+use rebuild_shader::native::PsInput;
+use rebuild_shader::signature::Element;
+
+use super::{Lifted, Lifter};
+
+/// How a pixel input is interpolated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Interp {
+    PerspSample,
+    PerspCenter,
+    PerspCentroid,
+    LinearSample,
+    LinearCenter,
+    LinearCentroid,
+    Flat,
+}
+
+impl Interp {
+    pub fn hlsl(self) -> &'static str {
+        match self {
+            Interp::PerspSample => "sample ",
+            Interp::PerspCenter => "",
+            Interp::PerspCentroid => "centroid ",
+            Interp::LinearSample => "noperspective sample ",
+            Interp::LinearCenter => "noperspective ",
+            Interp::LinearCentroid => "noperspective centroid ",
+            Interp::Flat => "nointerpolation ",
+        }
+    }
+}
+
+/// A pixel input VGPR's meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PsVgpr {
+    /// barycentric `index` (0 i, 1 j) of a mode
+    Bary(Interp, u8),
+    PullModel(u8),
+    LineStipple,
+    /// position channel 0-3
+    Pos(u8),
+    FrontFace,
+    Ancillary,
+    Coverage,
+    PosFixed,
+}
+
+/// The input VGPRs, in order, for an `SPI_PS_INPUT_ADDR` value.
+pub fn ps_vgprs(input_addr: u32) -> Vec<PsVgpr> {
+    use Interp::*;
+    let mut v = Vec::new();
+    let on = |bit: u32| input_addr >> bit & 1 == 1;
+    for (bit, mode) in [(0, PerspSample), (1, PerspCenter), (2, PerspCentroid)] {
+        if on(bit) {
+            v.extend([PsVgpr::Bary(mode, 0), PsVgpr::Bary(mode, 1)]);
+        }
+    }
+    if on(3) {
+        v.extend([PsVgpr::PullModel(0), PsVgpr::PullModel(1), PsVgpr::PullModel(2)]);
+    }
+    for (bit, mode) in [(4, LinearSample), (5, LinearCenter), (6, LinearCentroid)] {
+        if on(bit) {
+            v.extend([PsVgpr::Bary(mode, 0), PsVgpr::Bary(mode, 1)]);
+        }
+    }
+    if on(7) {
+        v.push(PsVgpr::LineStipple);
+    }
+    for c in 0..4 {
+        if on(8 + c) {
+            v.push(PsVgpr::Pos(c as u8));
+        }
+    }
+    for (bit, x) in [(12, PsVgpr::FrontFace), (13, PsVgpr::Ancillary), (14, PsVgpr::Coverage), (15, PsVgpr::PosFixed)] {
+        if on(bit) {
+            v.push(x);
+        }
+    }
+    v
+}
+
+/// What the lifter needs to know about a pixel shader.
+pub struct PsStage<'a> {
+    pub inputs: &'a [PsInput],
+    pub input_addr: u32,
+}
+
+/// Which stage the lifted program is (its inputs and outputs).
+#[derive(Default)]
+pub enum Stage<'a> {
+    #[default]
+    None,
+    Ps(PsStage<'a>),
+}
+
+/// What the stage's inputs and outputs need, gathered while lifting.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StageUse {
+    /// pixel input row → (channels read, interpolation)
+    pub inputs: BTreeMap<u8, (u8, Interp)>,
+    /// export target → channels written (0-7 mrt, 8 mrtz)
+    pub exports: BTreeMap<u8, u8>,
+    /// lanes inactive at the final export are discarded
+    pub discard: bool,
+    /// the same input row read with two interpolation modes (not translated)
+    pub conflicts: usize,
+}
+
+impl Lifter<'_> {
+    pub(super) fn interp(&mut self, name: &str, d: &Decoded) -> Option<()> {
+        let Stage::Ps(ps) = &self.stage else { return None };
+        let (attr, chan, vdst) = (d.get("attr")? as u8, d.get("attrchan")? as u8, d.get("vdst")? as u16);
+        let input = ps.inputs.iter().find(|i| i.attr == attr)?;
+        if input.fp16 || input.pack2 {
+            return None; // 16-bit attributes: next step
+        }
+        let mode = match name {
+            "v_interp_mov_f32" => Interp::Flat,
+            "v_interp_p1_f32" | "v_interp_p2_f32" => {
+                let vsrc = d.get("vsrc")? as usize;
+                match ps_vgprs(ps.input_addr).get(vsrc)? {
+                    PsVgpr::Bary(m, _) => *m,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let e = self.out.io.inputs.entry(input.row).or_insert((0, mode));
+        if e.1 != mode {
+            self.out.io.conflicts += 1;
+            return None;
+        }
+        e.0 |= 1 << chan;
+        // resolved against the signature when the program is assembled (rows can hold several elements)
+        let expr = format!("@in{}.{chan}@", input.row);
+        // p1's partial result only ever feeds p2 on the same register, so both may write the value
+        self.vwrite_raw(vdst, expr);
+        Some(())
+    }
+
+    pub(super) fn export(&mut self, d: &Decoded) -> Option<()> {
+        let Stage::Ps(_) = &self.stage else { return None };
+        let target = d.get("target")? as u8;
+        let (en, done) = (d.get("en")? as u8, d.get("done")? == 1);
+        if d.get("compr")? == 1 {
+            return None; // the export patch makes them 32-bit; a compressed one left is not expected
+        }
+        match target {
+            0..=8 => {
+                if done && self.out.exec_narrowed {
+                    self.out.io.discard = true;
+                    self.line("if (!ex) discard;".into());
+                }
+                *self.out.io.exports.entry(target).or_default() |= en;
+                for c in 0..4u8 {
+                    if en >> c & 1 == 1 {
+                        let v = d.get(["vsrc0", "vsrc1", "vsrc2", "vsrc3"][c as usize])? as u16;
+                        self.out.vgprs.insert(v);
+                        let ch = ["x", "y", "z", "w"][c as usize];
+                        self.line(format!("o{target}.{ch} = v{v};"));
+                    }
+                }
+                Some(())
+            }
+            9 => {
+                // null: only the discard, for a program that exports nothing else
+                if done && self.out.exec_narrowed {
+                    self.out.io.discard = true;
+                    self.line("if (!ex) discard;".into());
+                }
+                Some(())
+            }
+            _ => None,
+        }
+    }
+}
+
+fn hlsl_type(comp: u32, n: usize) -> String {
+    let base = match comp {
+        1 | 4 => "uint",
+        2 | 5 => "int",
+        _ => "float",
+    };
+    if n == 1 { base.to_string() } else { format!("{base}{n}") }
+}
+
+fn as_type(comp: u32, e: &str) -> String {
+    match comp {
+        1 | 4 => e.to_string(),
+        2 | 5 => format!("asint({e})"),
+        _ => format!("asfloat({e})"),
+    }
+}
+
+/// A whole pixel shader: inputs and outputs named by the container's signatures, the system values the
+/// input VGPRs carry, the lifted body. `Err` names what is missing.
+pub fn ps_program(l: &Lifted, ps: &PsStage, isg1: &[Element], osg1: &[Element]) -> Result<String, String> {
+    if !l.unsupported.is_empty() {
+        return Err(format!("untranslated: {}", l.unsupported[0].1));
+    }
+    if let Some(s) = l.live_in.iter().next() {
+        return Err(format!("reads user data s{s} (root parameters not built yet)"));
+    }
+    if l.io.conflicts > 0 {
+        return Err("an input read with two interpolation modes".into());
+    }
+    let mut s = String::from(super::PRELUDE);
+    // inputs: the rows read, plus position and front face if their VGPRs are used
+    let vg = ps_vgprs(ps.input_addr);
+    s.push_str("struct In {\n");
+    let mut body = l.body.clone();
+    for (row, (chans, mode)) in &l.io.inputs {
+        // each element on the row, by the channels it holds
+        let on_row: Vec<&Element> = isg1.iter().filter(|e| e.register == u32::from(*row) && e.system == 0).collect();
+        if on_row.is_empty() {
+            return Err(format!("no ISG1 element for row {row}"));
+        }
+        for e in &on_row {
+            let first = e.mask.trailing_zeros() as u8;
+            let n = e.mask.count_ones() as usize;
+            let _ = writeln!(s, "    {}{} r{row}_{first} : {}{};", mode.hlsl(), hlsl_type(e.comp, n), e.name, e.index);
+            for c in 0..4u8 {
+                if e.mask >> c & 1 == 1 {
+                    let field = if n == 1 { String::new() } else { format!(".{}", ["x", "y", "z", "w"][(c - first) as usize]) };
+                    let v = format!("asuint(i.r{row}_{first}{field})");
+                    body = body.replace(&format!("@in{row}.{c}@"), &v);
+                }
+            }
+        }
+        for c in 0..4u8 {
+            if chans >> c & 1 == 1 && body.contains(&format!("@in{row}.{c}@")) {
+                return Err(format!("row {row} channel {c} is in no ISG1 element"));
+            }
+        }
+    }
+    let pos_used = vg.iter().enumerate().any(|(k, v)| matches!(v, PsVgpr::Pos(_)) && l.vgprs.contains(&(k as u16)));
+    let ff_used = vg.iter().enumerate().any(|(k, v)| matches!(v, PsVgpr::FrontFace) && l.vgprs.contains(&(k as u16)));
+    if pos_used {
+        s.push_str("    float4 pos : SV_Position;\n");
+    }
+    if ff_used {
+        s.push_str("    bool ff : SV_IsFrontFace;\n");
+    }
+    s.push_str("};\nstruct Out {\n");
+    let mut returns = String::new();
+    for (target, _) in &l.io.exports {
+        if *target == 8 {
+            s.push_str("    float depth : SV_Depth;\n");
+            returns.push_str("    r.depth = asfloat(o8.x);\n");
+            continue;
+        }
+        let e = osg1.iter().find(|e| e.system == 64 && e.index == u32::from(*target));
+        let comp = e.map(|e| e.comp).unwrap_or(3);
+        let _ = writeln!(s, "    {} t{target} : SV_Target{target};", hlsl_type(comp, 4));
+        let _ = writeln!(returns, "    r.t{target} = {};", as_type(comp, &format!("o{target}")));
+    }
+    if l.io.exports.is_empty() {
+        s.push_str("    float4 unused : SV_Target0;\n");
+    }
+    s.push_str("};\nOut main(In i) {\n");
+    s.push_str(&super::declarations(l));
+    for t in l.io.exports.keys() {
+        let _ = writeln!(s, "    uint4 o{t} = 0;");
+    }
+    // the system values the input VGPRs carry
+    for (k, v) in vg.iter().enumerate() {
+        if !l.vgprs.contains(&(k as u16)) {
+            continue;
+        }
+        let e = match v {
+            PsVgpr::Pos(c) => format!("asuint(i.pos.{})", ["x", "y", "z", "w"][*c as usize]),
+            PsVgpr::FrontFace => "i.ff ? 1u : 0u".to_string(),
+            _ => continue, // barycentrics are consumed by v_interp; the rest are not used by v0 programs
+        };
+        let _ = writeln!(s, "    v{k} = {e};");
+    }
+    s.push_str(&body);
+    s.push_str("    Out r = (Out)0;\n");
+    s.push_str(&returns);
+    s.push_str("    return r;\n}\n");
+    Ok(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_vgprs_follow_the_enable_bits_in_hardware_order() {
+        // persp center (bit 1), linear centroid (bit 6), pos x and y (8, 9), front face (12)
+        let v = ps_vgprs(1 << 1 | 1 << 6 | 1 << 8 | 1 << 9 | 1 << 12);
+        assert_eq!(
+            v,
+            vec![
+                PsVgpr::Bary(Interp::PerspCenter, 0),
+                PsVgpr::Bary(Interp::PerspCenter, 1),
+                PsVgpr::Bary(Interp::LinearCentroid, 0),
+                PsVgpr::Bary(Interp::LinearCentroid, 1),
+                PsVgpr::Pos(0),
+                PsVgpr::Pos(1),
+                PsVgpr::FrontFace,
+            ]
+        );
+        assert_eq!(Interp::LinearCentroid.hlsl(), "noperspective centroid ");
+    }
+
+    #[test]
+    fn a_program_reading_user_data_is_refused_not_zeroed() {
+        let mut l = Lifted::default();
+        l.live_in.insert(2);
+        let ps = PsStage { inputs: &[], input_addr: 0 };
+        let e = ps_program(&l, &ps, &[], &[]).unwrap_err();
+        assert!(e.contains("user data s2"), "{e}");
+    }
+}

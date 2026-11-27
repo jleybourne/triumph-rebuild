@@ -32,6 +32,12 @@ pub struct Lifted {
     pub notes: BTreeSet<&'static str>,
     /// EXEC was narrowed somewhere (VALU writes after that are predicated).
     pub exec_narrowed: bool,
+    /// What the stage's inputs and outputs need.
+    pub io: io::StageUse,
+    /// SGPRs read before any write: user data (root constants, descriptor addresses) the program needs as
+    /// inputs. A program with any is not complete until root parameters are built.
+    pub live_in: BTreeSet<u8>,
+    written: BTreeSet<u8>,
 }
 
 /// Helper functions the statements call, emitted once per program.
@@ -80,16 +86,23 @@ fn inline_bits(code: u16) -> String {
     }
 }
 
-struct Lifter {
+pub mod io;
+pub use io::{ps_program, PsStage, Stage};
+
+struct Lifter<'a> {
     out: Lifted,
+    stage: Stage<'a>,
 }
 
 /// What an operand reads, as a `uint` expression; `None` if not translated yet.
-impl Lifter {
+impl Lifter<'_> {
     fn src(&mut self, code: u32, literal: Option<u32>) -> Option<String> {
         Some(match enc::src(code) {
             Src::Sgpr(n) => {
                 self.out.sgprs.insert(n);
+                if !self.out.written.contains(&n) {
+                    self.out.live_in.insert(n);
+                }
                 format!("s{n}")
             }
             Src::Vgpr(n) => {
@@ -165,6 +178,10 @@ impl Lifter {
 
     fn vwrite(&mut self, d: &Decoded, expr: String) {
         let v = d.get("vdst").unwrap_or(0) as u16;
+        self.vwrite_raw(v, expr);
+    }
+
+    fn vwrite_raw(&mut self, v: u16, expr: String) {
         self.out.vgprs.insert(v);
         if self.out.exec_narrowed {
             let _ = writeln!(self.out.body, "    if (ex) v{v} = {expr};");
@@ -177,6 +194,7 @@ impl Lifter {
         match enc::src(n) {
             Src::Sgpr(s) => {
                 self.out.sgprs.insert(s);
+                self.out.written.insert(s);
                 let _ = writeln!(self.out.body, "    s{s} = {expr};");
             }
             Src::M0 => {
@@ -201,6 +219,8 @@ impl Lifter {
         match i.encoding {
             Encoding::Sopp => self.sopp(name),
             Encoding::Sop1 | Encoding::Sop2 | Encoding::Sopc | Encoding::Sopk => self.salu(name, &d),
+            Encoding::Vintrp => self.interp(name, &d),
+            Encoding::Exp => self.export(&d),
             Encoding::Vop1 | Encoding::Vop2 | Encoding::Vop3 | Encoding::Vopc => {
                 if d.extra.is_some() {
                     return None; // SDWA / DPP: not yet
@@ -224,6 +244,8 @@ impl Lifter {
         let a = |l: &mut Self| l.usrc(d, "ssrc0");
         let b = |l: &mut Self| l.usrc(d, "ssrc1");
         match name {
+            // M0 for interpolation (the attribute base): the host interpolates, so it is not needed
+            "s_mov_b32" if matches!(self.stage, Stage::Ps(_)) && sdst.map(enc::src) == Some(Src::M0) => Some(()),
             "s_mov_b32" => {
                 let x = a(self)?;
                 self.swrite(sdst?, x)
@@ -307,6 +329,18 @@ impl Lifter {
                 Some(())
             }
             "s_and_b64" | "s_or_b64" | "s_andn2_b64" | "s_xor_b64" => self.mask_op(name, d),
+            "s_wqm_b64" => {
+                // whole-quad mode: a lane is on if any lane of its quad is. On the host, helper lanes run for
+                // derivatives anyway, so on an untouched EXEC this is a no-op.
+                let (src, dst) = (d.get("ssrc0")?, sdst?);
+                if !(matches!(enc::src(src), Src::ExecLo) && matches!(enc::src(dst), Src::ExecLo)) {
+                    return None;
+                }
+                if self.out.exec_narrowed {
+                    self.line("ex = ex || QuadReadAcrossX(ex) || QuadReadAcrossY(ex) || QuadReadAcrossDiagonal(ex);".into());
+                }
+                Some(())
+            }
             "s_and_saveexec_b64" => {
                 let (src, dst) = (d.get("ssrc0")?, sdst?);
                 let m = match enc::src(src) {
@@ -684,9 +718,14 @@ fn fcmp(op: &str, a: &str, b: &str) -> Option<String> {
     })
 }
 
-/// Translates a straight-line program's instructions.
+/// Translates a straight-line program's instructions (no stage inputs or outputs).
 pub fn lift(insts: &[Instruction]) -> Lifted {
-    let mut l = Lifter { out: Lifted::default() };
+    lift_stage(insts, Stage::None)
+}
+
+/// Translates a straight-line program of a given stage.
+pub fn lift_stage(insts: &[Instruction], stage: Stage) -> Lifted {
+    let mut l = Lifter { out: Lifted::default(), stage };
     for i in insts {
         if l.inst(i).is_none() {
             l.out.unsupported.push((i.offset, i.name().unwrap_or("?").to_string()));

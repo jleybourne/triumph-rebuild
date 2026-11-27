@@ -7,7 +7,7 @@ helpers).
 ## Where things stand (one screen)
 
 ```
-progress    46 % toward 30 fps (progress.md)       measured fps: none yet (no title frame)
+progress    47 % toward 30 fps (progress.md)       measured fps: none yet (no title frame)
 built       Builds 0 (a, b), 1, 2 closed; Build 3 ~70 %; Build 4 core proven; Build 7 DLSS standalone
 title       its 17 images load through the Windows loader; 16/16 DLL entry points run; its exe's entry
             point RUNS for 60 s without a crash, but waits before its first render call
@@ -15,7 +15,9 @@ runtime     32 / 73 of our functions built; 624 more bind straight to the host
 shaders     core proven on the card; lane shader merged: 25,694 programs decode byte-exact, oracle set
             complete; 0 / 25,694 translated yet
 lanes       round 1 all merged (#1-#13); round 2 handed out: gdk G1-G4, audio A5, files F4-F5, shader S6, launcher U6
-tests       238 green, 4 ignored, 0 warnings (cargo test --release)
+tests       250 green, 4 ignored, 0 warnings (cargo test --release)
+translate   `translate coverage|lift|ps` over D:\victory-data\shaders.rpf; 427 / 1,798 v0 pixel shaders compile;
+            next: resource tracing (s_load_dwordx4/x8 from root parameters), see runs/build4-ps.md
 ```
 
 ## Who you are and how the owner works

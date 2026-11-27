@@ -17,6 +17,7 @@ pub mod features;
 pub mod gfx10;
 pub mod native;
 pub mod sgd5;
+pub mod signature;
 
 pub use blake3;
 pub use dxbc::{Container, FourCC, Part};
