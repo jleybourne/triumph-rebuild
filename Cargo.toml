@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/uma", "apps/remux"]
+members = ["crates/uma", "apps/rebuild"]
 
 [workspace.package]
 edition = "2021"

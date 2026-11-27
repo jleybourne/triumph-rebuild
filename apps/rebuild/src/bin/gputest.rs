@@ -1,6 +1,6 @@
 fn main() {
     if std::env::args().any(|a| a == "--bare") {
-        match remux_uma::windows::prove_bare_dispatch() {
+        match rebuild_uma::windows::prove_bare_dispatch() {
             Ok(msg) => println!("RESULT    {msg}"),
             Err(e) => { println!("FAILED    {e}"); std::process::exit(1); }
         }
@@ -8,9 +8,9 @@ fn main() {
     }
     let vram = std::env::args().any(|a| a == "--vram") || std::env::var_os("REMUX_VRAM").is_some();
     let proof = if vram {
-        remux_uma::windows::prove_on_vram()
+        rebuild_uma::windows::prove_on_vram()
     } else {
-        remux_uma::windows::prove_shared_memory()
+        rebuild_uma::windows::prove_shared_memory()
     };
     match proof {
         Ok(report) => {

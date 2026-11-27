@@ -1,4 +1,4 @@
-# triumph-remux
+# triumph-rebuild
 
 **A self rebuild of the compatibility layer for Xbox Series, in my own method, focused on performance.**
 
@@ -7,7 +7,7 @@ learned from make differently: **the title's memory is the GPU's memory.**
 
 ```
 crates/uma        the address space: windows, 64 KiB pages, placement, sharing
-apps/remux     the launcher
+apps/rebuild     the launcher
 apps/gputest      the proof: the GPU writes, the CPU reads, nothing is copied
 ```
 
@@ -18,7 +18,7 @@ into the card before the GPU reads, copy back after it writes. That is always co
 per-frame copy in *and* a copy back — in the layer this project replaces those were 31-48 ms and 48-54 ms
 of a 131 ms frame, at 5.5 µs per range of which only ~1 µs was bytes.
 
-triumph-remux does the opposite. It gives the title addresses in sparse windows and backs them with card
+triumph-rebuild does the opposite. It gives the title addresses in sparse windows and backs them with card
 memory one 64 KiB page at a time, so:
 
 - a resource the GPU owns is written where the GPU writes it — nothing comes back;

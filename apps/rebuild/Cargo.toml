@@ -1,8 +1,8 @@
 [package]
-name = "remux"
+name = "rebuild"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
 
 [dependencies]
-remux-uma = { path = "../../crates/uma" }
+rebuild-uma = { path = "../../crates/uma" }

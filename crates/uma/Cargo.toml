@@ -1,5 +1,5 @@
 [package]
-name = "remux-uma"
+name = "rebuild-uma"
 edition.workspace = true
 license.workspace = true
 version.workspace = true

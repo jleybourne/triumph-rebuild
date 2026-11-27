@@ -21,14 +21,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "remux"
+name = "rebuild"
 version = "0.1.0"
 dependencies = [
- "remux-uma",
+ "rebuild-uma",
 ]
 
 [[package]]
-name = "remux-uma"
+name = "rebuild-uma"
 version = "0.1.0"
 dependencies = [
  "windows",
