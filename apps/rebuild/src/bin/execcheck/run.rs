@@ -141,12 +141,26 @@ pub fn plan(p: &Prog) -> Result<Plan, String> {
             }
         }
         if u.shadow != 0 {
-            pl.notes.push("shadow stride = record end");
             if let Some(off) = u.byte_off {
                 let (_, base) = table_base[&u.user_data];
                 let slot = ((base * 32) as i64 + off as i64) as u32 / 32;
+                // the record size the title's root signature gives the range (a structured buffer's stride), as the
+                // runtime would write it from the descriptor; with none, the end of the furthest record read
+                let dword = u32::try_from(off).unwrap_or(0) / 4;
+                let declared = p
+                    .used
+                    .iter()
+                    .filter(|r| r.root == RootType::Table && r.user_data == u.user_data && r.table_offset_dwords <= dword)
+                    .max_by_key(|r| r.table_offset_dwords)
+                    .map_or(0, |r| r.stride);
                 let e = pl.strides.entry(slot).or_insert(0);
-                *e = (*e).max(u32::from(u.shadow).next_multiple_of(4));
+                if declared > 0 {
+                    pl.notes.push("shadow stride from the root signature");
+                    *e = declared;
+                } else {
+                    pl.notes.push("shadow stride = record end");
+                    *e = (*e).max(u32::from(u.shadow).next_multiple_of(4));
+                }
             }
         }
     }
