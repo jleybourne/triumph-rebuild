@@ -21,7 +21,7 @@ Read, in this order: `README.md`, `plan.md` (the six decisions), `tasks.md` (you
 ```powershell
 cd D:\Developer\triumph-rebuild
 git fetch origin
-git worktree add ..\triumph-rebuild-<lane> -b agent/<lane> origin/master    # <lane> = loader or shader
+git worktree add ..\triumph-rebuild-<lane> -b agent/<lane> origin/master    # <lane> = loader, shader or launcher
 cd ..\triumph-rebuild-<lane>
 cargo test --release                                                         # must be green before you change anything
 ```
