@@ -173,10 +173,18 @@ fn main() {
 
     let mut rng = Rng(0xC0FF_EE11_2233_4455);
     let (mut agnostic, mut doubled, mut wrong) = (0usize, 0usize, 0usize);
+    let (mut host_branches, mut predicated) = (0usize, 0usize);
     for n in 0..programs {
-        // alternate: wave-wide programs (doubled), and agnostic ones (both modes)
+        // four kinds in turn: wave-wide or agnostic, straight-line or with nested branches
         let wave = n % 2 == 0;
-        let p = gen::program(&mut rng, 12, wave);
+        let branchy = n % 4 >= 2;
+        let p = gen::program_with(&mut rng, 16, wave, branchy);
+        for (_, low) in hlsl::plan(&p) {
+            match low {
+                hlsl::Lowering::HostBranch => host_branches += 1,
+                hlsl::Lowering::Predicated => predicated += 1,
+            }
+        }
         let exec = gen::exec(&mut rng);
         let (sin, vin) = gen::inputs(&mut rng);
         let want = lanes::console(&p, exec, &sin, &vin);
@@ -223,9 +231,11 @@ fn main() {
         }
     }
     println!("ran       {agnostic} agnostic (wave32, one console lane per thread) + {doubled} doubled (two console lanes per thread, EXEC as data)");
+    println!("branches  {host_branches} lowered to host branches (uniform condition, or no cross-lane op inside) · {predicated} predicated (EXEC as data)");
     if wrong == 0 {
         println!("PROVEN    every lane of every output matches the 64-lane console interpreter, on the card");
         println!("PROVEN    a per-lane WaveReadLaneAt index (the doubled swizzle) is exact on this GPU");
+        println!("PROVEN    live masks: host branches and predicated regions both exact, nested up to depth 2");
     } else {
         println!("FAILED    {wrong} runs differ");
         std::process::exit(1);

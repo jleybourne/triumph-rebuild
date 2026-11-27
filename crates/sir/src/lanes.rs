@@ -16,8 +16,10 @@ pub type Wave64 = [u32; 64];
 /// Run on the reference 64-lane console wave. Returns each output's 64 lanes.
 pub fn console(p: &Program, exec: u64, sin: &[u32], vin: &[Wave64]) -> Vec<Wave64> {
     let mut vals: Vec<Wave64> = Vec::with_capacity(p.insts.len());
-    let active = |l: usize| exec >> l & 1 == 1;
+    let mut exec = exec;
+    let mut stack: Vec<(u64, u64)> = Vec::new(); // (exec at the If, lanes whose condition held)
     for op in &p.insts {
+        let active = |l: usize| exec >> l & 1 == 1;
         let g = |v: crate::V| vals[v.0 as usize];
         let mut r = [0u32; 64];
         match *op {
@@ -40,6 +42,17 @@ pub fn console(p: &Program, exec: u64, sin: &[u32], vin: &[Wave64]) -> Vec<Wave6
             Op::ReadLane(a, k) => r = [g(a)[k as usize & 63]; 64],
             Op::ReadFirstLane(a) => r = [g(a)[(0..64).find(|&l| active(l)).unwrap_or(0)]; 64],
             Op::Swizzle(a, m) => (0..64).for_each(|l| r[l] = g(a)[l ^ (m as usize & 63)]),
+            Op::Phi(c, a, b) => (0..64).for_each(|l| r[l] = if g(c)[l] != 0 { g(a)[l] } else { g(b)[l] }),
+            Op::If(c) => {
+                let held = (0..64).filter(|&l| g(c)[l] != 0).fold(0u64, |m, l| m | 1 << l);
+                stack.push((exec, held));
+                exec &= held;
+            }
+            Op::Else => {
+                let (outer, held) = *stack.last().expect("Else without If");
+                exec = outer & !held;
+            }
+            Op::EndIf => exec = stack.pop().expect("EndIf without If").0,
         }
         vals.push(r);
     }
@@ -81,6 +94,8 @@ pub fn doubled(p: &Program, exec: u64, sin: &[u32], vin: &[Wave64]) -> Vec<Wave6
     }
     let splat = |c: u32| Pair { lo: [c; 32], hi: [c; 32] };
     let mut vals: Vec<Pair> = Vec::with_capacity(p.insts.len());
+    // EXEC as data: a stack of (exec at the If, where the condition held), per half
+    let mut stack: Vec<([bool; 32], [bool; 32], [bool; 32], [bool; 32])> = Vec::new();
     for op in &p.insts {
         let g = |v: crate::V| vals[v.0 as usize];
         let lane = |f: &dyn Fn(usize, bool) -> u32| {
@@ -156,9 +171,42 @@ pub fn doubled(p: &Program, exec: u64, sin: &[u32], vin: &[Wave64]) -> Vec<Wave6
                     host_read(&a.lo, lo.trailing_zeros() as usize)
                 } else {
                     let hi = host_ballot(&e_hi);
-                    host_read(&a.hi, if hi != 0 { hi.trailing_zeros() as usize } else { 0 })
+                    // no lane active at all: lane 0 by convention (hardware never runs it)
+                    if hi != 0 { host_read(&a.hi, hi.trailing_zeros() as usize) } else { host_read(&a.lo, 0) }
                 };
                 splat(v)
+            }
+            Op::Phi(c, a, b) => {
+                let (c, a, b) = (g(c), g(a), g(b));
+                lane(&|h, hi| if pick(&c, h, hi) != 0 { pick(&a, h, hi) } else { pick(&b, h, hi) })
+            }
+            Op::If(c) => {
+                let c = g(c);
+                let (mut held_lo, mut held_hi) = ([false; 32], [false; 32]);
+                for h in 0..32 {
+                    held_lo[h] = c.lo[h] != 0;
+                    held_hi[h] = c.hi[h] != 0;
+                }
+                stack.push((e_lo, e_hi, held_lo, held_hi));
+                for h in 0..32 {
+                    e_lo[h] &= held_lo[h];
+                    e_hi[h] &= held_hi[h];
+                }
+                splat(0)
+            }
+            Op::Else => {
+                let (olo, ohi, hlo, hhi) = *stack.last().expect("Else without If");
+                for h in 0..32 {
+                    e_lo[h] = olo[h] && !hlo[h];
+                    e_hi[h] = ohi[h] && !hhi[h];
+                }
+                splat(0)
+            }
+            Op::EndIf => {
+                let (olo, ohi, _, _) = stack.pop().expect("EndIf without If");
+                e_lo = olo;
+                e_hi = ohi;
+                splat(0)
             }
             // console lane L reads lane L ^ m: bit 5 of m swaps halves (inside the host lane),
             // bits 0-4 choose another host lane (a host lane read)
@@ -208,6 +256,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn doubling_matches_the_console_with_nested_branches_on_100k_programs() {
+        let mut rng = Rng(0x0BAD_5EED_1234_5678);
+        let mut branched = 0;
+        for case in 0..100_000 {
+            let p = gen::program_with(&mut rng, 16, true, true);
+            branched += p.insts.iter().any(|o| matches!(o, Op::If(_))) as usize;
+            let exec = gen::exec(&mut rng);
+            let (sin, vin) = gen::inputs(&mut rng);
+            let want = console(&p, exec, &sin, &vin);
+            let got = doubled(&p, exec, &sin, &vin);
+            assert_eq!(want, got, "case {case}, exec {exec:#x}
+{:?}", p.insts);
+        }
+        assert!(branched > 50_000, "only {branched} programs had branches");
+    }
+
+    /// A wave op inside a divergent branch sees only that branch's lanes.
+    #[test]
+    fn a_reduction_inside_a_branch_sees_only_the_branch() {
+        let mut p = Program::default();
+        let x = p.push(Op::VInput(0));
+        let id = p.push(Op::LaneId);
+        let k = p.push(Op::Const(40));
+        let c = p.push(Op::Lt(id, k)); // lanes 0..40 take the then-part
+        p.push(Op::If(c));
+        let s_then = p.push(Op::WaveSum(x));
+        p.push(Op::Else);
+        let s_else = p.push(Op::WaveSum(x));
+        p.push(Op::EndIf);
+        let phi = p.push(Op::Phi(c, s_then, s_else));
+        p.outputs = vec![phi];
+        let vin = [[1u32; 64]];
+        let out = doubled(&p, u64::MAX, &[], &vin);
+        assert_eq!(out[0][0], 40);
+        assert_eq!(out[0][63], 24);
+        assert_eq!(out, console(&p, u64::MAX, &[], &vin));
     }
 
     /// The fork's refusal: a wave64 reduction where not every lane runs, across both halves.

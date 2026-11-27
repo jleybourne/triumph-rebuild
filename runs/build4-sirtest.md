@@ -17,6 +17,24 @@ PROVEN    every lane of every output matches the 64-lane console interpreter, on
 PROVEN    a per-lane WaveReadLaneAt index (the doubled swizzle) is exact on this GPU
 ```
 
+## Then: control flow and live masks (`runs/build4-sirtest-branches.txt`)
+
+The IR gained structured `If` / `Else` / `EndIf` / `Phi`, both interpreters gained an EXEC stack, and the
+emitter decides per branch: a **host branch** when the condition is uniform or nothing inside reads other
+lanes, **predication** (both parts run, EXEC narrows as data, phi becomes a select) otherwise. 400 programs,
+half of them with branches nested to depth 2:
+
+```
+ran       201 agnostic (wave32, one console lane per thread) + 400 doubled (two console lanes per thread, EXEC as data)
+branches  182 lowered to host branches (uniform condition, or no cross-lane op inside) · 124 predicated (EXEC as data)
+PROVEN    every lane of every output matches the 64-lane console interpreter, on the card
+PROVEN    live masks: host branches and predicated regions both exact, nested up to depth 2
+```
+
+Before the GPU, the interpreters agreed bit for bit on **100,000 random branched programs**. One convention
+was fixed on the way: a `ReadFirstLane` with no lane active reads lane 0. Hardware never runs it, but both
+sides must agree. DXC's HLSL 2021 needs `and()` for `bool2` EXEC masks, not `&&`.
+
 ## Verdict
 
 - **The whole path works end to end:** IR, emission, DXC, a pipeline, the GPU, and an exact comparison. Agnostic

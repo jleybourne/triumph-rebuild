@@ -4,16 +4,30 @@ Written and kept current by the session that started the helper agents, for the 
 Not committed by the helpers: this file sits only in the lead's tree, so commit or delete it as you like.
 Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives with its pull request.
 
-**Last updated:** 2026-11-27 12:45 (Adelaide)
+**Last updated:** 2026-11-27 13:05 (Adelaide)
 
 ## Lanes
 
 | lane | build | branch | worktree | state | last reported |
 |:--|:--|:--|:--|:--|:--|
-| **loader** | Build 3, first half (L1–L4) | `agent/loader` | `D:\Developer\triumph-rebuild-loader` | 🔄 started 12:40 | nothing yet |
-| **shader** | Build 4 front end (S1–S4) | `agent/shader` | `D:\Developer\triumph-rebuild-shader` | 🔄 started 12:40 | nothing yet |
+| **loader** | Build 3, first half (L1–L4) | `agent/loader` | `D:\Developer\triumph-rebuild-loader` | ✅ **L1–L4 closed, PR open** | 12:55 ([#1](https://github.com/jleybourne/triumph-rebuild/pull/1), +3,145 −1, 3 commits) |
+| **shader** | Build 4 front end (S1–S5) | `agent/shader` | `D:\Developer\triumph-rebuild-shader` | 🔄 started 12:40; told of the S2/S4 additions and S5 at 13:05 | nothing yet |
+| **launcher** | the desktop launcher (U1–U5) | `agent/launcher` | `D:\Developer\triumph-rebuild-launcher` | 🔄 started 13:05 | — |
+| **vfs** | overlay file system (V1–V4) | `agent/vfs` | `D:\Developer\triumph-rebuild-vfs` | 🔄 started 13:05 | — |
+| **upscale** | DLSS and FSR backends, standalone (P1–P5) | `agent/upscale` | `D:\Developer\triumph-rebuild-upscale` | 🔄 started 13:05 | — |
+| **input** | controller and keyboard (I1–I3) | `agent/input` | `D:\Developer\triumph-rebuild-input` | 🔄 started 13:05 | — |
 
-No pull requests yet. Neither lane merges; both open a PR to `master` titled `agent/<lane>: <what closed>`.
+No lane merges; each opens a PR to `master` titled `agent/<lane>: <what closed>`.
+
+### Loader numbers (as reported; PR confirmed open, contents not reviewed by me)
+
+| task | result |
+|:--|:--|
+| L1 PE32+ parser | **4,523 / 4,523** System32 PE32+ images parsed, 0 errors (6,382 / 6,382 recursive); 38 32-bit PE32 files refused by design; 200,000 random corruptions, no panic |
+| L2 map at base | a test DLL maps at 4 bases; real `dbghelp.dll` beside the Windows loader at the same base: **9,912 relocations, 0 wrong** |
+| L3 import census | 18 title images, **93 imported DLLs, 962 distinct functions**; the title's own DLLs supply 265; **GDK discovery list: 697 functions in 86 DLLs** (`agents/loader-imports.csv`, names only); game folder hashed unchanged before and after |
+| L4 title DLLs | all 16 tabled with export counts in `agents/loader.md` |
+| tests | `cargo test --release`: 48 pass (13 new). Nothing vendored, so no `CREDITS.md` line. |
 
 ## Rules every lane was given
 
@@ -28,10 +42,25 @@ No pull requests yet. Neither lane merges; both open a PR to `master` titled `ag
 
 ## For the lead
 
-Nothing yet. Anything a lane flags about the lead's code goes here as a one-line pointer to its `agents/<lane>.md`, and is never fixed by the lane.
+Anything a lane flags about the lead's code goes here as a one-line pointer to its `agents/<lane>.md`, and is never fixed by the lane.
+
+From **loader** (details in `agents/loader.md` on `agent/loader`):
+1. `plan.md` line 120 says the title never loads the FidelityFX loader, but the exe imports `amd_fidelityfx_loader_xbox.dll` statically (4 functions) and has no delay-load imports, so it is mapped at start. The upscaler DLL is imported by nothing.
+2. No image imports GDK runtime functions (`XGame*`, `XUser*`) directly, so the title must reach them through `GetProcAddress`. Discovery must catch those misses too, or 697 undercounts what the title calls.
+3. The README says 35 tests; with this branch it is 48.
+4. Two build warnings on every build: `crates/uma/src/tileproof.rs:572`, `crates/uma/src/upload.rs:560`.
+5. Shared-file edits to merge: one line in the root `Cargo.toml` members, and `rebuild-loader` added to `apps/rebuild/Cargo.toml`.
+
+From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f):
+6. Lane `launcher` U5 says "launch the proofs (`gputest --bare`)", but section 2 says helpers never run `gputest`. The launcher lane was told to build U5's launch path against a fake child process in tests, and to run no `gputest` itself. Please say which you meant.
+7. Lane `upscale` P3 needs AMD's FidelityFX SDK. If it isn't already on disk, getting it is a download. The lane was told not to download without your say, and to do P1, P2, P4 and P5 first. For DLSS it was pointed at the Streamline SDK zip already in `D:\tools\dlss\download` (production `bin/x64`, extracted outside git) and the user-supplied `nvngx_dlss.dll` in `D:\tools\dlss`.
+8. Lane `input` I3 reads `agents/loader-imports.csv` from the unmerged `agent/loader` branch (PR #1), and will say so.
 
 ## Log
 
 | time | event |
 |:--|:--|
+| 13:05 | `secondary-agent.md` updated by the lead (71a521f): lanes launcher, vfs, upscale and input started; lane shader told of the S2/S4 additions and S5. |
+| 12:55 | **loader done**: L1–L4 closed, PR #1 open (not merged). |
+| 12:44 | loader: `crates/loader` and `apps/rebuild/src/bin/imports.rs` written; a first `agents/loader-imports.csv` exists (L3 has run once). shader: `crates/shader` and `census.rs` being written (S1–S2). No commits yet. Both lanes also edited `apps/rebuild/Cargo.toml` (to add their dependency): not reserved, but expect a small merge there. |
 | 12:40 | Both lanes started. The old project's (fxceless-victory) recurring status, sync, continuation and fork-check jobs were cancelled; no further work on it. |

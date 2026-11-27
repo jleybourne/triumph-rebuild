@@ -1,0 +1,8 @@
+sirtest — the shader core on the card: IR → HLSL → DXC → GPU, against the 64-lane interpreter
+dxc       C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\dxc.exe
+ran       201 agnostic (wave32, one console lane per thread) + 400 doubled (two console lanes per thread, EXEC as data)
+branches  182 lowered to host branches (uniform condition, or no cross-lane op inside) · 124 predicated (EXEC as data)
+PROVEN    every lane of every output matches the 64-lane console interpreter, on the card
+PROVEN    a per-lane WaveReadLaneAt index (the doubled swizzle) is exact on this GPU
+PROVEN    live masks: host branches and predicated regions both exact, nested up to depth 2
+exit=0

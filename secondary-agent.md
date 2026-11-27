@@ -175,9 +175,9 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, after the settings registry (launcher track C1)
-progress  28 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
-tests     43 green: cargo test --release  (uma 24, xlist 5, sir 8, config 6)
+updated   2026-11-27, after live masks in the shader core (section 9 step 1 done)
+progress  29 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
+tests     46 green: cargo test --release  (uma 24, xlist 5, sir 11, config 6)
 ```
 
 | build | state | where | proof |
@@ -230,7 +230,7 @@ If the owner hands you the whole job, you are the lead. Read `README.md`, `plan.
 
 | # | step | closes when |
 |:--:|:--|:--|
-| 1 | `sir`: live-mask analysis. Divergent branches that contain wave ops become predication; host branches elsewhere | IR tests; `sirtest` still exact |
+| 1 | ✅ `sir`: live-mask analysis (done: 601 GPU runs exact, 182 host branches + 124 predicated) | — |
 | 2 | `sir`: memory lowering to window descriptors (`ResourceDescriptorHeap[windows + (addr >> 32)]`, 32-bit offset, uniform window via `WaveReadLaneFirst`), native 16-bit, quad ops | `sirtest` extended with loads/stores into a tiled window |
 | 3 | merge lane `shader` (S1-S4), then GFX10 → `sir`: CFG, SSA, structurize; agnostic programs first | census column "emitted"; the shader bar in `progress.md` starts moving |
 | 4 | oracle diff harness against the fork's translations, per hash | programs count toward 25,694 only when they match |

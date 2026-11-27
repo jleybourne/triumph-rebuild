@@ -53,6 +53,14 @@ pub enum Op {
     ReadFirstLane(V),
     /// the value in lane (id ^ mask): quad-local when mask < 4, wave-wide otherwise
     Swizzle(V, u8),
+    /// structured control flow: lanes where the value is non-zero run the then-part. The
+    /// instructions up to the matching `Else` / `EndIf` see EXEC narrowed to them.
+    If(V),
+    /// the else-part: lanes active at the `If` where the condition was zero
+    Else,
+    EndIf,
+    /// after an `EndIf`: per lane, cond != 0 ? then-value : else-value (the SSA merge)
+    Phi(V, V, V),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -71,9 +79,10 @@ impl Program {
     pub fn operands(op: &Op) -> Vec<V> {
         use Op::*;
         match *op {
-            Const(_) | SInput(_) | VInput(_) | LaneId => vec![],
+            Const(_) | SInput(_) | VInput(_) | LaneId | Else | EndIf => vec![],
+            If(c) => vec![c],
             Add(a, b) | Mul(a, b) | And(a, b) | Or(a, b) | Xor(a, b) | Shr(a, b) | Lt(a, b) => vec![a, b],
-            Select(c, a, b) => vec![c, a, b],
+            Select(c, a, b) | Phi(c, a, b) => vec![c, a, b],
             WaveSum(a) | WaveMin(a) | BallotLo(a) | BallotHi(a) | ReadLane(a, _) | ReadFirstLane(a) | Swizzle(a, _) => vec![a],
         }
     }
@@ -85,7 +94,7 @@ impl Program {
         let mut uniform = Vec::with_capacity(self.insts.len());
         for op in &self.insts {
             let u = match *op {
-                Const(_) | SInput(_) => true,
+                Const(_) | SInput(_) | If(_) | Else | EndIf => true,
                 VInput(_) | LaneId => false,
                 WaveSum(_) | WaveMin(_) | BallotLo(_) | BallotHi(_) | ReadLane(..) | ReadFirstLane(_) => true,
                 Swizzle(a, _) => uniform[a.0 as usize],
@@ -94,5 +103,42 @@ impl Program {
             uniform.push(u);
         }
         uniform
+    }
+
+    /// Each `If`'s matching `Else` (if any) and `EndIf`, by instruction index.
+    pub fn regions(&self) -> Vec<Region> {
+        let mut open: Vec<Region> = Vec::new();
+        let mut out = Vec::new();
+        for (i, op) in self.insts.iter().enumerate() {
+            match op {
+                Op::If(c) => open.push(Region { at: i as u32, cond: *c, else_at: None, end: 0 }),
+                Op::Else => open.last_mut().expect("Else without If").else_at = Some(i as u32),
+                Op::EndIf => {
+                    let mut r = open.pop().expect("EndIf without If");
+                    r.end = i as u32;
+                    out.push(r);
+                }
+                _ => {}
+            }
+        }
+        assert!(open.is_empty(), "If without EndIf");
+        out.sort_by_key(|r| r.at);
+        out
+    }
+}
+
+/// One structured if: `If` at `at`, optional `Else`, `EndIf` at `end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    pub at: u32,
+    pub cond: V,
+    pub else_at: Option<u32>,
+    pub end: u32,
+}
+
+impl Op {
+    /// Reads other lanes (so it must not run under a host branch that leaves lanes inactive).
+    pub fn crosses_lanes(&self) -> bool {
+        matches!(self, Op::WaveSum(_) | Op::WaveMin(_) | Op::BallotLo(_) | Op::BallotHi(_) | Op::ReadLane(..) | Op::ReadFirstLane(_) | Op::Swizzle(..))
     }
 }

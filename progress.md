@@ -1,7 +1,7 @@
 # Progress
 
 ```
-work toward 30 fps   [██████░░░░░░░░░░░░░░]  28 %
+work toward 30 fps   [██████░░░░░░░░░░░░░░]  29 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (fork reference: 25,694 translated, 7 pipelines refused)
 launcher track       [███░░░░░░░░░░░░░░░░░]  1 / 7 steps (C1 settings registry); does not count toward the fps %
 measured fps         none yet — the title has not rendered a frame on this code
@@ -22,13 +22,13 @@ second row and is the number that counts.
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
 | 3 | PE loader + console runtime | 15 | 0 % | 0 | — |
-| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 15 % | 2.25 | designed; IR, classifier, lane model (100k programs bit-exact) and HLSL → DXC emission proven on the card; decoder in lane `shader` |
+| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 20 % | 3.0 | IR, classifier, lane model, control flow with live masks, and HLSL → DXC emission all proven on the card; decoder in lane `shader` |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 0 % | 0 | plan corrected: the upscale pass is found by bindings; lowering the internal resolution is its own task |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **28.05 ≈ 28 %** | |
+| | **total** | **100** | | **28.8 ≈ 29 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -81,6 +81,26 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Shader core: control flow and live masks, exact on the card
+
+```
+[██████░░░░░░░░░░░░░░]  29 %   (was 28 %: +0.75 Build 4 live masks)
+shaders     0 / 25,694
+measured fps   none yet
+```
+
+- **Built:** structured control flow in `sir` (`If` / `Else` / `EndIf` / `Phi`), an EXEC stack in both
+  interpreters, a generator of nested branches, and `hlsl::plan`. A branch stays a real host branch when its
+  condition is uniform or nothing inside reads other lanes; otherwise it is predicated with EXEC as data.
+- **Measured:** 100,000 random branched programs are bit-exact between the 64-lane console and the doubled
+  model. On the card, 601 runs (201 agnostic + 400 doubled) are exact on every lane: 182 host branches, 124
+  predicated, nested to depth 2. [`runs/build4-sirtest.md`](runs/build4-sirtest.md)
+- **Fixed on the way:** `ReadFirstLane` with no active lane is now lane 0 in both models. DXC needs `and()`
+  for `bool2` masks.
+- **Agent lanes:** `vfs`, `upscale` and `input` added to `secondary-agent.md`, plus shader S5 (the oracle
+  set), ready for the coordinator to start.
+- **Next:** step 2, memory lowering to window descriptors, native 16-bit and quad ops.
 
 ### 2026-11-27 — Launcher track: one settings registry; launcher lane opened
 

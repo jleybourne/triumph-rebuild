@@ -79,7 +79,7 @@ lanes 3, 40 and 63 run) is exact.
 
 Two conditions came out of building it, and both are rules for emission:
 
-1. **Wave ops run in host-uniform control flow.** EXEC is data, so a console branch that is divergent and
+1. ✅ **Wave ops run in host-uniform control flow** (built: `hlsl::plan`, proven on the card). EXEC is data, so a console branch that is divergent and
    contains a wave op is emitted as predication (both sides run, selects merge), not as a host branch.
    Live-mask analysis decides where a real branch is safe: no wave op inside, or the condition is uniform.
 2. **A swizzle reads another host lane with a per-lane index** (`WaveReadLaneAt(x, h ^ m)`). NVIDIA
