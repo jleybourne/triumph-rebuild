@@ -146,6 +146,20 @@ pub fn hide_window() {
     WINDOW_HIDDEN.store(true, Ordering::Relaxed);
 }
 
+fn trace_calls() -> Option<(u64, u64)> {
+    static R: OnceLock<Option<(u64, u64)>> = OnceLock::new();
+    *R.get_or_init(|| {
+        let v = std::env::var("REBUILD_TRACE_CALLS").ok()?;
+        let mut it = v.split('-').map(|x| x.trim().parse::<u64>().ok());
+        let a = it.next()??;
+        let b = it.next().flatten().unwrap_or(a);
+        if a <= 1 {
+            rebuild_xlist::console::trace::ON.store(true, Ordering::Relaxed);
+        }
+        Some((a, b))
+    })
+}
+
 fn capture_frames() -> &'static [u64] {
     static F: OnceLock<Vec<u64>> = OnceLock::new();
     F.get_or_init(|| std::env::var("REBUILD_CAPTURE_FRAMES").map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default())
@@ -262,9 +276,17 @@ fn transition(r: &ID3D12Resource, before: D3D12_RESOURCE_STATES, after: D3D12_RE
     }
 }
 
+/// PresentX calls so far (shown or not).
+pub static PRESENT_CALLS: AtomicU64 = AtomicU64::new(0);
+
 /// `PresentX(planes, *planes, *parameters)`: see the module notes.
 pub unsafe extern "system" fn PresentX(this: *mut c_void, planes: u32, plane: *const Plane, _parameters: *const c_void) -> i32 {
     let started = Instant::now();
+    let n = PRESENT_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+    // REBUILD_TRACE_CALLS=a-b: the list calls recorded for frames a..=b (between presents a-1 and b)
+    if let Some((a, b)) = trace_calls() {
+        rebuild_xlist::console::trace::ON.store((a..=b).contains(&(n + 1)), Ordering::Relaxed);
+    }
     let Some(q) = crate::queue::find(this as usize) else { return E_INVALIDARG };
     // SAFETY: the title passes `planes` planes; the first is read.
     let Some(p) = (planes > 0).then(|| unsafe { plane.as_ref() }).flatten() else { return E_INVALIDARG };
@@ -288,6 +310,10 @@ pub unsafe extern "system" fn PresentX(this: *mut c_void, planes: u32, plane: *c
     };
     let desc = unsafe { source.GetDesc() };
     if guard.is_none() {
+        eprintln!(
+            "present   the image: console {console:p}, host {raw:p}, {}x{} format {} flags {:#x}, {} mips, {} samples",
+            desc.Width, desc.Height, desc.Format.0, desc.Flags.0, desc.MipLevels, desc.SampleDesc.Count
+        );
         match Presenter::new(q, &desc) {
             Ok(p) => *guard = Some(p),
             Err(e) => {

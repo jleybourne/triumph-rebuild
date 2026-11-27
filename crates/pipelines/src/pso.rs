@@ -32,6 +32,7 @@ use crate::layout::{Param, RootDesc, StageLayout, Visibility};
 use crate::library::Library;
 use crate::ondemand::{self, OnDemand};
 use crate::pool::Creator;
+use crate::rectgs::{RectGs, RECT_TOPOLOGY_TYPE};
 use crate::state::{Desc, GraphicsState, Key};
 use crate::Stage;
 
@@ -84,6 +85,8 @@ pub struct Programs {
     ondemand: Option<OnDemand>,
     device: ID3D12Device,
     roots: RwLock<HashMap<RootKey, ID3D12RootSignature>>,
+    /// The geometry stages of rectangle-list pipelines, one per vertex shader signature.
+    rect: RectGs,
     /// Bench only: an extra root constant at `b<salt>, space900`, so every root signature is new to the
     /// driver's own shader cache (a cold measurement without deleting the driver's cache).
     salt: Option<u32>,
@@ -91,7 +94,17 @@ pub struct Programs {
 
 impl Programs {
     pub fn new(device: &ID3D12Device, lib: Library, salt: Option<u32>) -> Programs {
-        Programs { lib, ondemand: None, device: device.clone(), roots: RwLock::default(), salt }
+        Programs { lib, ondemand: None, device: device.clone(), roots: RwLock::default(), rect: RectGs::new(Some(RectGs::default_dir())), salt }
+    }
+
+    /// Rectangle-list geometry stages from `rect` (another disk cache, or another DXC).
+    pub fn with_rect_gs(mut self, rect: RectGs) -> Programs {
+        self.rect = rect;
+        self
+    }
+
+    pub fn rect_gs(&self) -> &RectGs {
+        &self.rect
     }
 
     /// Compute programs the library does not hold are translated on demand.
@@ -185,8 +198,9 @@ fn bytecode(b: Option<&[u8]>) -> D3D12_SHADER_BYTECODE {
     b.map_or_else(D3D12_SHADER_BYTECODE::default, |b| D3D12_SHADER_BYTECODE { pShaderBytecode: b.as_ptr() as *const _, BytecodeLength: b.len() })
 }
 
-/// Calls `f` with the host description of a graphics pipeline (names and arrays live for the call).
-pub fn with_graphics_desc<R>(root: &ID3D12RootSignature, vs: &[u8], ps: Option<&[u8]>, s: &GraphicsState, f: impl FnOnce(&D3D12_GRAPHICS_PIPELINE_STATE_DESC) -> R) -> R {
+/// Calls `f` with the host description of a graphics pipeline (names and arrays live for the call). `gs`: the
+/// geometry stage of a rectangle-list pipeline ([`crate::rectgs`]).
+pub fn with_graphics_desc<R>(root: &ID3D12RootSignature, vs: &[u8], ps: Option<&[u8]>, gs: Option<&[u8]>, s: &GraphicsState, f: impl FnOnce(&D3D12_GRAPHICS_PIPELINE_STATE_DESC) -> R) -> R {
     let names: Vec<CString> = s.input.iter().map(|e| CString::new(e.name.as_str()).unwrap_or_default()).collect();
     let input: Vec<D3D12_INPUT_ELEMENT_DESC> = s
         .input
@@ -233,6 +247,7 @@ pub fn with_graphics_desc<R>(root: &ID3D12RootSignature, vs: &[u8], ps: Option<&
         pRootSignature: ManuallyDrop::new(Some(root.clone())),
         VS: bytecode(Some(vs)),
         PS: bytecode(ps),
+        GS: bytecode(gs),
         BlendState: D3D12_BLEND_DESC { AlphaToCoverageEnable: s.alpha_to_coverage.into(), IndependentBlendEnable: s.independent_blend.into(), RenderTarget: rt },
         SampleMask: s.sample_mask,
         RasterizerState: D3D12_RASTERIZER_DESC {
@@ -260,7 +275,8 @@ pub fn with_graphics_desc<R>(root: &ID3D12RootSignature, vs: &[u8], ps: Option<&
         },
         InputLayout: D3D12_INPUT_LAYOUT_DESC { pInputElementDescs: if input.is_empty() { std::ptr::null() } else { input.as_ptr() }, NumElements: input.len() as u32 },
         IBStripCutValue: D3D12_INDEX_BUFFER_STRIP_CUT_VALUE(s.strip_cut as i32),
-        // 1-4 only (point, line, triangle, patch): an undefined or unknown console value builds as triangles
+        // 1-4 only (point, line, triangle, patch): an undefined or unknown console value builds as triangles, and
+        // so do rectangle lists (19), drawn as triangles through the geometry stage or expanded by the list
         PrimitiveTopologyType: D3D12_PRIMITIVE_TOPOLOGY_TYPE(if (1..=4).contains(&s.topology) { s.topology as i32 } else { 3 }),
         NumRenderTargets: s.targets.len().min(8) as u32,
         RTVFormats: rtv,
@@ -584,11 +600,13 @@ pub struct PsoCreator {
     pub save_every: Duration,
     /// [graphics, compute] x the counters above.
     n: [[AtomicU64; 6]; 2],
+    /// Rectangle-list pipelines built with the geometry stage.
+    rects: RwLock<HashSet<Key>>,
 }
 
 impl PsoCreator {
     pub fn new(device: &ID3D12Device, programs: Programs, cache: Option<PsoCache>) -> PsoCreator {
-        PsoCreator { device: device.clone(), programs, cache, save_every: Duration::from_secs(30), n: Default::default() }
+        PsoCreator { device: device.clone(), programs, cache, save_every: Duration::from_secs(30), n: Default::default(), rects: RwLock::default() }
     }
 
     pub fn cache(&self) -> Option<&PsoCache> {
@@ -597,6 +615,13 @@ impl PsoCreator {
 
     pub fn programs(&self) -> &Programs {
         &self.programs
+    }
+
+    /// Whether the pipeline `key` (created) draws rectangle lists through the geometry stage: its draws go out
+    /// as triangle lists with the title's counts. A rectangle-list pipeline without one (its stage refused)
+    /// leaves the list to expand what it can.
+    pub fn rect_gs(&self, key: &Key) -> bool {
+        self.rects.read().unwrap().contains(key)
     }
 
     pub fn stats(&self) -> CreatorStats {
@@ -663,14 +688,31 @@ impl Creator for PsoCreator {
             }
             Desc::Graphics { vs, ps, state } => {
                 let (v, p, root) = self.programs.graphics(*vs, *ps)?;
-                with_graphics_desc(&root, v, p, state, |d| {
+                let gs = if state.topology == RECT_TOPOLOGY_TYPE {
+                    match self.programs.rect.get(v, p) {
+                        Ok(gs) => Some(gs),
+                        Err(e) => {
+                            if let Some(c) = &self.cache {
+                                c.events.lock().unwrap().push(format!("rectangle geometry stage for {}: {e}", key.name()));
+                            }
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                let r = with_graphics_desc(&root, v, p, gs.as_deref(), state, |d| {
                     if let Some(p) = self.from_cache(key, |c| c.load_graphics(key, d)) {
                         return Ok(p);
                     }
                     let t = Instant::now();
                     let r = unsafe { self.device.CreateGraphicsPipelineState(d) }.map_err(|e| format!("graphics pipeline {}: {e}", key.name()));
                     self.finish(key, r, t)
-                })
+                });
+                if r.is_ok() && gs.is_some() {
+                    self.rects.write().unwrap().insert(*key);
+                }
+                r
             }
         }
     }

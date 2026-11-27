@@ -85,6 +85,26 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
             draws += u64::from(s.draws);
             dispatches += u64::from(s.dispatches);
             skipped += u64::from(s.skipped);
+            totals(&s);
+            if trace_frame() {
+                eprintln!(
+                    "tracelist frame {} queue {:p} list {list:p}: calls {} draws {} dispatches {} skipped {} (pipeline {}, topology {}) refused {} clears {} copies {} rt sets {} (unmapped {}) segments {}",
+                    crate::present::PRESENT_CALLS.load(Ordering::Relaxed),
+                    this,
+                    s.calls,
+                    s.draws,
+                    s.dispatches,
+                    s.skipped,
+                    s.skipped_pipeline,
+                    s.skipped_topology,
+                    s.refused,
+                    s.clears,
+                    s.copies,
+                    s.rt_sets,
+                    s.rt_unmapped,
+                    segs.len()
+                );
+            }
         }
         for seg in segs {
             for w in &seg.waits {
@@ -119,6 +139,41 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
     }
     LISTS.fetch_add(lists.len() as u64, Ordering::Relaxed);
     crate::framelog::submitted(draws, dispatches, skipped);
+}
+
+/// Over the run, the work in submitted lists: draws (indirect included), dispatches, skipped for want of a host
+/// pipeline, skipped for a topology outside the pipeline's type, other skips, clears, copies.
+pub static RUN_DRAWS: AtomicU64 = AtomicU64::new(0);
+pub static RUN_DISPATCHES: AtomicU64 = AtomicU64::new(0);
+pub static RUN_SKIPPED_PIPELINE: AtomicU64 = AtomicU64::new(0);
+pub static RUN_SKIPPED_TOPOLOGY: AtomicU64 = AtomicU64::new(0);
+pub static RUN_SKIPPED_OTHER: AtomicU64 = AtomicU64::new(0);
+pub static RUN_CLEARS: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COPIES: AtomicU64 = AtomicU64::new(0);
+pub static RUN_RT_UNMAPPED: AtomicU64 = AtomicU64::new(0);
+
+fn totals(s: &rebuild_xlist::console::ListStats) {
+    RUN_DRAWS.fetch_add(u64::from(s.draws), Ordering::Relaxed);
+    RUN_DISPATCHES.fetch_add(u64::from(s.dispatches), Ordering::Relaxed);
+    RUN_SKIPPED_PIPELINE.fetch_add(u64::from(s.skipped_pipeline), Ordering::Relaxed);
+    RUN_SKIPPED_TOPOLOGY.fetch_add(u64::from(s.skipped_topology), Ordering::Relaxed);
+    RUN_SKIPPED_OTHER.fetch_add(u64::from(s.skipped.saturating_sub(s.skipped_pipeline + s.skipped_topology)), Ordering::Relaxed);
+    RUN_CLEARS.fetch_add(u64::from(s.clears), Ordering::Relaxed);
+    RUN_COPIES.fetch_add(u64::from(s.copies), Ordering::Relaxed);
+    RUN_RT_UNMAPPED.fetch_add(u64::from(s.rt_unmapped), Ordering::Relaxed);
+}
+
+/// `REBUILD_TRACE_LISTS=a-b` (or `a`): one line per submitted list while the present count is in that range.
+fn trace_frame() -> bool {
+    static R: std::sync::OnceLock<Option<(u64, u64)>> = std::sync::OnceLock::new();
+    let r = R.get_or_init(|| {
+        let v = std::env::var("REBUILD_TRACE_LISTS").ok()?;
+        let mut it = v.split('-').map(|x| x.trim().parse::<u64>().ok());
+        let a = it.next()??;
+        let b = it.next().flatten().unwrap_or(a);
+        Some((a, b))
+    });
+    r.is_some_and(|(a, b)| (a..=b).contains(&crate::present::PRESENT_CALLS.load(Ordering::Relaxed)))
 }
 
 /// Re-executions of a host list that had to wait for its earlier run.

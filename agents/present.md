@@ -102,6 +102,31 @@ ignored, 0 warnings.
 7. The window takes the primary display (borderless, not exclusive fullscreen). Closing it writes `summary.toml`
    and ends the process.
 
+## Black frames (2026-11-28, `agent/blackframe`, WARP)
+
+- **The present and capture are right.** `REBUILD_PROBE_CLEAR=1,0,1` (every render-target clear the title records
+  clears to that colour) gives captures that are magenta over every pixel at frames 2, 30 and 200: the capture reads
+  the image the title's lists wrote, after they ran. The image is plane 0's 3840x2160 `R8G8B8A8_TYPELESS` texture
+  (render target and UAV); it is larger than the 1920x1080 display, so the blit path scales it.
+- **What the title draws for its first ~40 s** (a loading screen; the same every frame): one list of ~41 calls,
+  clear the back buffer to (0, 0, 0, 0), then three draws. All three were dropped:
+  1. a full-screen triangle list into an intermediate target: its pipeline (VS `dfafaf385b2f94e8`, PS
+     `06295fb1d1aefb78`) is not in the program library; it also reads a root SRV in the title's own memory;
+  2. and 3. two console **rectangle lists** (topology 17), a full-screen rectangle into the intermediate target
+     (clip space, with depth) and one into the back buffer (pixel space): the host has no rectangle topology, and
+     their vertex buffers lie in the title's own memory, which nothing mapped for the GPU.
+  Labels the title polls (frame counters, GPU timestamps) were refused for the same reason.
+- **Fixed:** the title's own allocations open for the GPU in place (`runtime::titlemem`); rectangle-list draws
+  from vertex buffers expand to triangles on the CPU (`xlist::console::rect`).
+- **Then:** both rectangle pipelines read a CBV from a heap slot that holds an SRV (GPU-based validation #939,
+  VS of the pixel-space one, PS of the clip-space one), and WARP faults on it: the CBV/SRV slot fault being fixed in
+  the descriptor lane. Until it lands, these draws remove the device at frame 2-3 (`REBUILD_GPU_SKIP=rect`
+  turns the expansion off).
+- **Tools:** `REBUILD_TRACE_CALLS=a-b` prints the list calls recorded for frames a..b (pipelines and why they have no
+  host pipeline, topology, targets, viewports, scissors, clears, draws and why they were dropped, refusals with
+  addresses); `REBUILD_TRACE_LISTS=a-b` one line per submitted list; the run report's `work` line counts draws,
+  dispatches and drops by reason over the run.
+
 ## Next
 
 - Pacing from presentation (Build 8): the waitable, `GetFrameStatisticsX` from DXGI's frame statistics.
