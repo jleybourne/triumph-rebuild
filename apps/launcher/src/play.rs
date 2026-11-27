@@ -33,21 +33,15 @@ pub fn command_in(exe: &Path, config: &Path, frame_log: &Path, session: Option<&
     for (k, v) in env {
         c.env(k, v);
     }
-    // the user's hardware limits, as the runtime reads them (`rebuild_runtime::limits`)
-    if let Some(cfg) = std::fs::read_to_string(config).ok().and_then(|t| rebuild_config::Config::parse(&t).ok()) {
-        for (key, var) in [
-            ("limits.ram_mb", "REBUILD_LIMIT_RAM_MB"),
-            ("limits.vram_mb", "REBUILD_LIMIT_VRAM_MB"),
-            ("limits.cpu_cores", "REBUILD_LIMIT_CPU_CORES"),
-            ("limits.cpu_rate", "REBUILD_LIMIT_CPU_RATE"),
-        ] {
-            let v = cfg.int(key);
-            if v > 0 {
-                c.env(var, v.to_string());
-            }
+    // every other setting (limits, game folder, vsync, WARP…) the layer reads from the file itself (C2,
+    // `rebuild_config::runtime`)
+    c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // in a session, the layer's own output (what it applied, the run, a crash) goes to `layer.log` there
+    if let Some(log) = session.and_then(|d| File::create(d.join(crate::session::LAYER_LOG)).ok()) {
+        if let Ok(err) = log.try_clone() {
+            c.stdout(log).stderr(err);
         }
     }
-    c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if let Some(d) = exe.parent() {
         c.current_dir(d);
     }

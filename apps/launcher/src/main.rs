@@ -791,7 +791,7 @@ impl App {
                 if let Some(p) = &self.plan {
                     env.push(("REBUILD_RUN_SECONDS".into(), p.run_seconds.to_string()));
                     env.push(("REBUILD_MEASURE_FROM".into(), p.measure_from.key().into()));
-                    // for the layer's summary once it reads its settings (C2); nothing reads it yet (the session records the id)
+                    // the layer records it in the session's summary.toml (`matrix = "<id>"`)
                     env.push(("REBUILD_MATRIX_ID".into(), p.id.clone()));
                 }
                 b.name.to_string()
@@ -799,7 +799,8 @@ impl App {
             (None, true) => "proof".into(),
             (None, false) => config.profile.clone(),
         };
-        // the layer reads its pacing from these until it reads rebuild.toml itself (C2)
+        // the same values the layer takes from rebuild.toml (C2); passed too so a proof binary, which reads no
+        // settings file, paces the same way
         env.push(("REBUILD_FRAME_RATE".into(), rebuild_config::frame_rate_env(&config)));
         env.push(("REBUILD_VSYNC".into(), if config.bool("display.vsync") { "1" } else { "0" }.into()));
         let exe = if proof {

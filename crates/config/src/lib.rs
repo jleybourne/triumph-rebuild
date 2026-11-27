@@ -9,7 +9,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 pub mod profiles;
+pub mod runtime;
+pub mod session;
 pub use profiles::{builtin, Builtin, BUILTIN_PROFILES};
+pub use runtime::{EnvEntry, EnvValue};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -160,8 +163,8 @@ pub static REGISTRY: &[Setting] = &[
     s("diagnostics.frame_log", "Frame line log", "Append the frame line once a second to a file the launcher reads.", Kind::Bool, Default::Bool(true), Live, Stable),
     s("diagnostics.capture_dir", "Capture folder", "Where frame captures go. Empty = off.", Kind::Path, Default::Path(""), Live, Stable),
     s("diagnostics.d3d12_debug", "D3D12 debug layer", "Names why a pipeline or command is refused. Slow: never for measuring.", Kind::Bool, Default::Bool(false), Restart, Experimental),
-    // The "Empty = REBUILD_*" fallbacks below describe the layer once it reads this file (C2). Today the layer
-    // reads no setting, and only `upscaletest` reads REBUILD_DLSS_DLL / _STREAMLINE_DIR / _FIDELITYFX_DIR.
+    // "Empty = REBUILD_*": the layer sets each variable from its setting when the setting is not empty
+    // (`runtime.rs`), else the variable it was started with stays.
     s("upscaler.dlss_dll", "DLSS DLL", "nvngx_dlss.dll, supplied by you; never shipped or committed. Empty = REBUILD_DLSS_DLL.", Kind::Path, Default::Path(""), Restart, Stable),
     s("upscaler.streamline_dir", "Streamline folder", "NVIDIA Streamline's runtime DLLs. Empty = REBUILD_STREAMLINE_DIR.", Kind::Path, Default::Path(""), Restart, Stable),
     s("upscaler.fidelityfx_dir", "FidelityFX folder", "AMD FidelityFX SDK runtime DLLs (FSR). Empty = REBUILD_FIDELITYFX_DIR.", Kind::Path, Default::Path(""), Restart, Stable),
@@ -174,6 +177,8 @@ pub static REGISTRY: &[Setting] = &[
     s("limits.cpu_rate", "CPU usage cap (%)", "A hard cap on the share of the whole CPU the process may use. 0 = no cap.", Kind::Int { min: 0, max: 100 }, Default::Int(0), Restart, Stable),
     s("diagnostics.retention_days", "Keep sessions for (days)", "Each launch gets a session folder (frame line, summary, crash reports, captures). Folders older than this are deleted when the launcher starts and after each run. 0 = keep forever.", Kind::Int { min: 0, max: 3650 }, Default::Int(14), Live, Stable),
     s("launcher.theme", "Launcher theme", "dark or light, for the launcher only (the title is not affected). Also switched from the top bar.", Kind::Choice { options: &["dark", "light"] }, Default::Choice("dark"), Live, Stable),
+    s("game.console", "Console", "The console the title is told it runs on (its ConsoleMode): series-x or series-s.", Kind::Choice { options: &["series-x", "series-s"] }, Default::Choice("series-x"), Restart, Stable),
+    s("diagnostics.warp", "WARP (software GPU)", "Run on WARP, the software rasterizer: very slow, but title work that would hang a GPU only fails. For diagnosis.", Kind::Bool, Default::Bool(false), Restart, Experimental),
     s("menu.key", "In-game menu key", "Toggles the in-game menu. While it is open the title sees no input.", Kind::Choice { options: &["F10", "F11", "F12", "Insert", "Home"] }, Default::Choice("F10"), Restart, Stable),
 ];
 

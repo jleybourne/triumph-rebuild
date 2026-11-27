@@ -17,7 +17,7 @@ and becomes the number that counts.
 | shaders compiled (every class) | `██████████░░░░░░░░░░` | 12,981 / 25,694 | pixel 9,965 · vertex 1,672 · compute 1,344 · of them wave-wide 4,182 ([wave64](runs/build4-wave64.md)) · agnostic 8,799 / 9,128 ([v1](runs/build4-v1.md)) |
 | shaders counted | `████░░░░░░░░░░░░░░░░` | 5,195 / 25,694 | bit-exact vs the oracle on WARP ([exec](runs/build4-exec.md)) |
 | runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
-| launcher | `██████████████░░░░░░` | 5 / 7 | C2 and L5 left · not part of the 59 % |
+| launcher | `█████████████████░░░` | 6 / 7 | C2 done (Play runs the title) · L5 left · not part of the 63 % |
 
 | | fps | frame time | draws |
 |---|--:|--:|--:|

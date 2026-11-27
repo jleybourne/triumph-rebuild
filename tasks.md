@@ -175,7 +175,7 @@ Design: [`docs/design/launcher.md`](docs/design/launcher.md). Its own bar in `pr
 | state | work | closes when |
 |---|---|---|
 | done | C1 `crates/config`: the settings registry (18 options in 8 groups at the time; 30 now), `rebuild.toml` load/save, validation, refused values with reasons, stable-only profiles | 6 unit tests |
-| todo | C2 the layer reads `rebuild.toml` at start; every switch lives in the registry (lead) | benches and proofs take options from it |
+| done | C2 the layer reads `rebuild.toml` at start; every switch lives in the registry (lane `launch`): `rebuild.exe --config` sets the runtime's variables (`rebuild_config::runtime`) and runs the title through `launch.rs`, shared with `runtitle` | benches and proofs take options from it |
 | done | L1 launcher shell (egui): tabs, Features generated from the registry, profiles (helper lane `launcher`) | writes a `rebuild.toml` that `config` validates with 0 problems |
 | done | L2 setup and system check: GPU, driver, tiled tier, SM 6.6, DXC, VRAM, ReBAR (lane `launcher`) | each check has pass/fail and a fix line |
 | done | L3 title settings applied to a copy of `settings.xml` in the write overlay (lane `launcher`) | the original's hash is unchanged |

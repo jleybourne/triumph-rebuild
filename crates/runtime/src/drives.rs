@@ -26,12 +26,14 @@ pub struct Drives {
     pub game: PathBuf,
     pub overlay: PathBuf,
     pub mods: ModSet,
+    /// the BCPack format tables (`dstorage.bcpack_tables`); `None` = `REBUILD_BCPACK_TABLES` or the default place
+    pub bcpack_tables: Option<PathBuf>,
 }
 
 impl Drives {
     /// The game folder, the default overlay root, and no mods.
     pub fn new(game: impl Into<PathBuf>) -> Drives {
-        Drives { game: game.into(), overlay: rebuild_vfs::default_overlay_root(), mods: ModSet::default() }
+        Drives { game: game.into(), overlay: rebuild_vfs::default_overlay_root(), mods: ModSet::default(), bcpack_tables: None }
     }
 }
 
@@ -58,7 +60,7 @@ pub fn install(d: &Drives) -> Result<Arc<Vfs>, String> {
     rebuild_winfiles::install(rebuild_winfiles::Files::new(vfs.clone(), r"G:\"));
     // BCPack: our decoder (tables from the setting / REBUILD_BCPACK_TABLES, outside git), with the title's own
     // requests captured when REBUILD_BCPACK_CAPTURE names a folder (D5b: checking the decoder on real data)
-    let bcpack = rebuild_dstorage::Decoder::from_config(None)
+    let bcpack = rebuild_dstorage::Decoder::from_config(d.bcpack_tables.as_deref())
         .map(|d| rebuild_dstorage::Capture::from_env(d as Arc<dyn rebuild_dstorage::BcPack>));
     let config = rebuild_dstorage::Config { pages: Some(Arc::new(PhysicalPages)), bcpack, ..Default::default() };
     // a second install in one process keeps the first engine (tests install more than once)
