@@ -475,6 +475,7 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
                 return e.code().0;
             }
         };
+        let memory = Accounted { inner: memory, title: std::sync::Mutex::new(std::collections::HashMap::new()) };
         let resources = match rebuild_d3d12x::Resources::new(&host, std::sync::Arc::new(memory), std::sync::Arc::new(Log)) {
             Ok(r) => r,
             Err(e) => {
@@ -503,6 +504,47 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
 /// The host device as a raw COM pointer, for crates that take one.
 pub fn host_raw() -> Option<*mut c_void> {
     DEVICE.get().map(|d| d.host.as_raw())
+}
+
+/// XALLOC attributes of the console D3D runtime's own memory: allocator ID 0x80 (D3D, bits 16-23), page-size
+/// code 2 (bits 14-15). The title's allocation hooks route these (its render setup serves the back buffers
+/// from an arena it opens for allocator 0x80 and asserts the arena ends up full).
+pub const D3D_ATTRIBUTES: u64 = (0x80 << 16) | (2 << 14);
+
+/// Resource memory as the console D3D runtime takes it: every committed resource or heap is also an
+/// `XMemAlloc` through the title's hooks with [`D3D_ATTRIBUTES`] (so the title's budgets and arenas see it),
+/// freed with `XMemFree` when the resource goes. The bytes the GPU uses come from `inner` until the tiles
+/// join; the title only keeps the hooked address for its bookkeeping.
+struct Accounted<M> {
+    inner: M,
+    /// our address -> the title's
+    title: std::sync::Mutex<std::collections::HashMap<u64, u64>>,
+}
+
+impl<M: rebuild_d3d12x::Memory> rebuild_d3d12x::Memory for Accounted<M> {
+    fn allocate(&self, bytes: u64, alignment: u64, heap: &rebuild_d3d12x::format::HeapProperties) -> Option<u64> {
+        let at = self.inner.allocate(bytes, alignment, heap)?;
+        let t = crate::exports::XMemAlloc(bytes as usize, D3D_ATTRIBUTES) as u64;
+        if t != 0 {
+            self.title.lock().unwrap_or_else(|e| e.into_inner()).insert(at, t);
+        }
+        Some(at)
+    }
+    fn free(&self, address: u64, bytes: u64) {
+        if let Some(t) = self.title.lock().unwrap_or_else(|e| e.into_inner()).remove(&address) {
+            crate::exports::XMemFree(t as *mut c_void, D3D_ATTRIBUTES);
+        }
+        self.inner.free(address, bytes);
+    }
+    fn range(&self, va: u64) -> Option<rebuild_d3d12x::MemoryRange> {
+        self.inner.range(va)
+    }
+    fn buffer(&self, address: u64, bytes: u64) -> Option<windows::Win32::Graphics::Direct3D12::ID3D12Resource> {
+        self.inner.buffer(address, bytes)
+    }
+    fn texture(&self, address: u64, desc: &windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_DESC) -> Option<windows::Win32::Graphics::Direct3D12::ID3D12Resource> {
+        self.inner.texture(address, desc)
+    }
 }
 
 #[cfg(test)]

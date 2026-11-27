@@ -24,6 +24,10 @@ impl<P: PipelineSource + Send + Sync> ListHost for Host<P> {
         self.resources.inner.device.load(std::sync::atomic::Ordering::Relaxed)
     }
     #[inline]
+    fn root_signature(&self, console: Raw) -> Option<Raw> {
+        self.resources.host_root_signature(console)
+    }
+    #[inline]
     fn resource(&self, console: Raw) -> Option<Raw> {
         self.resources.host_resource(console)
     }

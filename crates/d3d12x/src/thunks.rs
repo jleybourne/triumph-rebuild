@@ -164,10 +164,15 @@ unsafe extern "system" fn at_address(_: Raw, address: u64, desc: *const D3D12_RE
     r().map_or(E_FAIL, |r| unsafe { r.create_at_address(address, desc, layout, clear, iid, out) })
 }
 
+unsafe extern "system" fn root_signature(_: Raw, _mask: u32, blob: *const u8, size: usize, iid: *const GUID, out: *mut Raw) -> HRESULT {
+    r().map_or(E_FAIL, |r| unsafe { r.create_root_signature(blob, size, iid, out) })
+}
+
 /// The device slots served here: `(offset, name, function)`.
 pub fn device_slots() -> Vec<(usize, &'static str, Fp)> {
     vec![
         (0x070, "CreateDescriptorHeap", Fp(create_descriptor_heap as *const ())),
+        (0x080, "CreateRootSignature", Fp(root_signature as *const ())),
         (0x078, "GetDescriptorHandleIncrementSize", Fp(increment as *const ())),
         (0x088, "CreateConstantBufferView", Fp(cbv as *const ())),
         (0x090, "CreateShaderResourceView", Fp(srv as *const ())),

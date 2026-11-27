@@ -81,6 +81,8 @@ fn in_title(addr: u64) -> bool {
     IMAGES.get().is_some_and(|v| v.iter().any(|(_, b, s)| addr >= *b && addr < b + s))
 }
 
+static PEEKS: std::sync::OnceLock<Vec<(bool, u64)>> = std::sync::OnceLock::new();
+
 static REPORTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 unsafe fn report(kind: &str, p: *const EXCEPTION_POINTERS) {
@@ -131,6 +133,30 @@ unsafe fn report_inner(kind: &str, p: *const EXCEPTION_POINTERS) {
     // the real call chain: unwind a copy of the context with the registered unwind tables, one line per
     // frame as it is found; stop at the first frame no function table knows (no guessing from [rsp])
     use windows::Win32::System::Diagnostics::Debug::{RtlLookupFunctionEntry, RtlVirtualUnwind, UNW_FLAG_NHANDLER};
+    // REBUILD_PEEK: title globals (preferred addresses, 0x14...) or rsp+N, eight bytes each, for chasing asserts;
+    // after the facts, and each address checked readable first
+    if let Some(peeks) = PEEKS.get() {
+        use windows::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION};
+        let title = IMAGES.get().and_then(|v| v.iter().find(|i| i.0.ends_with(".exe"))).map(|i| i.1).unwrap_or(0);
+        let mut pk = Buf { b: [0; 2048], n: 0 };
+        for &(stack, off) in peeks {
+            let at = if stack { ctx.Rsp + off } else { title + off };
+            let mut m = MEMORY_BASIC_INFORMATION::default();
+            let ok = unsafe { VirtualQuery(Some(at as *const _), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } != 0
+                && m.State.0 == 0x1000
+                && m.Protect.0 & 0x66 != 0;
+            let tag = if stack { "rsp+" } else { "exe+" };
+            if ok {
+                let v = unsafe { (at as *const u64).read_unaligned() };
+                let _ = write!(pk, "          peek {tag}{off:#x} = {v:#x}
+");
+            } else {
+                let _ = write!(pk, "          peek {tag}{off:#x} unreadable
+");
+            }
+        }
+        write_err(&pk.b[..pk.n]);
+    }
     let mut c = *ctx;
     for _ in 0..16 {
         if c.Rip == 0 {
@@ -178,6 +204,9 @@ unsafe extern "system" fn first_chance(p: *mut EXCEPTION_POINTERS) -> i32 {
     }
     // a title assert (int3) or a fail-fast ends the run without reaching the unhandled filter: report it here
     let c = code.0 as u32;
+    if c == CPP_EXCEPTION && CPP.fetch_add(1, Ordering::Relaxed) < 6 {
+        unsafe { cpp_throw(p) };
+    }
     const ILLEGAL: u32 = 0xC000_001D;
     const PRIVILEGED: u32 = 0xC000_0096;
     if matches!(c, STATUS_BREAKPOINT | STATUS_STACK_BUFFER_OVERRUN | ILLEGAL | PRIVILEGED) && FATAL.fetch_add(1, Ordering::Relaxed) == 0 {
@@ -191,11 +220,70 @@ unsafe extern "system" fn first_chance(p: *mut EXCEPTION_POINTERS) -> i32 {
         if let Some(f) = ON_FATAL.get() {
             f();
         }
+        if std::env::var_os("REBUILD_THREADS").is_some() {
+            other_threads();
+        }
     }
     EXCEPTION_CONTINUE_SEARCH
 }
 
 static FATAL: AtomicU32 = AtomicU32::new(0);
+static CPP: AtomicU32 = AtomicU32::new(0);
+const CPP_EXCEPTION: u32 = 0xE06D_7363;
+
+/// A C++ throw (first chance; the title may catch it): the thrown type's decorated name, from the throw
+/// info the MSVC runtime passes (x64: image-relative offsets), and where it was thrown from.
+unsafe fn cpp_throw(p: *const EXCEPTION_POINTERS) {
+    let rec = unsafe { &*(*p).ExceptionRecord };
+    let mut out = Buf { b: [0; 2048], n: 0 };
+    let _ = write!(out, "c++ throw ");
+    let ctx = unsafe { &*(*p).ContextRecord };
+    // the caller of _CxxThrowException: the first title frame on the stack at the throw
+    name(&mut out, ctx.Rip);
+    if rec.NumberParameters >= 4 {
+        let (info, base) = (rec.ExceptionInformation[2] as u64, rec.ExceptionInformation[3] as u64);
+        let readable = |a: u64, n: usize| {
+            use windows::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION};
+            let mut m = MEMORY_BASIC_INFORMATION::default();
+            a != 0
+                && unsafe { VirtualQuery(Some(a as *const _), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } != 0
+                && m.State.0 == 0x1000
+                && m.Protect.0 & 0x66 != 0
+                && a + n as u64 <= m.BaseAddress as u64 + m.RegionSize as u64
+        };
+        if readable(info, 16) {
+            let array = base + unsafe { ((info + 12) as *const u32).read_unaligned() } as u64;
+            if readable(array, 8) {
+                let first = base + unsafe { ((array + 4) as *const u32).read_unaligned() } as u64;
+                if readable(first, 8) {
+                    let ty = base + unsafe { ((first + 4) as *const u32).read_unaligned() } as u64;
+                    if readable(ty + 16, 64) {
+                        let _ = write!(out, " type ");
+                        for i in 0..96u64 {
+                            let b = unsafe { ((ty + 16 + i) as *const u8).read() };
+                            if b == 0 || !readable(ty + 17 + i, 1) {
+                                break;
+                            }
+                            let _ = out.write_char(b as char);
+                        }
+                        // a thrown integer (".H" int, ".J" long: an HRESULT, usually): its value
+                        let obj = rec.ExceptionInformation[1] as u64;
+                        if readable(obj, 4) {
+                            let _ = write!(out, " value {:#x}", unsafe { (obj as *const u32).read_unaligned() });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = write!(out, "
+          chain:");
+    let mut c = *ctx;
+    unwind_into(&mut out, &mut c, 14);
+    let _ = write!(out, "
+");
+    write_err(&out.b[..out.n]);
+}
 
 unsafe extern "system" fn unhandled(p: *const EXCEPTION_POINTERS) -> i32 {
     let code: NTSTATUS = unsafe { (*(*p).ExceptionRecord).ExceptionCode };
@@ -207,6 +295,17 @@ unsafe extern "system" fn unhandled(p: *const EXCEPTION_POINTERS) -> i32 {
 /// Install both handlers; `images` names addresses in the reports.
 pub fn install(images: Vec<(String, u64, u64)>) {
     let _ = IMAGES.set(images);
+    if let Ok(list) = std::env::var("REBUILD_PEEK") {
+        let parse = |t: &str| u64::from_str_radix(t.trim_start_matches("0x"), 16).ok();
+        let peeks = list
+            .split(',')
+            .filter_map(|t| match t.trim().strip_prefix("rsp+") {
+                Some(o) => parse(o).map(|o| (true, o)),
+                None => parse(t.trim()).map(|a| (false, a.saturating_sub(0x1_4000_0000))),
+            })
+            .collect();
+        let _ = PEEKS.set(peeks);
+    }
     if let Some(dir) = std::env::var_os("REBUILD_SESSION_DIR") {
         let path = std::path::PathBuf::from(dir).join(format!("crash-{}.txt", std::process::id()));
         use std::os::windows::ffi::OsStrExt;
@@ -215,5 +314,115 @@ pub fn install(images: Vec<(String, u64, u64)>) {
     unsafe {
         AddVectoredExceptionHandler(1, Some(first_chance));
         SetUnhandledExceptionFilter(Some(unhandled));
+    }
+}
+
+/// REBUILD_THREADS: at the first fatal exception, where every other thread of the process stands (suspended,
+/// unwound to 12 frames; threads with no title frame are counted, not printed). Diagnostic only: a thread
+/// suspended inside the unwinder's lock could stall this, which the run's watchdog ends.
+fn other_threads() {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::Debug::{
+        GetThreadContext, RtlLookupFunctionEntry, RtlVirtualUnwind, CONTEXT, CONTEXT_FLAGS, UNW_FLAG_NHANDLER,
+    };
+    use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32};
+    use windows::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION};
+    use windows::Win32::System::Threading::{
+        GetCurrentProcessId, GetCurrentThreadId, OpenThread, ResumeThread, SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION,
+        THREAD_SUSPEND_RESUME,
+    };
+    #[repr(align(16))]
+    struct Ctx(CONTEXT);
+    let pid = unsafe { GetCurrentProcessId() };
+    let me = unsafe { GetCurrentThreadId() };
+    let Ok(snap) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }) else { return };
+    let mut te = THREADENTRY32 { dwSize: std::mem::size_of::<THREADENTRY32>() as u32, ..Default::default() };
+    let mut quiet = 0;
+    let mut ok = unsafe { Thread32First(snap, &mut te) }.is_ok();
+    while ok {
+        if te.th32OwnerProcessID == pid && te.th32ThreadID != me {
+            if let Ok(h) = unsafe { OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, false, te.th32ThreadID) } {
+                if unsafe { SuspendThread(h) } != u32::MAX {
+                    let mut cx = Ctx(CONTEXT { ContextFlags: CONTEXT_FLAGS(0x0010_000B), ..Default::default() });
+                    if unsafe { GetThreadContext(h, &mut cx.0) }.is_ok() {
+                        let mut out = Buf { b: [0; 2048], n: 0 };
+                        let _ = write!(out, "thread    {}:", te.th32ThreadID);
+                        let mut c = cx.0;
+                        let mut titled = false;
+                        for _ in 0..12 {
+                            if c.Rip == 0 {
+                                break;
+                            }
+                            let _ = write!(out, " ");
+                            name(&mut out, c.Rip);
+                            titled |= in_title(c.Rip);
+                            let mut base = 0u64;
+                            let f = unsafe { RtlLookupFunctionEntry(c.Rip, &mut base, None) };
+                            if f.is_null() {
+                                let mut m = MEMORY_BASIC_INFORMATION::default();
+                                let readable = unsafe { VirtualQuery(Some(c.Rsp as *const _), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } != 0
+                                    && m.State.0 == 0x1000
+                                    && m.Protect.0 & 0x66 != 0;
+                                if !readable {
+                                    break;
+                                }
+                                c.Rip = unsafe { (c.Rsp as *const u64).read_volatile() };
+                                c.Rsp += 8;
+                                continue;
+                            }
+                            let mut data: *mut std::ffi::c_void = std::ptr::null_mut();
+                            let mut frame = 0u64;
+                            unsafe { RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, f, &mut c, &mut data, &mut frame, None) };
+                        }
+                        let _ = write!(out, "
+");
+                        if titled {
+                            write_err(&out.b[..out.n]);
+                        } else {
+                            quiet += 1;
+                        }
+                    }
+                    unsafe { ResumeThread(h) };
+                }
+                let _ = unsafe { CloseHandle(h) };
+            }
+        }
+        ok = unsafe { Thread32Next(snap, &mut te) }.is_ok();
+    }
+    let _ = unsafe { CloseHandle(snap) };
+    let mut out = Buf { b: [0; 2048], n: 0 };
+    let _ = write!(out, "thread    {quiet} more threads with no title frame
+");
+    write_err(&out.b[..out.n]);
+}
+
+/// Unwind `c` up to `frames` frames, naming each (one line); stops at a frame no table knows and whose
+/// [rsp] is not readable.
+fn unwind_into(out: &mut Buf, c: &mut windows::Win32::System::Diagnostics::Debug::CONTEXT, frames: usize) {
+    use windows::Win32::System::Diagnostics::Debug::{RtlLookupFunctionEntry, RtlVirtualUnwind, UNW_FLAG_NHANDLER};
+    use windows::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION};
+    for _ in 0..frames {
+        if c.Rip == 0 {
+            break;
+        }
+        let _ = write!(out, " ");
+        name(out, c.Rip);
+        let mut base = 0u64;
+        let f = unsafe { RtlLookupFunctionEntry(c.Rip, &mut base, None) };
+        if f.is_null() {
+            let mut m = MEMORY_BASIC_INFORMATION::default();
+            let ok = unsafe { VirtualQuery(Some(c.Rsp as *const _), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } != 0
+                && m.State.0 == 0x1000
+                && m.Protect.0 & 0x66 != 0;
+            if !ok {
+                break;
+            }
+            c.Rip = unsafe { (c.Rsp as *const u64).read_volatile() };
+            c.Rsp += 8;
+            continue;
+        }
+        let mut data: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut frame = 0u64;
+        unsafe { RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, f, c, &mut data, &mut frame, None) };
     }
 }

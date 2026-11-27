@@ -34,16 +34,18 @@ pub enum Object {
     Resource,
     Heap,
     DescriptorHeap,
+    RootSignature,
 }
 
 impl Object {
-    pub const ALL: [Object; 3] = [Object::Resource, Object::Heap, Object::DescriptorHeap];
+    pub const ALL: [Object; 4] = [Object::Resource, Object::Heap, Object::DescriptorHeap, Object::RootSignature];
 
     pub fn name(self) -> &'static str {
         match self {
             Object::Resource => "resource",
             Object::Heap => "heap",
             Object::DescriptorHeap => "descriptor heap",
+            Object::RootSignature => "root signature",
         }
     }
 
@@ -92,7 +94,7 @@ fn returns(object: Object, offset: usize) -> Returns {
     let own: &[usize] = match object {
         Object::Resource => &[0x40, 0x60, 0x68, 0x70, 0x78],
         Object::Heap => &[0x48],
-        Object::DescriptorHeap => &[],
+        Object::DescriptorHeap | Object::RootSignature => &[],
     };
     if COMMON.contains(&offset) || own.contains(&offset) {
         Returns::Hresult
@@ -110,7 +112,7 @@ struct Cell {
 const CELL: Cell = Cell { count: AtomicU64::new(0), first_ns: AtomicU64::new(0) };
 #[allow(clippy::declare_interior_mutable_const)]
 const ROW: [Cell; SLOTS] = [CELL; SLOTS];
-static TRAPS: [[Cell; SLOTS]; 3] = [ROW; 3];
+static TRAPS: [[Cell; SLOTS]; 4] = [ROW; 4];
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 
 pub(crate) fn start_clock() {
@@ -163,6 +165,8 @@ traps!(HEAP_HR, trap_hr, 1);
 traps!(HEAP_VALUE, trap_value, 1);
 traps!(DH_HR, trap_hr, 2);
 traps!(DH_VALUE, trap_value, 2);
+traps!(RS_HR, trap_hr, 3);
+traps!(RS_VALUE, trap_value, 3);
 
 /// A built table: the functions, and what each slot is.
 pub(crate) struct Table {
@@ -175,6 +179,7 @@ pub(crate) fn build(object: Object, implemented: &[(usize, &'static str, Fp)]) -
         Object::Resource => (&RES_HR, &RES_VALUE),
         Object::Heap => (&HEAP_HR, &HEAP_VALUE),
         Object::DescriptorHeap => (&DH_HR, &DH_VALUE),
+        Object::RootSignature => (&RS_HR, &RS_VALUE),
     };
     let mut funcs = Vec::with_capacity(SLOTS);
     let mut info = Vec::with_capacity(SLOTS);

@@ -413,6 +413,37 @@ fn host_d3d12(name: &str) -> Option<u64> {
     unsafe { GetProcAddress(m, PCSTR(c.as_ptr() as *const u8)) }.map(|f| f as usize as u64)
 }
 
+type SerializeVersioned = unsafe extern "system" fn(*const u8, *mut *mut c_void, *mut *mut c_void) -> i32;
+static HOST_SERIALIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+/// Root signature flags the host's D3D12 defines (through SAMPLER_HEAP_DIRECTLY_INDEXED, 0x800).
+const HOST_ROOT_FLAGS: u32 = 0xfff;
+static CONSOLE_ROOT_FLAGS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Console root signature flags seen so far (bits the host does not define; serialized without them).
+pub fn console_root_flags() -> u32 {
+    CONSOLE_ROOT_FLAGS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `D3D12SerializeVersionedRootSignature` for console descriptions: the console sets flag bits of its own
+/// (0x1000000, 0x2000000 from the BVH builder) that the host rejects as E_INVALIDARG. The host serializes a
+/// copy with only its own flags (at +0x28 in versions 1.0, 1.1 and 1.2 alike).
+unsafe extern "system" fn serialize_versioned_root_signature(desc: *const u8, blob: *mut *mut c_void, errors: *mut *mut c_void) -> i32 {
+    let Some(&host) = HOST_SERIALIZE.get() else { return 0x8000_4005u32 as i32 };
+    // SAFETY: the host's export of this signature
+    let host: SerializeVersioned = unsafe { std::mem::transmute(host) };
+    if desc.is_null() {
+        return unsafe { host(desc, blob, errors) };
+    }
+    let mut copy = [0u8; 0x30];
+    unsafe { std::ptr::copy_nonoverlapping(desc, copy.as_mut_ptr(), 0x30) };
+    let flags = u32::from_le_bytes(copy[0x28..0x2c].try_into().unwrap());
+    if flags & !HOST_ROOT_FLAGS != 0 {
+        CONSOLE_ROOT_FLAGS.fetch_or(flags & !HOST_ROOT_FLAGS, std::sync::atomic::Ordering::Relaxed);
+        copy[0x28..0x2c].copy_from_slice(&(flags & HOST_ROOT_FLAGS).to_le_bytes());
+    }
+    unsafe { host(copy.as_ptr(), blob, errors) }
+}
+
 /// Our implementation of a console-only function, by DLL and name.
 /// The console-only DLLs we serve: `LoadLibrary` of these never reaches the host, even where the host
 /// has a DLL of the same name (the PC's own `xgameruntime.dll` would take console GUIDs).
@@ -429,7 +460,12 @@ pub fn console_export(dll: &str, name: &str) -> Option<u64> {
             "D3D12XboxCreateDevice" => Some(D3D12XboxCreateDevice as *const () as usize as u64),
             "D3D12ConfigureVirtualMemoryX" => Some(D3D12ConfigureVirtualMemoryX as *const () as usize as u64),
             // standard: the host's own
-            "D3D12SerializeVersionedRootSignature" | "D3D12CreateRootSignatureDeserializer" => host_d3d12(name),
+            "D3D12SerializeVersionedRootSignature" => {
+                let host = host_d3d12(name)?;
+                let _ = HOST_SERIALIZE.set(host as usize);
+                Some(serialize_versioned_root_signature as *const () as usize as u64)
+            }
+            "D3D12CreateRootSignatureDeserializer" => host_d3d12(name),
             _ => None,
         };
     }
@@ -494,6 +530,25 @@ fn audio_export(dll: &str, name: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn console_root_signature_flags_serialize_on_the_host() {
+        let f = console_export("d3d12_xs.dll", "D3D12SerializeVersionedRootSignature").expect("bound");
+        let f: SerializeVersioned = unsafe { std::mem::transmute(f as usize) };
+        // version 1.1, no parameters or samplers, the BVH builder's console flags plus ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT
+        let mut desc = [0u8; 0x30];
+        desc[0] = 2;
+        desc[0x28..0x2c].copy_from_slice(&0x0300_0001u32.to_le_bytes());
+        let mut blob: *mut c_void = std::ptr::null_mut();
+        assert_eq!(unsafe { f(desc.as_ptr(), &mut blob, std::ptr::null_mut()) }, 0);
+        assert!(!blob.is_null());
+        // release the blob (IUnknown::Release, slot 2)
+        unsafe {
+            let release: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(*(*(blob as *const *const usize)).add(2));
+            release(blob);
+        }
+        assert_eq!(console_root_flags() & 0x0300_0000, 0x0300_0000);
+    }
 
     #[test]
     fn the_merged_lanes_bind_audio_19_dstorage_1_xg_2_files_32_crt_13() {

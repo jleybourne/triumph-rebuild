@@ -1074,3 +1074,47 @@ fn card_profile_pieces() {
         release(heap);
     }
 }
+
+#[test]
+fn a_root_signature_keeps_its_blob_and_answers_as_a_device_child() {
+    // the stand-in host: an object with no host root signature
+    let rig = rig();
+    let blob = [0u8; 24];
+    let mut out: Raw = std::ptr::null_mut();
+    unsafe {
+        assert_eq!(rig.r.create_root_signature(blob.as_ptr(), blob.len(), &ID3D12RootSignature::IID, &mut out), S_OK);
+        assert_eq!(rig.r.create_root_signature(std::ptr::null(), 0, &ID3D12RootSignature::IID, &mut out.clone()), windows::Win32::Foundation::E_INVALIDARG);
+    }
+    assert_eq!(crate::root::of(out).map(|r| r.blob.len()), Some(24));
+    assert!(rig.r.host_root_signature(out).is_none());
+    type Qi = unsafe extern "system" fn(Raw, *const GUID, *mut Raw) -> HRESULT;
+    let mut again: Raw = std::ptr::null_mut();
+    assert_eq!(unsafe { method::<Qi>(out, 0)(out, &ID3D12DeviceChild::IID, &mut again) }, S_OK);
+    assert_eq!(again, out);
+    assert_eq!(release(again), 1);
+    assert_eq!(release(out), 0);
+
+    // a real host: the blob becomes an ID3D12RootSignature the lists can bind
+    let mut d: Option<ID3D12Device> = None;
+    if unsafe { D3D12CreateDevice(None::<&windows::core::IUnknown>, windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0, &mut d) }.is_err() {
+        println!("skipped: no D3D12 device");
+        return;
+    }
+    let device = d.unwrap();
+    let r = Resources::new(&device, Arc::new(PlainMemory::new(1 << 20)), Arc::new(Quiet)).unwrap();
+    let desc = D3D12_VERSIONED_ROOT_SIGNATURE_DESC { Version: D3D_ROOT_SIGNATURE_VERSION_1_1, ..Default::default() };
+    let mut sb: Option<windows::Win32::Graphics::Direct3D::ID3DBlob> = None;
+    unsafe { D3D12SerializeVersionedRootSignature(&desc, &mut sb, None) }.unwrap();
+    let sb = sb.unwrap();
+    let mut rs: Raw = std::ptr::null_mut();
+    unsafe {
+        let bytes = std::slice::from_raw_parts(sb.GetBufferPointer() as *const u8, sb.GetBufferSize());
+        assert_eq!(r.create_root_signature(bytes.as_ptr(), bytes.len(), &ID3D12RootSignature::IID, &mut rs), S_OK);
+        // a blob the host refuses fails as the host does
+        let mut bad: Raw = std::ptr::null_mut();
+        assert!(r.create_root_signature(blob.as_ptr(), blob.len(), &ID3D12RootSignature::IID, &mut bad).is_err());
+        assert!(bad.is_null());
+    }
+    assert!(r.host_root_signature(rs).is_some());
+    assert_eq!(release(rs), 0);
+}

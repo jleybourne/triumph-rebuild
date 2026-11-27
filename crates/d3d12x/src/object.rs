@@ -79,7 +79,7 @@ pub(crate) fn is(this: Raw, object: Object) -> bool {
 
 /// The table of `object`, built once.
 pub(crate) fn table(object: Object) -> &'static Table {
-    static T: [OnceLock<Table>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    static T: [OnceLock<Table>; 4] = [OnceLock::new(), OnceLock::new(), OnceLock::new(), OnceLock::new()];
     T[object as usize].get_or_init(|| slots::build(object, &crate::methods(object)))
 }
 
@@ -90,10 +90,12 @@ pub(crate) fn iids(object: Object) -> &'static [GUID] {
         [ID3D12Resource::IID, ID3D12Resource1::IID, ID3D12Resource2::IID, ID3D12Pageable::IID, ID3D12DeviceChild::IID, ID3D12Object::IID, UNKNOWN];
     static HEAP: [GUID; 6] = [ID3D12Heap::IID, ID3D12Heap1::IID, ID3D12Pageable::IID, ID3D12DeviceChild::IID, ID3D12Object::IID, UNKNOWN];
     static DH: [GUID; 5] = [ID3D12DescriptorHeap::IID, ID3D12Pageable::IID, ID3D12DeviceChild::IID, ID3D12Object::IID, UNKNOWN];
+    static RS: [GUID; 4] = [ID3D12RootSignature::IID, ID3D12DeviceChild::IID, ID3D12Object::IID, UNKNOWN];
     match object {
         Object::Resource => &RESOURCE,
         Object::Heap => &HEAP,
         Object::DescriptorHeap => &DH,
+        Object::RootSignature => &RS,
     }
 }
 

@@ -214,6 +214,10 @@ pub trait HostDevice: Send + Sync {
     /// A host resource for a console description already turned host (`desc`); `None` with no
     /// GPU (the stand-in).
     fn resource(&self, desc: &D3D12_RESOURCE_DESC, heap: D3D12_HEAP_TYPE, flags: D3D12_HEAP_FLAGS, clear: Option<&D3D12_CLEAR_VALUE>) -> Result<Option<ID3D12Resource>, HRESULT>;
+    /// A host root signature from a serialized blob; `None` with no GPU (the stand-in).
+    fn root_signature(&self, _blob: &[u8]) -> Result<Option<ID3D12RootSignature>, HRESULT> {
+        Ok(None)
+    }
     /// `GetCopyableFootprints` on the host's rules.
     #[allow(clippy::too_many_arguments)]
     fn footprints(&self, desc: &D3D12_RESOURCE_DESC, first: u32, count: u32, base: u64, layouts: *mut D3D12_PLACED_SUBRESOURCE_FOOTPRINT, rows: *mut u32, row_bytes: *mut u64, total: *mut u64);
@@ -370,6 +374,11 @@ impl HostDevice for DeviceHost {
         let state = if heap == D3D12_HEAP_TYPE_UPLOAD { D3D12_RESOURCE_STATE_GENERIC_READ } else if heap == D3D12_HEAP_TYPE_READBACK { D3D12_RESOURCE_STATE_COPY_DEST } else { D3D12_RESOURCE_STATE_COMMON };
         unsafe { self.device.CreateCommittedResource(&D3D12_HEAP_PROPERTIES { Type: heap, ..Default::default() }, flags, desc, state, clear.map(|c| c as *const _), &mut r) }.map_err(hr)?;
         Ok(r)
+    }
+
+    fn root_signature(&self, blob: &[u8]) -> Result<Option<ID3D12RootSignature>, HRESULT> {
+        // SAFETY: a serialized root signature of `blob.len()` bytes
+        unsafe { self.device.CreateRootSignature::<ID3D12RootSignature>(0, blob) }.map(Some).map_err(hr)
     }
 
     fn footprints(&self, desc: &D3D12_RESOURCE_DESC, first: u32, count: u32, base: u64, layouts: *mut D3D12_PLACED_SUBRESOURCE_FOOTPRINT, rows: *mut u32, row_bytes: *mut u64, total: *mut u64) {

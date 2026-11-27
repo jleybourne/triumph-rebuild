@@ -1,11 +1,11 @@
 # Progress
 
 ```
-work toward 30 fps   [███████████░░░░░░░░░]  53 %
+work toward 30 fps   [███████████░░░░░░░░░]  56 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694 counted (oracle match needed) · v0 set 2,834 / 2,881 translate and compile (pixel 1,791 / 1,798, vertex 926 / 951, compute 117 / 132) · all decode byte-exact
 runtime functions    [███████████████████░]  69 / 73 ours bound (xmem, modules, memory, process, files, audio, DirectStorage, xg); 624 more bind to the host directly
 launcher track       [██████████████░░░░░░]  5 / 7 steps (C1 registry, L1-L4 launcher merged; C2 and L5 left); does not count toward the fps %
-measured fps         none yet — the title reaches its first render call (D3D12XboxCreateDevice, 1.4 s); Build 5 next
+measured fps         none yet — the title passes device setup and its render setup; Build 5: pipelines next
 baseline to beat     7.6 fps · 131.3 ms · ~4,500 draws · 356 dropped   (the layer being replaced)
 target               30 fps · 33.3 ms · same draws · stated output resolution and upscaler mode
 updated              2026-11-27
@@ -24,12 +24,12 @@ second row and is the number that counts.
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
 | 3 | PE loader + console runtime | 15 | 100 % | 15.0 | loader, vfs, input merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides (32 / 73 ours); the title's code runs; files (22), audio, DirectStorage, xg built in lanes and merged, binding next |
 | 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 65 % | 9.75 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; **front end closed**: 25,694 programs decode byte-exact, oracle set complete (PRs #5, #10) |
-| 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
+| 5 | D3D12.X device, lists, descriptors, present | 12 | 25 % | 3.0 | device, queues, fences, allocators, lists, resources, descriptors, DXGI, root signatures built; the title passes device and render setup; pipelines, Execute and Present next |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 30 % | 3.0 | DLSS (PR #4) and FSR 3.1.6 (PR #8) standalone on a synthetic scene, one conventions table; wiring to the title's pass todo |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **53.55 ≈ 53 %** | |
+| | **total** | **100** | | **56.55 ≈ 56 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -82,6 +82,22 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 (night) — Build 5: the title passes its render setup; root signatures; the BVH builder starts
+
+```
+[███████████░░░░░░░░░]  56 %   (53.55 → 56.55: Build 5 0 % → 25 %)
+title       device setup (1 queue, 5 fences, 4 X-queues, 439 allocators, 581 lists), back buffers, root signatures
+measured fps   none yet (next: compute pipelines 0x1f0 for the BVH builder, then Execute and Present)
+```
+
+- **Fixed:** the title's render setup opens an arena for D3D's memory (XMem allocator 0x80) and asserts its
+  back buffers fill it; on console D3D takes resource memory through the title's XMem hooks. Ours now does too
+  (each committed resource and heap is also an `XMemAlloc` with D3D's attributes, freed with it).
+- **Fixed:** the BVH builder sets console-only root signature flags (0x1000000, 0x2000000) the host rejects;
+  the serializer export drops them. **Built:** `CreateRootSignature` (device 0x80, `crates/d3d12x/src/root.rs`).
+- **Built (diagnostics):** crash reports name thrown C++ types and values (HRESULTs), `REBUILD_PEEK` prints
+  title globals at a crash, `REBUILD_THREADS` unwinds every other thread. Tests: 439 green.
 
 ### 2026-11-27 — Control flow: 7,402 of 9,128 agnostic programs translate and compile; round 3-4 lanes merged
 

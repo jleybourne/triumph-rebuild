@@ -45,6 +45,7 @@ pub mod memory;
 pub mod object;
 pub mod records;
 pub mod resource;
+pub mod root;
 pub mod sampler;
 pub mod slots;
 pub mod thunks;
@@ -94,6 +95,7 @@ pub(crate) struct Counters {
     pub views_skipped: AtomicU64,
     pub unheaped: AtomicU64,
     pub resources: AtomicU64,
+    pub root_signatures: AtomicU64,
     pub refused: AtomicU64,
 }
 
@@ -211,5 +213,6 @@ pub(crate) fn methods(object: Object) -> Vec<(usize, &'static str, slots::Fp)> {
         Object::Resource => resource::resource_methods(),
         Object::Heap => resource::heap_methods(),
         Object::DescriptorHeap => heap::methods(),
+        Object::RootSignature => root::methods(),
     }
 }

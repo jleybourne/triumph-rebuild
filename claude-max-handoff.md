@@ -187,3 +187,17 @@ ebuild-oracle (backup in oracle-swapped-backup); `apps/rebuild/src/bin/oracle.rs
 - Guarded run: 1 queue, 5 fences, 4 X-queues, 439 allocators, 581 lists, DXGI, 2 frame events, 1 clwb site; then
   int3 assert at exe+0x247af2d (arena: end-start+[0x1475E6FF0] <= 0x1FFFFF; arena size 0x4000000 or 0x5200000).
 - Tests: 437 passed, 0 failed. Next: find which allocation misses the arena; then queue Execute/PresentX, pipelines.
+
+## 2026-11-27 night — render setup passes; root signatures; BVH builder needs compute pipelines
+- Arena assert exe+0x247af2d solved: render setup pushes an XMem scope for allocator 0x80 (D3D) via 0x145C8F990;
+  the title's XMem hook dispatcher (0x144DEB430, list = attrs bits 16-23) serves page-size-2 allocations from the
+  arena (callback 0x1456A2A60) and asserts it ends full. Fix: device.rs `Accounted` Memory: each committed
+  resource/heap also XMemAlloc(size, D3D_ATTRIBUTES=(0x80<<16)|(2<<14)), XMemFree on release.
+- xboxbvhbuilder.dll then threw HRESULTs (C++ `long`): (1) host serializer rejected console root flags
+  0x3000000 -> exports.rs wraps D3D12SerializeVersionedRootSignature masking to 0xfff; (2) device 0x80 ->
+  crates/d3d12x/src/root.rs (Object::RootSignature, host ID3D12RootSignature, ListHost::root_signature);
+  (3) NOW: device 0x1F0 CreateComputePipelineStateX(this, *D3D12_COMPUTE_PIPELINE_STATE_DESC, 0, 0, iid, out)
+  -> E_NOTIMPL thrown from xboxbvhbuilder+0xc525. Next: implement 0x1f0/0x58 via crates/pipelines + translator.
+- Diagnostics: crash.rs reports C++ throws (type + value + unwound chain), REBUILD_PEEK=addr,...,rsp+N,
+  REBUILD_THREADS=1 (all threads unwound at a fatal). Scratch tool: xref/xrange.py (RIP-relative refs).
+- Tests 439 green. Progress 56 %.
