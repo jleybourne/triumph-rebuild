@@ -255,6 +255,9 @@ unsafe extern "system" fn first_chance(p: *mut EXCEPTION_POINTERS) -> i32 {
             if let Some(f) = ON_FATAL.get() {
                 f();
             }
+            if std::env::var_os("REBUILD_THREADS").is_some() {
+                other_threads();
+            }
         }
     }
     // a title assert (int3) or a fail-fast ends the run without reaching the unhandled filter: report it here
