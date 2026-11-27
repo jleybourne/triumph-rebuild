@@ -14,6 +14,7 @@
 //! ```
 
 #[cfg(windows)]
+pub mod budget;
 pub mod drives;
 #[cfg(windows)]
 pub mod exports;
@@ -106,6 +107,8 @@ pub const OVERRIDES: &[(&str, &str)] = &[
     // modules: the title's own DLLs, and every miss is a discovery entry
     ("GetProcAddress", "modules"),
     ("LoadLibraryExW", "modules"),
+    // the GDK stub loads xgameruntime.dll with the A form: the host would hand it the PC runtime
+    ("LoadLibraryExA", "modules"),
     ("LoadLibraryW", "modules"),
     ("LoadLibraryA", "modules"),
     ("LoadPackagedLibrary", "modules"),
@@ -119,6 +122,11 @@ pub const OVERRIDES: &[(&str, &str)] = &[
     ("GetCommandLineW", "process"),
     ("GetCommandLineA", "process"),
 ];
+
+/// What the GDK runtime noted: interfaces, slots and exports the title asked for that we do not serve.
+pub fn gdk_discovery() -> Vec<String> {
+    rebuild_gdk::discovery::lines()
+}
 
 pub fn override_reason(function: &str) -> Option<&'static str> {
     OVERRIDES.iter().find(|(f, _)| *f == function).map(|(_, why)| *why)

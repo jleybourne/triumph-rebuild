@@ -8,7 +8,7 @@
 //! and prints the discovery list: every unbuilt import the title called, in first-call order. The game
 //! folder is only read; prepared copies go to %LOCALAPPDATA%\triumph-rebuild\images.
 //!
-//! While it waits, a sampler stops the title's main thread every `--sample N` seconds (default 2) and prints
+//! With `--sample N` (opt-in: it suspends a thread), a sampler stops the title's main thread every N seconds and prints
 //! its stack as image+rva, so a title that waits shows where. At the end, every thread is sampled once.
 //! File and DirectStorage calls go through the drives (`rebuild_runtime::drives`): G: the title's folder,
 //! read-only; T: emptied at start; S: storage, kept.
@@ -37,6 +37,13 @@ fn report(started: Instant) {
         println!("paths the drives don't know: {}", d.len());
         for x in d.iter().take(40) {
             println!("          {x:?}");
+        }
+    }
+    let g = rebuild_runtime::gdk_discovery();
+    if !g.is_empty() {
+        println!("gdk runtime discovery: {}", g.len());
+        for l in g {
+            println!("          {l}");
         }
     }
     let m = misses();
@@ -91,10 +98,74 @@ fn raw_err(b: &[u8]) {
     }
 }
 
+/// Keeps a run from taking the machine down (it did, more than once, before these guards):
+///
+/// - a **job object** holding this process, killed when the job's last handle closes (at exit, however
+///   the process ends), with a cap on this process's own committed memory;
+/// - a **watchdog thread** that ends the process at the deadline plus a margin, whatever any other
+///   thread is doing (it takes no lock: a sleep, then TerminateProcess);
+/// - a **preflight**: no run when the system has too little commit left for the title's budget.
+fn guard(seconds: u64) -> Result<(), String> {
+    use windows::Win32::System::JobObjects::*;
+    use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+    const GIB: u64 = 1 << 30;
+    let budget = rebuild_runtime::budget::limit();
+    let avail = rebuild_runtime::budget::host_commit_available();
+    // the budget (physical pages, charged to the system) plus our own private memory, plus room for Windows
+    let own = budget + 4 * GIB;
+    if avail < own + 4 * GIB {
+        return Err(format!(
+            "the system can commit {:.1} GiB more; a run needs {:.1} GiB (budget {:.1} + own {:.1} + 4 for Windows). Close programs or lower REBUILD_MEMORY_BUDGET_MB",
+            avail as f64 / GIB as f64,
+            (own + 4 * GIB) as f64 / GIB as f64,
+            budget as f64 / GIB as f64,
+            4.0
+        ));
+    }
+    unsafe {
+        let job = CreateJobObjectW(None, None).map_err(|e| format!("job object: {e}"))?;
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+        info.ProcessMemoryLimit = own as usize;
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+        .map_err(|e| format!("job limits: {e}"))?;
+        AssignProcessToJobObject(job, GetCurrentProcess()).map_err(|e| format!("job assign: {e}"))?;
+        // the handle is never closed: it closes when the process ends, and the job kills what is left
+        let _ = job;
+    }
+    let hard = Duration::from_secs(seconds + 15);
+    std::thread::Builder::new()
+        .name("watchdog".into())
+        .stack_size(64 << 10)
+        .spawn(move || {
+            std::thread::sleep(hard);
+            raw_err(b"WATCHDOG  deadline passed: ending the process
+");
+            unsafe {
+                let _ = TerminateProcess(GetCurrentProcess(), 0xDEAD);
+            }
+        })
+        .map_err(|e| format!("watchdog: {e}"))?;
+    println!(
+        "guard     job (killed on exit, own memory <= {:.1} GiB), title budget {:.1} GiB, watchdog at {} s",
+        own as f64 / GIB as f64,
+        budget as f64 / GIB as f64,
+        seconds + 15
+    );
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let run = args.iter().any(|a| a == "--run");
-    let every: u64 = args.iter().position(|a| a == "--sample").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(2);
+    // the sampler suspends the title's thread: opt-in only (`--sample N`), never by default
+    let sample: Option<u64> = args.iter().position(|a| a == "--sample").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok());
+    let every = sample.unwrap_or(2);
     let seconds: u64 = args.iter().position(|a| a == "--seconds").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(60);
     let Some(dir) = std::env::var_os("REBUILD_GAME_DIR").map(PathBuf::from) else {
         println!("FAILED    set REBUILD_GAME_DIR to the title's folder (it is only read)");
@@ -120,6 +191,10 @@ fn main() {
     );
     if !run {
         return;
+    }
+    if let Err(e) = guard(seconds) {
+        println!("REFUSED   {e}");
+        std::process::exit(2);
     }
 
     match rebuild_runtime::drives::install(&rebuild_runtime::drives::Drives::new(&dir)) {
@@ -189,6 +264,9 @@ fn main() {
         if Instant::now() >= deadline {
             break None;
         }
+        if sample.is_none() {
+            continue;
+        }
         // heartbeats on stderr (one WriteFile, no Rust lock, no allocation): where the main thread is
         raw_err(b"beat: sampling\n");
         let sampled = sampler::sample(handle);
@@ -211,14 +289,16 @@ fn main() {
         Some(code) => println!("EXITED    the title's entry returned {code:#x} before a render call"),
         None => println!("TIMEOUT   no render call within {seconds} s"),
     }
-    println!("threads   every thread of the process, innermost frames first:");
-    for (id, h) in sampler::threads() {
-        if let Some(s) = sampler::sample(h) {
-            let top: Vec<String> = s.frames[..s.len.min(8)].iter().map(|a| sampler::name(*a, &images)).collect();
-            println!("  {id:>6}  {}", top.join("  <  "));
-        }
-        unsafe {
-            let _ = windows::Win32::Foundation::CloseHandle(h);
+    if sample.is_some() {
+        println!("threads   every thread of the process, innermost frames first:");
+        for (id, h) in sampler::threads() {
+            if let Some(s) = sampler::sample(h) {
+                let top: Vec<String> = s.frames[..s.len.min(8)].iter().map(|a| sampler::name(*a, &images)).collect();
+                println!("  {id:>6}  {}", top.join("  <  "));
+            }
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(h);
+            }
         }
     }
     report(unsafe { STARTED }.unwrap());

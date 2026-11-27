@@ -367,6 +367,15 @@ fn host_d3d12(name: &str) -> Option<u64> {
 }
 
 /// Our implementation of a console-only function, by DLL and name.
+/// The console-only DLLs we serve: `LoadLibrary` of these never reaches the host, even where the host
+/// has a DLL of the same name (the PC's own `xgameruntime.dll` would take console GUIDs).
+pub const CONSOLE_DLLS: &[&str] =
+    &["d3d12_xs.dll", "xmem.dll", "acphal.dll", "xapu.dll", "chad.dll", "xcrdapi.dll", "xg_xs.dll", "xgameruntime.dll"];
+
+pub fn is_console_dll(dll: &str) -> bool {
+    CONSOLE_DLLS.iter().any(|d| d.eq_ignore_ascii_case(dll))
+}
+
 pub fn console_export(dll: &str, name: &str) -> Option<u64> {
     if dll.eq_ignore_ascii_case("d3d12_xs.dll") {
         return match name {
@@ -385,6 +394,7 @@ pub fn console_export(dll: &str, name: &str) -> Option<u64> {
             return (name == "DStorageGetFactory").then(|| rebuild_dstorage::DStorageGetFactory as *const () as usize as u64)
         }
         "xg_xs.dll" => return crate::xg::export(name),
+        "xgameruntime.dll" => return rebuild_gdk::runtime::get_proc(name).map(|f| f as usize as u64),
         _ => return None,
     }
     let f: usize = match name {

@@ -23,6 +23,20 @@ use windows::Win32::System::Threading::{
     THREAD_SUSPEND_RESUME,
 };
 
+/// One WriteFile to stderr: no Rust lock, no allocation (safe while a thread is suspended).
+fn beat(b: &[u8]) {
+    use windows::Win32::Storage::FileSystem::WriteFile;
+    use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
+    if std::env::var_os("REBUILD_SAMPLER_BEATS").is_none() {
+        return;
+    }
+    unsafe {
+        if let Ok(h) = GetStdHandle(STD_ERROR_HANDLE) {
+            let _ = WriteFile(h, Some(b), None, None);
+        }
+    }
+}
+
 /// CONTEXT_AMD64 | CONTROL | INTEGER
 const CONTEXT_CONTROL_INTEGER: u32 = 0x0010_0003;
 pub const MAX_FRAMES: usize = 24;
@@ -51,6 +65,8 @@ pub fn sample(thread: HANDLE) -> Option<Sample> {
         if SuspendThread(thread) == u32::MAX {
             return None;
         }
+        beat(b"  s: suspended
+");
         let ok = GetThreadContext(thread, &mut c.0).is_ok();
         // copy what is committed of the stack above RSP (ReadProcessMemory stops at an unreadable page)
         let mut n = 0usize;
@@ -77,8 +93,12 @@ pub fn sample(thread: HANDLE) -> Option<Sample> {
                 }
             }
         }
+        beat(b"  s: copied
+");
         copied = n;
         ResumeThread(thread);
+        beat(b"  s: resumed
+");
         if !ok {
             return None;
         }
@@ -102,7 +122,12 @@ unsafe fn walk(c: &mut CONTEXT, s: &mut Sample, lo: u64, hi: u64) {
             break;
         }
         let mut base = 0u64;
+        beat(b"  s: lookup
+");
         let f = RtlLookupFunctionEntry(c.Rip, &mut base, None);
+        beat(if f.is_null() { b"  s: leaf
+" } else { b"  s: unwind
+" });
         if f.is_null() {
             // a leaf function: the return address is at [rsp]
             if c.Rsp == 0 {

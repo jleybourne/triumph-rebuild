@@ -2155,6 +2155,7 @@ version = "0.1.0"
 dependencies = [
  "rebuild-audio",
  "rebuild-dstorage",
+ "rebuild-gdk",
  "rebuild-loader",
  "rebuild-vfs",
  "rebuild-winfiles",

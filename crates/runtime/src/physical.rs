@@ -20,6 +20,8 @@ pub const FRAME: usize = 64 << 10;
 struct Section {
     handle: HANDLE,
     frames: usize,
+    /// frames of it not yet freed; at 0 the section is closed and its bytes go back to the budget
+    live: usize,
     /// The whole section mapped once, on first need, for writes that name frames rather than
     /// addresses (DirectStorage page destinations); 0 until then. Same bytes as every placed view.
     view: usize,
@@ -48,7 +50,10 @@ impl Drop for Physical {
                 if s.view != 0 {
                     let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: s.view as *mut c_void });
                 }
-                let _ = CloseHandle(s.handle);
+                if !s.handle.is_invalid() && s.live > 0 {
+                    let _ = CloseHandle(s.handle);
+                    crate::budget::refund((s.frames * FRAME) as u64);
+                }
             }
         }
     }
@@ -66,12 +71,21 @@ impl Physical {
     /// Allocate `n` frames; returns their numbers.
     pub fn allocate(&mut self, n: usize) -> Option<Vec<usize>> {
         let bytes = n.checked_mul(FRAME)?;
-        let handle = unsafe {
-            CreateFileMappingW(INVALID_HANDLE_VALUE, None, PAGE_READWRITE, (bytes >> 32) as u32, bytes as u32, None)
+        if n == 0 || !crate::budget::charge(bytes as u64) {
+            // past the title's budget: refused as the console refuses it, before the host commits anything
+            return None;
         }
-        .ok()?;
+        let handle = match unsafe {
+            CreateFileMappingW(INVALID_HANDLE_VALUE, None, PAGE_READWRITE, (bytes >> 32) as u32, bytes as u32, None)
+        } {
+            Ok(h) => h,
+            Err(_) => {
+                crate::budget::refund(bytes as u64);
+                return None;
+            }
+        };
         let si = self.sections.len();
-        self.sections.push(Section { handle, frames: n, view: 0 });
+        self.sections.push(Section { handle, frames: n, live: n, view: 0 });
         let first = self.frames.len();
         self.frames.extend((0..n).map(|k| Some((si, k))));
         Some((first..first + n).collect())
@@ -82,10 +96,24 @@ impl Physical {
         if frames.iter().any(|f| self.mapped.values().any(|m| m == f)) {
             return false;
         }
+        if frames.iter().any(|&f| !matches!(self.frames.get(f), Some(Some(_)))) {
+            return false;
+        }
         for &f in frames {
-            match self.frames.get_mut(f) {
-                Some(slot @ Some(_)) => *slot = None,
-                _ => return false,
+            let Some((si, _)) = self.frames[f].take() else { continue };
+            let s = &mut self.sections[si];
+            s.live -= 1;
+            if s.live == 0 {
+                // the whole section is free: close it, so the host memory really goes back
+                unsafe {
+                    if s.view != 0 {
+                        let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: s.view as *mut c_void });
+                        s.view = 0;
+                    }
+                    let _ = CloseHandle(s.handle);
+                }
+                s.handle = HANDLE::default();
+                crate::budget::refund((s.frames * FRAME) as u64);
             }
         }
         true

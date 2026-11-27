@@ -151,7 +151,7 @@ pub extern "system" fn LoadLibraryExW(name: PCWSTR, _file: *mut c_void, _flags: 
     if let Some(m) = with(|r| r.by_name.get(&k).cloned()) {
         return HMODULE(handle_of(&m) as *mut c_void);
     }
-    if crate::exports::console_export(&k, "").is_some() || k == "xmem.dll" {
+    if crate::exports::is_console_dll(&k) {
         return HMODULE(register_console(&k) as *mut c_void);
     }
     match unsafe { HostLoadLibraryExW(name, None, LOAD_LIBRARY_FLAGS(LOAD_LIBRARY_SEARCH_SYSTEM32.0)) } {
@@ -161,6 +161,12 @@ pub extern "system" fn LoadLibraryExW(name: PCWSTR, _file: *mut c_void, _flags: 
             HMODULE::default()
         }
     }
+}
+
+pub extern "system" fn LoadLibraryExA(name: PCSTR, file: *mut c_void, flags: u32) -> HMODULE {
+    let Some(n) = (unsafe { narrow(name) }) else { return HMODULE::default() };
+    let w: Vec<u16> = n.encode_utf16().chain(std::iter::once(0)).collect();
+    LoadLibraryExW(PCWSTR(w.as_ptr()), file, flags)
 }
 
 pub extern "system" fn LoadLibraryW(name: PCWSTR) -> HMODULE {
@@ -256,6 +262,7 @@ pub fn override_export(name: &str) -> Option<u64> {
     let f: *const () = match name {
         "GetProcAddress" => GetProcAddress as *const (),
         "LoadLibraryExW" => LoadLibraryExW as *const (),
+        "LoadLibraryExA" => LoadLibraryExA as *const (),
         "LoadLibraryW" => LoadLibraryW as *const (),
         "LoadLibraryA" => LoadLibraryA as *const (),
         "LoadPackagedLibrary" => LoadPackagedLibrary as *const (),
@@ -331,4 +338,17 @@ mod tests {
             assert!(override_export(f).is_some(), "{f} ({why})");
         }
     }
+
+    #[test]
+    fn xgameruntime_by_the_a_form_is_ours_not_the_pcs() {
+        let n = cstr("xgameruntime.dll");
+        let h = LoadLibraryExA(PCSTR(n.as_ptr() as *const u8), std::ptr::null_mut(), 0);
+        assert!(h.0 as u64 >= PSEUDO, "a console pseudo-handle, not the host's PC runtime: {:?}", h);
+        let q = cstr("QueryApiImpl");
+        let f = GetProcAddress(h, PCSTR(q.as_ptr() as *const u8));
+        assert_eq!(f as usize as u64, rebuild_gdk::runtime::get_proc("QueryApiImpl").unwrap() as usize as u64);
+        let w = wstr("XGameRuntime.dll");
+        assert_eq!(LoadLibraryExW(PCWSTR(w.as_ptr()), std::ptr::null_mut(), 0), h, "one handle, any case or form");
+    }
+
 }
