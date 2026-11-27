@@ -11,6 +11,24 @@ apps/rebuild     the launcher
 apps/gputest      the proof: the GPU writes, the CPU reads, nothing is copied
 ```
 
+
+## The goal, in one block
+
+```
+1  rebuild the compatibility layer                        our own tree, our own code
+2  informed by the two layers it learns from              their mechanisms + our measured knowledge
+3  performance designed in from the first line of code    never retrofitted, never tuned later
+
+success    30+ fps in-world (33.3 ms), measured as fps · ms · draws · dropped
+baseline    131.3 ms · 7.6 fps · ~4,500 draws   (the layer being replaced)
+route       one memory (no mirror) + parallel, cached list translation + the title's own FSR
+```
+
+**"Better than both" is specific, not a slogan.** Where they made a choice that costs frame time we take
+the opposite one: no host mirror, no copy-back path, no guard-page faults, no runtime pipeline compiles,
+no per-frame descriptor scans — plus two things neither of them does: command lists cached by content and
+replayed, and descriptor updates tracked as a dirty list instead of a 203,127-slot scan.
+
 ## The decision
 
 A console has one memory. A PC has two. Layers usually bridge that by mirroring: keep a host copy, copy
@@ -46,9 +64,11 @@ apps/gputest --bare     control: a dispatch with no bindings completes, so a dev
 ## What is not built yet
 
 ```
-the PE loader and the console runtime   months of work, and the layer cannot boot anything without it
-the shader recompiler (RDNA2 -> DXIL)   the long pole in any codebase
+the PE loader and the console runtime   without it the layer cannot boot anything
+the shader recompiler (RDNA2 -> DXIL)   the largest single piece of work
 the D3D12.X device, lists and heaps     the translation surface the title calls into
+console descriptor heaps                T#/V# slots the title's shaders index
+the title's own DLLs                    Bink video, the FSR upscaler, GDK HTTP
 ```
 
 ## The rules this project keeps
