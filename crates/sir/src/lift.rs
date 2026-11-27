@@ -49,8 +49,19 @@ pub struct Lifted {
     pub uses_shadow: bool,
     /// LDS is read or written (`groupshared uint sir_lds[]`).
     pub uses_lds: bool,
+    /// Every descriptor read and the host view it is read as, in program order: what a heap must hold for
+    /// the program to run (the execution check builds its inputs from this). Translation does not use it.
+    pub desc_uses: Vec<res::DescUse>,
     /// How console lanes map to host lanes ([`wave::Wave`]).
     pub wave: wave::Wave,
+}
+
+/// The value of a float operand the lifter wrote as a constant (`asfloat(<bits>u)`, `0.5f`, `-1.0f`), if it is one.
+fn const_f32(e: &str) -> Option<f32> {
+    if let Some(bits) = e.strip_prefix("asfloat(").and_then(|r| r.strip_suffix("u)")) {
+        return bits.parse::<u32>().ok().map(f32::from_bits).filter(|f| !f.is_nan());
+    }
+    e.strip_suffix('f').and_then(|n| n.parse::<f32>().ok()).filter(|f| !f.is_nan())
 }
 
 /// The register space of the descriptor shadow table: per heap index, 16 bytes the runtime writes from the
@@ -63,7 +74,11 @@ pub const IMMEDIATE_SAMPLER_SPACE: u32 = 100;
 /// Helper functions the statements call, emitted once per program.
 pub const PRELUDE: &str = r#"
 float sir_mul_legacy(float a, float b) { return (a == 0.0f || b == 0.0f) ? 0.0f : a * b; }
-float sir_med3(float a, float b, float c) { return max(min(a, b), min(max(a, b), c)); }
+// precise: DXC's default float freedom (no NaNs, no signed zeros) would rewrite these, and the console's results differ
+// then: med3 with a NaN input is the minimum of the three (NaN ignored); 0 - (+0) is +0
+float sir_med3(float a, float b, float c) { precise float r = (isnan(a) || isnan(b) || isnan(c)) ? min(min(a, b), c) : max(min(a, b), min(max(a, b), c)); return r; }
+float sir_clamp(float x, float lo, float hi) { precise float r = min(max(x, lo), hi); return r; }
+float sir_sub(float a, float b) { precise float r = a - b; return r; }
 int sir_med3i(int a, int b, int c) { return max(min(a, b), min(max(a, b), c)); }
 uint sir_med3u(uint a, uint b, uint c) { return max(min(a, b), min(max(a, b), c)); }
 // f32 -> f16 rounding toward zero (the console's v_cvt_pkrtz_f16_f32)
@@ -149,6 +164,10 @@ pub(crate) struct FlowState {
     desc_words: BTreeSet<u8>,
     /// SGPRs whose value is derived from a descriptor table's offset (table's user-data dword)
     table_of: BTreeMap<u8, u8>,
+    /// loaded descriptors (as in `descs`) whose byte offset from their table's start is a constant
+    desc_off: BTreeMap<u8, i32>,
+    /// SGPRs in `table_of` that hold their table's offset plus a constant (copies and constant adds)
+    table_add: BTreeMap<u8, i32>,
     /// SGPRs holding a known constant (set by `s_mov_b32`/`s_movk_i32` from a literal or inline integer)
     consts: BTreeMap<u8, u32>,
     /// SGPRs written on every path here (a read of any other may read user data)
@@ -173,6 +192,8 @@ impl FlowState {
             descs: same(&self.descs, &o.descs),
             desc_words: self.desc_words.union(&o.desc_words).copied().collect(),
             table_of: same(&self.table_of, &o.table_of),
+            desc_off: same(&self.desc_off, &o.desc_off),
+            table_add: same(&self.table_add, &o.table_add),
             consts: same(&self.consts, &o.consts),
             written: self.written.intersection(&o.written).copied().collect(),
             may_written: self.may_written.union(&o.may_written).copied().collect(),
@@ -527,6 +548,8 @@ impl Lifter<'_> {
         self.f.written.insert(s);
         self.f.may_written.insert(s);
         self.f.descs.remove(&s);
+        self.f.desc_off.remove(&s);
+        self.f.table_add.remove(&s);
         self.f.desc_words.remove(&s);
         self.f.consts.remove(&s);
         self.f.table_of.remove(&s);
@@ -689,12 +712,27 @@ impl Lifter<'_> {
             Src::Sgpr(n) => self.table_origin(n),
             _ => None,
         });
+        // a copy of a table's offset, or the offset plus a constant: still a known place in the table
+        let sgpr = |f: &str| d.get(f).map(enc::src).and_then(|c| if let Src::Sgpr(n) = c { Some(n) } else { None });
+        let added = match name {
+            "s_mov_b32" | "s_mov_b64" => sgpr("ssrc0").and_then(|n| self.table_offset(n)),
+            "s_add_u32" | "s_add_i32" => match (sgpr("ssrc0"), sgpr("ssrc1")) {
+                (Some(n), _) if self.table_offset(n).is_some() => self.cval(d, "ssrc1").map(|c| self.table_offset(n).unwrap().wrapping_add(c as i32)),
+                (_, Some(n)) if self.table_offset(n).is_some() => self.cval(d, "ssrc0").map(|c| self.table_offset(n).unwrap().wrapping_add(c as i32)),
+                _ => None,
+            },
+            "s_sub_u32" | "s_sub_i32" => sgpr("ssrc0").and_then(|n| self.table_offset(n)).and_then(|k| self.cval(d, "ssrc1").map(|c| k.wrapping_sub(c as i32))),
+            _ => None,
+        };
         let r = self.salu_inner(name, d);
         if r.is_some() {
             if let Some(Src::Sgpr(dst)) = d.get("sdst").map(enc::src) {
                 match table {
                     Some(t) => {
                         self.f.table_of.insert(dst, t);
+                        if let Some(k) = added {
+                            self.f.table_add.insert(dst, k);
+                        }
                     }
                     None => {
                         self.f.table_of.remove(&dst);
@@ -703,6 +741,19 @@ impl Lifter<'_> {
             }
         }
         r
+    }
+
+    /// The value SGPR `n` holds as its table's (or heap's) offset plus a constant: the own user SGPR (unwritten) is
+    /// plus 0; a copy or constant add of one is tracked in `table_add`; anything else derived is unknown.
+    fn table_offset(&self, n: u8) -> Option<i32> {
+        if let Some(k) = self.f.table_add.get(&n) {
+            return Some(*k);
+        }
+        if self.f.table_of.contains_key(&n) || self.f.may_written.contains(&n) {
+            return None;
+        }
+        let b = self.bind?;
+        b.layout.iter().any(|p| b.hw.user_sgpr(p.user_data) == n && matches!(p.root, rebuild_shader::native::RootType::Table | rebuild_shader::native::RootType::ResourceHeap | rebuild_shader::native::RootType::SamplerHeap)).then_some(0)
     }
 
     /// The descriptor table or heap a value derives from (its user-data dword): the parameter's own user
@@ -1116,6 +1167,9 @@ impl Lifter<'_> {
                 let (x, y) = (f0(self)?, f1(self)?);
                 let e = match name {
                     "v_add_f32" => format!("{x} + {y}"),
+                    // from a constant zero: DXC would make it a negation, which turns +0 into -0
+                    "v_sub_f32" if const_f32(&x) == Some(0.0) => format!("sir_sub({x}, {y})"),
+                    "v_subrev_f32" if const_f32(&y) == Some(0.0) => format!("sir_sub({y}, {x})"),
                     "v_sub_f32" => format!("{x} - {y}"),
                     "v_subrev_f32" => format!("{y} - {x}"),
                     "v_mul_f32" => format!("{x} * {y}"),
@@ -1160,7 +1214,16 @@ impl Lifter<'_> {
                     "v_fma_f32" => format!("mad({x}, {y}, {z})"),
                     "v_mad_f32" => format!("mad({x}, {y}, {z})"),
                     "v_mad_legacy_f32" | "v_fma_legacy_f32" => format!("sir_mul_legacy({x}, {y}) + {z}"),
-                    "v_med3_f32" => format!("sir_med3({x}, {y}, {z})"),
+                    // med3 of a value and two constants lo <= hi is a clamp (two ops), NaN going to lo as on the console
+                    "v_med3_f32" => match [&x, &y, &z].map(|e| const_f32(e)) {
+                        [None, Some(a), Some(b)] if a <= b => format!("sir_clamp({x}, {y}, {z})"),
+                        [None, Some(a), Some(b)] if b < a => format!("sir_clamp({x}, {z}, {y})"),
+                        [Some(a), None, Some(b)] if a <= b => format!("sir_clamp({y}, {x}, {z})"),
+                        [Some(a), None, Some(b)] if b < a => format!("sir_clamp({y}, {z}, {x})"),
+                        [Some(a), Some(b), None] if a <= b => format!("sir_clamp({z}, {x}, {y})"),
+                        [Some(a), Some(b), None] if b < a => format!("sir_clamp({z}, {y}, {x})"),
+                        _ => format!("sir_med3({x}, {y}, {z})"),
+                    },
                     "v_min3_f32" => format!("min(min({x}, {y}), {z})"),
                     "v_max3_f32" => format!("max(max({x}, {y}), {z})"),
                     _ => unreachable!(),
