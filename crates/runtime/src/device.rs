@@ -547,7 +547,25 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
             }
         }
         let mut host: Option<ID3D12Device> = None;
-        if let Err(e) = unsafe { D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_1, &mut host) } {
+        // REBUILD_WARP: the host device on WARP, the software rasterizer: slow, but title work that would hang a
+        // card cannot reset the display driver (the way to bisect such work)
+        let adapter: Option<windows::core::IUnknown> = if std::env::var_os("REBUILD_WARP").is_some() {
+            let warp = unsafe { windows::Win32::Graphics::Dxgi::CreateDXGIFactory1::<windows::Win32::Graphics::Dxgi::IDXGIFactory4>() }
+                .and_then(|f| unsafe { f.EnumWarpAdapter::<windows::core::IUnknown>() });
+            match warp {
+                Ok(a) => {
+                    eprintln!("device    on WARP (REBUILD_WARP)");
+                    Some(a)
+                }
+                Err(e) => {
+                    eprintln!("device    WARP refused ({e}); not making a card device instead");
+                    return e.code().0;
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(e) = unsafe { D3D12CreateDevice(adapter.as_ref(), D3D_FEATURE_LEVEL_12_1, &mut host) } {
             eprintln!("device: the host D3D12 device failed: {e}");
             return e.code().0;
         }

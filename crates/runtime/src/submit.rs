@@ -114,6 +114,9 @@ impl Batch {
 
     #[inline]
     fn flush(&mut self) {
+        if self.n > 0 && rebuild_xlist::console::skip::on(rebuild_xlist::console::skip::SUBMIT) {
+            self.n = 0; // REBUILD_GPU_SKIP=submit: recorded, never executed
+        }
         if self.n > 0 {
             // SAFETY: closed host graphics lists (an ID3D12GraphicsCommandList is an ID3D12CommandList).
             unsafe { (Interface::vtable(&self.q.host).ExecuteCommandLists)(Interface::as_raw(&self.q.host), self.n as u32, self.raw.as_ptr() as *const _) };

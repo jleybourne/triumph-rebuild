@@ -260,7 +260,8 @@ pub fn with_graphics_desc<R>(root: &ID3D12RootSignature, vs: &[u8], ps: Option<&
         },
         InputLayout: D3D12_INPUT_LAYOUT_DESC { pInputElementDescs: if input.is_empty() { std::ptr::null() } else { input.as_ptr() }, NumElements: input.len() as u32 },
         IBStripCutValue: D3D12_INDEX_BUFFER_STRIP_CUT_VALUE(s.strip_cut as i32),
-        PrimitiveTopologyType: D3D12_PRIMITIVE_TOPOLOGY_TYPE(s.topology as i32),
+        // 1-4 only (point, line, triangle, patch): an undefined or unknown console value builds as triangles
+        PrimitiveTopologyType: D3D12_PRIMITIVE_TOPOLOGY_TYPE(if (1..=4).contains(&s.topology) { s.topology as i32 } else { 3 }),
         NumRenderTargets: s.targets.len().min(8) as u32,
         RTVFormats: rtv,
         DSVFormat: DXGI_FORMAT(s.depth_format as i32),

@@ -84,6 +84,10 @@ static PRESENT_QUEUE: AtomicUsize = AtomicUsize::new(0);
 /// The slot the next present uses, and each slot's "frame begins" timestamp list (raw `ID3D12GraphicsCommandList`).
 static SLOT: AtomicUsize = AtomicUsize::new(0);
 static BEGIN: [AtomicUsize; FRAMES] = [const { AtomicUsize::new(0) }; FRAMES];
+/// The present fence (raw `ID3D12Fence`) and the value each slot's last frame signals: a slot's begin list may
+/// only go out again once that frame is done (re-executing a list still in flight is invalid; a card can hang on it).
+static FENCE: AtomicUsize = AtomicUsize::new(0);
+static DONE: [std::sync::atomic::AtomicU64; FRAMES] = [const { std::sync::atomic::AtomicU64::new(0) }; FRAMES];
 
 /// The first submission of a frame on the swap chain's queue goes behind the frame's start timestamp: the list
 /// to put in front of it, if this is that submission.
@@ -92,8 +96,21 @@ pub fn frame_begin(q: &'static Queue) -> Option<*mut c_void> {
     if PRESENT_QUEUE.load(Ordering::Relaxed) != q as *const Queue as usize || q.frame_started.swap(true, Ordering::AcqRel) {
         return None;
     }
-    let l = BEGIN[SLOT.load(Ordering::Relaxed)].load(Ordering::Relaxed);
-    (l != 0).then_some(l as *mut c_void)
+    let slot = SLOT.load(Ordering::Relaxed);
+    let l = BEGIN[slot].load(Ordering::Relaxed);
+    if l == 0 {
+        return None;
+    }
+    let f = FENCE.load(Ordering::Relaxed);
+    if f != 0 {
+        // SAFETY: the present's fence, alive for the run (stored once the swap chain exists)
+        let raw = f as *mut c_void;
+        let fence = unsafe { ID3D12Fence::from_raw_borrowed(&raw) };
+        if fence.is_some_and(|fence| unsafe { fence.GetCompletedValue() } < DONE[slot].load(Ordering::Relaxed)) {
+            return None; // still in flight: this frame goes without its start timestamp
+        }
+    }
+    Some(l as *mut c_void)
 }
 
 // ------------------------------------------------------------------------------------- capture requests
@@ -491,6 +508,8 @@ impl Presenter {
             let _ = self.queue.host.Signal(&self.fence, self.value);
         }
         self.slots[i].done = self.value;
+        DONE[i].store(self.value, Ordering::Relaxed);
+        FENCE.store(self.fence.as_raw() as usize, Ordering::Relaxed);
         self.slots[i].timed = true;
         self.shown_frames = frame;
         SLOT.store((i + 1) % FRAMES, Ordering::Relaxed);

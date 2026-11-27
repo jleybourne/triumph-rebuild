@@ -928,11 +928,53 @@ unsafe extern "system" fn reset_x(this: Raw, allocator: Raw, pipeline: Raw, _fla
     unsafe { reset(this, allocator, pipeline) }
 }
 
+// ---- GPU safe mode ----
+
+/// `REBUILD_GPU_SKIP`: kinds of the title's GPU work to drop, for finding work that hangs the GPU:
+/// `draw`, `dispatch`, `indirect`, `mesh` (comma-separated; `submit` is the queue's). Read once.
+pub mod skip {
+    pub const DRAW: u32 = 1;
+    pub const DISPATCH: u32 = 2;
+    pub const INDIRECT: u32 = 4;
+    pub const MESH: u32 = 8;
+    pub const SUBMIT: u32 = 16;
+    /// The largest `ExecuteIndirect` max count let through (a garbage count must not become billions of draws).
+    pub const MAX_INDIRECT: u32 = 1 << 16;
+
+    pub fn mask() -> u32 {
+        static M: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+        *M.get_or_init(|| {
+            let v = std::env::var("REBUILD_GPU_SKIP").unwrap_or_default().to_ascii_lowercase();
+            let mut m = 0;
+            for t in v.split(',').map(str::trim) {
+                m |= match t {
+                    "draw" => DRAW,
+                    "dispatch" => DISPATCH,
+                    "indirect" => INDIRECT,
+                    "mesh" => MESH,
+                    "submit" => SUBMIT,
+                    "all" => DRAW | DISPATCH | INDIRECT | MESH | SUBMIT,
+                    _ => 0,
+                };
+            }
+            if m != 0 {
+                eprintln!("gpusafe   skipping {v}");
+            }
+            m
+        })
+    }
+
+    #[inline]
+    pub fn on(kind: u32) -> bool {
+        mask() & kind != 0
+    }
+}
+
 // ---- draws, dispatches, copies ----
 
 unsafe extern "system" fn draw_instanced(this: Raw, vertices: u32, instances: u32, first_vertex: u32, first_instance: u32) {
     let s = enter(this);
-    if s.sh.pso_missing {
+    if s.sh.pso_missing || skip::on(skip::DRAW) {
         s.stats.skipped += 1;
         return;
     }
@@ -944,7 +986,7 @@ unsafe extern "system" fn draw_instanced(this: Raw, vertices: u32, instances: u3
 
 unsafe extern "system" fn draw_indexed(this: Raw, indices: u32, instances: u32, first_index: u32, base_vertex: i32, first_instance: u32) {
     let s = enter(this);
-    if s.sh.pso_missing {
+    if s.sh.pso_missing || skip::on(skip::DRAW) {
         s.stats.skipped += 1;
         return;
     }
@@ -956,7 +998,8 @@ unsafe extern "system" fn draw_indexed(this: Raw, indices: u32, instances: u32, 
 
 unsafe extern "system" fn dispatch(this: Raw, x: u32, y: u32, z: u32) {
     let s = enter(this);
-    if s.sh.pso_missing {
+    // more than 65,535 groups in a dimension is invalid in D3D12: never sent
+    if s.sh.pso_missing || skip::on(skip::DISPATCH) || x > 65535 || y > 65535 || z > 65535 {
         s.stats.skipped += 1;
         return;
     }
@@ -974,7 +1017,7 @@ unsafe extern "system" fn dispatch_x(this: Raw, x: u32, y: u32, z: u32, _flags: 
 /// 0x408 DispatchMesh.
 unsafe extern "system" fn dispatch_mesh(this: Raw, x: u32, y: u32, z: u32) {
     let s = enter(this);
-    if s.sh.pso_missing {
+    if s.sh.pso_missing || skip::on(skip::MESH) || x > 65535 || y > 65535 || z > 65535 {
         s.stats.skipped += 1;
         return;
     }
@@ -990,7 +1033,7 @@ unsafe extern "system" fn dispatch_mesh(this: Raw, x: u32, y: u32, z: u32) {
 /// 0x1e8 ExecuteIndirect `(signature, max count, args, args offset, count buffer, count offset)`.
 unsafe extern "system" fn execute_indirect(this: Raw, signature: Raw, max: u32, args: Raw, args_offset: u64, count: Raw, count_offset: u64) {
     let s = enter(this);
-    if s.sh.pso_missing {
+    if s.sh.pso_missing || skip::on(skip::INDIRECT) {
         s.stats.skipped += 1;
         return;
     }
@@ -1001,8 +1044,23 @@ unsafe extern "system" fn execute_indirect(this: Raw, signature: Raw, max: u32, 
         s.stats.refused += 1;
         return;
     };
-    let (Some(a), Some(c)) = (s.resource(args), s.resource(count)) else { return };
-    call!(s.ExecuteIndirect(sig, max, a, args_offset, c, count_offset));
+    let Some(a) = s.resource(args) else {
+        s.stats.refused += 1;
+        return;
+    };
+    // the count buffer is optional (null: exactly `max`); one we cannot map is refused, never guessed
+    let c = if count.is_null() {
+        std::ptr::null_mut()
+    } else {
+        match s.resource(count) {
+            Some(c) => c,
+            None => {
+                s.stats.refused += 1;
+                return;
+            }
+        }
+    };
+    call!(s.ExecuteIndirect(sig, max.min(skip::MAX_INDIRECT), a, args_offset, c, count_offset));
 }
 
 unsafe extern "system" fn copy_buffer_region(this: Raw, dst: Raw, dst_offset: u64, src: Raw, src_offset: u64, bytes: u64) {
@@ -1478,8 +1536,12 @@ unsafe extern "system" fn index_buffer(this: Raw, view: *const D3D12_INDEX_BUFFE
         s.stats.elided += 1;
         return;
     }
-    let Some(va) = s.va(v.BufferLocation) else {
+    let Some(va) = s.va(v.BufferLocation).filter(|&va| va != 0) else {
+        // unmapped: unbind rather than leave the last index buffer bound for the next indexed draw
         s.stats.refused += 1;
+        s.sh.ib_console = Some(key);
+        s.sh.ib = D3D12_INDEX_BUFFER_VIEW::default();
+        call!(s.IASetIndexBuffer(std::ptr::null()));
         return;
     };
     s.sh.ib_console = Some(key);
@@ -1499,15 +1561,19 @@ unsafe extern "system" fn vertex_buffers(this: Raw, start: u32, n: u32, views: *
         if s.sh.vb_console[slot] == key {
             continue;
         }
-        let va = match s.va(v.BufferLocation) {
-            Some(va) => va,
-            None => {
-                s.stats.refused += 1;
-                0
+        // an address we cannot map is an empty slot (reads give 0), never address 0 with a size: a card faults on
+        // that (a device removal), WARP only complains
+        let view = match s.va(v.BufferLocation) {
+            Some(va) if va != 0 => D3D12_VERTEX_BUFFER_VIEW { BufferLocation: va, ..v },
+            _ => {
+                if v.BufferLocation != 0 || v.SizeInBytes != 0 {
+                    s.stats.refused += 1;
+                }
+                D3D12_VERTEX_BUFFER_VIEW::default()
             }
         };
         s.sh.vb_console[slot] = key;
-        s.sh.vbs[slot] = D3D12_VERTEX_BUFFER_VIEW { BufferLocation: va, ..v };
+        s.sh.vbs[slot] = view;
         changed = true;
     }
     if !changed {
