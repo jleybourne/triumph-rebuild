@@ -145,4 +145,5 @@ The owner's rules, in their own words:
 - oraclediff on our v0 DXIL (2,834 programs, D:\victory-data\translate-dxil as <hash>.dxil, CSV
   D:\victory-data\oraclediff-v0.csv): 2,829 "differ", but OUR side shows 0 dx.op calls (memory/wave/io all 0):
   crates/shader/src/bitcode.rs does not recognise dx.op calls in DXC 1.8 output (only checked against the oracle).
-  Fix the reader first (dump one DXC module's calls), then read the real SigIn/SigOut/Bindings diffs.
+  FIXED (Char6 names). Interface diffs now SigIn 35, SigOut 3, Bindings 4 (runs/build4-oraclediff.md);
+  read each with `oraclediff --sig`, fix ours or name the reason, then the v0 row closes.

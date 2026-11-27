@@ -273,12 +273,27 @@ pub fn bindings_match(ours: &[Binding], oracle: &[Binding]) -> bool {
     a == b
 }
 
+/// Input signatures compared with one named reason for differing: the order (and so the registers) of the
+/// system-generated vertex and instance ids (system values 6 and 8). The GPU generates them and binds them by
+/// semantic, so their order changes neither the input layout nor stage linking; the fork adds them in the order
+/// its lowering first meets them. Every other element must match exactly, registers included.
+pub fn inputs_match(ours: &[SigElem], oracle: &[SigElem]) -> bool {
+    let generated = |e: &&SigElem| matches!(e.system_value, 6 | 8);
+    let rest = |v: &[SigElem]| -> Vec<SigElem> { v.iter().filter(|e| !generated(e)).cloned().collect() };
+    let ids = |v: &[SigElem]| -> Vec<(String, u32, u8)> {
+        let mut x: Vec<_> = v.iter().filter(generated).map(|e| (e.name.clone(), e.index, e.mask)).collect();
+        x.sort();
+        x
+    };
+    rest(ours) == rest(oracle) && ids(ours) == ids(oracle)
+}
+
 pub fn compare(ours: &Summary, oracle: &Summary) -> Vec<Diff> {
     let mut d = Vec::new();
     if ours.stage != oracle.stage {
         d.push(Diff::Stage);
     }
-    if ours.sig_in != oracle.sig_in {
+    if !inputs_match(&ours.sig_in, &oracle.sig_in) {
         d.push(Diff::SigIn);
     }
     if ours.sig_out != oracle.sig_out {

@@ -83,6 +83,23 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
 
+### 2026-11-27 — Our v0 DXIL against the oracle: interface diffs 2,557 → at most 42 of 2,834
+
+```
+[██████████░░░░░░░░░░]  49 %   (unchanged; closes the v0 row once the last 42 are read)
+shaders     v0 set 2,834 / 2,881 compile; interface vs the oracle: SigIn 35, SigOut 3, Bindings 4
+```
+
+- **Fixed (lane tool, `crates/shader/src/bitcode.rs`):** DXC writes symbol names in LLVM's 6-bit characters, which
+  the reader kept as raw numbers, so none of our `dx.op` calls resolved. The self-check never saw it (the oracle's
+  emitter writes plain names); it still gives 0 diffs.
+- **Built (Build 4):** our signatures mirror the console's: every element, in order, each output with its own
+  mask, so registers match the oracle's (stages link by signature).
+- **Named reasons** for differing (`oraclediff`): our shadow table and immediate-sampler spaces, and the order of
+  the GPU-generated vertex and instance ids. Every injected mutation is still caught.
+- **Measured** ([`runs/build4-oraclediff.md`](runs/build4-oraclediff.md)): SigIn 1,231 → 35, SigOut 801 → 3,
+  Bindings 525 → 4.
+
 ### 2026-11-27 — Compute programs: the v0 set is 2,834 of 2,881 (98.4 %) translated and compiled
 
 ```

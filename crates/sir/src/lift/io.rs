@@ -502,20 +502,23 @@ pub fn vs_program(l: &Lifted, vs: &VsStage, bind: Option<&super::Bindings>, isg1
     }
     let mut body = l.body.clone();
     s.push_str("struct In {\n");
-    for row in l.io.attributes.keys() {
-        let on_row: Vec<&Element> = isg1.iter().filter(|e| e.register == u32::from(*row) && e.system == 0).collect();
-        for e in &on_row {
-            let first = e.mask.trailing_zeros() as u8;
-            let n = e.mask.count_ones() as usize;
-            let _ = writeln!(s, "    {} a{row}_{first} : {}{};", hlsl_type(e.comp, n), e.name, e.index);
-            for c in 0..4u8 {
-                if e.mask >> c & 1 == 1 {
-                    let field = if n == 1 { String::new() } else { format!(".{}", ["x", "y", "z", "w"][(c - first) as usize]) };
-                    body = body.replace(&format!("@vin{row}.{c}@"), &format!("asuint(i.a{row}_{first}{field})"));
-                }
+    // the attributes the fetch loads, in signature order (the oracle declares no unfetched attribute)
+    let mut ins: Vec<&Element> = isg1.iter().filter(|e| e.system == 0 && l.io.attributes.contains_key(&(e.register as u8))).collect();
+    ins.sort_by_key(|e| (e.register, e.mask.trailing_zeros()));
+    for e in ins {
+        let row = e.register as u8;
+        let first = e.mask.trailing_zeros() as u8;
+        let n = e.mask.count_ones() as usize;
+        let _ = writeln!(s, "    {} a{row}_{first} : {}{};", hlsl_type(e.comp, n), e.name, e.index);
+        for c in 0..4u8 {
+            if e.mask >> c & 1 == 1 {
+                let field = if n == 1 { String::new() } else { format!(".{}", ["x", "y", "z", "w"][(c - first) as usize]) };
+                body = body.replace(&format!("@vin{row}.{c}@"), &format!("asuint(i.a{row}_{first}{field})"));
             }
         }
-        // a channel the format does not supply: the fetch's default (0, and 1.0 for w)
+    }
+    // a channel the format does not supply: the fetch's default (0, and 1.0 for w)
+    for row in l.io.attributes.keys() {
         for c in 0..4u8 {
             body = body.replace(&format!("@vin{row}.{c}@"), if c == 3 { "0x3f800000u" } else { "0u" });
         }
