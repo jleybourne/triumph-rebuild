@@ -11,11 +11,13 @@
 //! No IR, lowering or DXIL emission lives here: that is the lead's shader core
 //! (`crates/sir`).
 
+pub mod bitcode;
 pub mod census;
 pub mod dxbc;
 pub mod features;
 pub mod gfx10;
 pub mod native;
+pub mod oraclediff;
 pub mod sgd5;
 pub mod signature;
 
