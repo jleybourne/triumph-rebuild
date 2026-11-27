@@ -1,0 +1,18 @@
+[package]
+name = "rebuild-d3d12x"
+description = "The D3D12.X resource, heap, descriptor heap and view objects the device hands out; descriptor mirrors with the shadow table."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+rebuild-xg = { path = "../xg" }
+
+[target.'cfg(windows)'.dependencies]
+rebuild-xlist = { path = "../xlist" }
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Dxgi_Common",
+] }

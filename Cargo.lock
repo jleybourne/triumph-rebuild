@@ -2108,6 +2108,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rebuild-d3d12x"
+version = "0.1.0"
+dependencies = [
+ "rebuild-xg",
+ "rebuild-xlist",
+ "windows",
+]
+
+[[package]]
 name = "rebuild-dstorage"
 version = "0.1.0"
 dependencies = [
