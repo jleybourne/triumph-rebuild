@@ -10,6 +10,7 @@
 //!   and `i + 32`, with EXEC carried as data). It is checked bit for bit against a reference wave64
 //!   interpreter.
 
+pub mod sampler;
 pub mod classify;
 pub mod gen;
 pub mod hlsl;

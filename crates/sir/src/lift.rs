@@ -40,7 +40,13 @@ pub struct Lifted {
     written: BTreeSet<u8>,
     /// A constant buffer is read through the heap (`SirCb`).
     pub uses_cb: bool,
+    /// Immediate samplers: the console sampler words the code builds from constants, in register order
+    /// (`sir_imm{k} : register(s{k}, space100)`); [`crate::sampler::decode`] gives the host's static sampler.
+    pub immediate_samplers: Vec<[u32; 4]>,
 }
+
+/// The register space of immediate samplers (static samplers in the host root signature).
+pub const IMMEDIATE_SAMPLER_SPACE: u32 = 100;
 
 /// Helper functions the statements call, emitted once per program.
 pub const PRELUDE: &str = r#"
@@ -56,6 +62,15 @@ uint sir_f16_rtz(float x) {
     return h & 0xffff;
 }
 uint sir_pkrtz(float a, float b) { return sir_f16_rtz(a) | (sir_f16_rtz(b) << 16); }
+// v_cmp_class_f32: is the float (as bits) in one of the classes the mask names
+bool sir_class(uint x, uint m) {
+    uint e = (x >> 23) & 0xff, f = x & 0x7fffff, neg = x >> 31;
+    uint bit;
+    if (e == 0xff) { bit = f != 0 ? ((f & 0x400000) != 0 ? 1u : 0u) : (neg != 0 ? 2u : 9u); }
+    else if (e == 0) { bit = f == 0 ? (neg != 0 ? 5u : 6u) : (neg != 0 ? 4u : 7u); }
+    else { bit = neg != 0 ? 3u : 8u; }
+    return ((m >> bit) & 1) != 0;
+}
 // float -> int, saturating, NaN -> 0 (as the console)
 int sir_f2i(float x) { return isnan(x) ? 0 : (x >= 2147483647.0f ? 2147483647 : (x <= -2147483648.0f ? (int)0x80000000 : (int)x)); }
 uint sir_f2u(float x) { return isnan(x) ? 0 : (x >= 4294967295.0f ? 0xffffffff : (x <= 0.0f ? 0 : (uint)x)); }
@@ -106,6 +121,8 @@ struct Lifter<'a> {
     why: Option<String>,
     /// SGPRs whose value is derived from a descriptor table's offset (table's user-data dword)
     table_of: BTreeMap<u8, u8>,
+    /// SGPRs holding a known constant (set by `s_mov_b32`/`s_movk_i32` from a literal or inline integer)
+    consts: BTreeMap<u8, u32>,
 }
 
 /// What an operand reads, as a `uint` expression; `None` if not translated yet.
@@ -214,6 +231,7 @@ impl Lifter<'_> {
                 self.out.written.insert(s);
                 self.descs.remove(&s);
                 self.desc_words.remove(&s);
+                self.consts.remove(&s);
                 let _ = writeln!(self.out.body, "    s{s} = {expr};");
             }
             Src::M0 => {
@@ -224,6 +242,17 @@ impl Lifter<'_> {
             _ => return None,
         }
         Some(())
+    }
+
+    /// An SALU operand's value when it is known: a literal, an inline integer, or an SGPR holding a constant.
+    fn cval(&self, d: &Decoded, field: &str) -> Option<u32> {
+        match enc::src(d.get(field)?) {
+            Src::Literal => d.literal,
+            Src::Inline(c @ 128..=192) => Some(u32::from(c - 128)),
+            Src::Inline(c @ 193..=208) => Some((-(i32::from(c) - 192)) as u32),
+            Src::Sgpr(s) => self.consts.get(&s).copied(),
+            _ => None,
+        }
     }
 
     fn line(&mut self, s: String) {
@@ -315,9 +344,35 @@ impl Lifter<'_> {
             "s_mov_b32" if matches!(self.stage, Stage::Ps(_)) && sdst.map(enc::src) == Some(Src::M0) => Some(()),
             "s_mov_b32" => {
                 let x = a(self)?;
-                self.swrite(sdst?, x)
+                self.swrite(sdst?, x)?;
+                let value = match enc::src(d.get("ssrc0")?) {
+                    Src::Literal => d.literal,
+                    Src::Inline(c @ 128..=192) => Some(u32::from(c - 128)),
+                    Src::Inline(c @ 193..=208) => Some((-(i32::from(c) - 192)) as u32),
+                    _ => None,
+                };
+                if let (Some(v), Src::Sgpr(s)) = (value, enc::src(sdst?)) {
+                    self.consts.insert(s, v);
+                }
+                Some(())
             }
-            "s_movk_i32" => self.swrite(sdst?, format!("{}u", d.get("simm16")? as u16 as i16 as i32 as u32)),
+            "s_movk_i32" => {
+                let v = d.get("simm16")? as u16 as i16 as i32 as u32;
+                self.swrite(sdst?, format!("{v}u"))?;
+                if let Src::Sgpr(s) = enc::src(sdst?) {
+                    self.consts.insert(s, v);
+                }
+                Some(())
+            }
+            "s_brev_b32" => {
+                let folded = self.cval(d, "ssrc0").map(u32::reverse_bits);
+                let x = a(self)?;
+                self.swrite(sdst?, format!("reversebits({x})"))?;
+                if let (Some(v), Src::Sgpr(s)) = (folded, enc::src(sdst?)) {
+                    self.consts.insert(s, v);
+                }
+                Some(())
+            }
             "s_mov_b64" => {
                 // a lane mask copy (EXEC or a mask pair) or a plain 64-bit copy
                 let (src, dst) = (d.get("ssrc0")?, sdst?);
@@ -379,8 +434,28 @@ impl Lifter<'_> {
                 if let Some(s) = scc {
                     self.line(format!("  scc = {};", s.replace('@', "r")));
                 }
+                // constants through the ops that build them (sampler words, mostly)
+                let folded = match (self.cval(d, "ssrc0"), self.cval(d, "ssrc1")) {
+                    (Some(x), Some(y)) => match name {
+                        "s_and_b32" => Some(x & y),
+                        "s_or_b32" => Some(x | y),
+                        "s_xor_b32" => Some(x ^ y),
+                        "s_andn2_b32" => Some(x & !y),
+                        "s_orn2_b32" => Some(x | !y),
+                        "s_lshl_b32" => Some(x << (y & 31)),
+                        "s_lshr_b32" => Some(x >> (y & 31)),
+                        "s_add_u32" | "s_add_i32" => Some(x.wrapping_add(y)),
+                        "s_sub_u32" | "s_sub_i32" => Some(x.wrapping_sub(y)),
+                        "s_pack_ll_b32_b16" => Some((x & 0xffff) | y << 16),
+                        _ => None,
+                    },
+                    _ => None,
+                };
                 let dst = sdst?;
                 self.swrite(dst, "r".into())?;
+                if let (Some(v), Src::Sgpr(s)) = (folded, enc::src(dst)) {
+                    self.consts.insert(s, v);
+                }
                 self.line("}".into());
                 Some(())
             }
@@ -694,6 +769,19 @@ impl Lifter<'_> {
     fn vcmp(&mut self, x_form: bool, rest: &str, d: &Decoded) -> Option<()> {
         let (op, ty) = rest.rsplit_once('_')?;
         let e = match ty {
+            // the float's class against a mask of classes (bits: sNaN, qNaN, -inf, -normal, -denormal, -0,
+            // +0, +denormal, +normal, +inf), decided from its bits, so denormal flushing cannot change it
+            "f32" if op == "class" => {
+                let a = self.usrc(d, "src0")?;
+                let m = if d.encoding == Encoding::Vop3 {
+                    self.usrc(d, "src1")?
+                } else {
+                    let v = d.get("vsrc1")? as u16;
+                    self.out.vgprs.insert(v);
+                    format!("v{v}")
+                };
+                format!("sir_class({a}, {m})")
+            }
             "f32" => {
                 let a = self.fsrc(d, "src0", 0)?;
                 let b = if d.encoding == Encoding::Vop3 {
@@ -792,7 +880,7 @@ pub fn lift(insts: &[Instruction]) -> Lifted {
 
 /// Translates a straight-line program of a given stage, with its root parameters if known.
 pub fn lift_stage<'a>(insts: &[Instruction], stage: Stage<'a>, bind: Option<Bindings<'a>>) -> Lifted {
-    let mut l = Lifter { out: Lifted::default(), stage, bind, descs: BTreeMap::new(), desc_words: BTreeSet::new(), why: None, table_of: BTreeMap::new() };
+    let mut l = Lifter { out: Lifted::default(), stage, bind, descs: BTreeMap::new(), desc_words: BTreeSet::new(), why: None, table_of: BTreeMap::new(), consts: BTreeMap::new() };
     for i in insts {
         l.why = None;
         if l.inst(i).is_none() {

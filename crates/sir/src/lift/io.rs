@@ -217,6 +217,11 @@ pub fn ps_program(l: &Lifted, ps: &PsStage, bind: Option<&super::Bindings>, isg1
     // user SGPRs read before any write are root constants at b0; anything else read uninitialised is refused
     let mut user_init = String::new();
     for s in &l.live_in {
+        // the primitive mask only steers the console's attribute interpolation (via M0); the host interpolates
+        if bind.is_some_and(|b| b.user_dword(*s).is_none() && b.after_user() == *s) {
+            let _ = writeln!(user_init, "    s{s} = 0u; // PRIM_MASK: interpolation is the host's");
+            continue;
+        }
         let k = bind.and_then(|b| b.user_dword(*s)).ok_or(format!("reads s{s}, which is no user data"))?;
         if bind.is_some_and(|b| b.is_heap_base(*s)) {
             let _ = writeln!(user_init, "    s{s} = 0u; // heap base: descriptors are indexed from the heap's start");
@@ -228,6 +233,9 @@ pub fn ps_program(l: &Lifted, ps: &PsStage, bind: Option<&super::Bindings>, isg1
         return Err("an input read with two interpolation modes".into());
     }
     let mut s = String::from(super::PRELUDE);
+    for k in 0..l.immediate_samplers.len() {
+        let _ = writeln!(s, "SamplerState sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
+    }
     if !user_init.is_empty() {
         s.push_str("cbuffer SirUserData : register(b0, space0) { uint4 sir_ud[16]; };\n");
     }

@@ -39,6 +39,12 @@ loads, stores and atomics (it only changes filtering) are translated, and refusa
 programs): the sampler's descriptor is baked into the code as constants, and the root layout lists it as
 `ImmediateSampler`.
 
+**Update, same day: immediate samplers and the primitive mask.** Samplers built from constants decode to static
+samplers (`crates/sir/src/sampler.rs`); constants fold through `s_mov`, `s_movk`, `s_brev` and bitwise/shift/add
+ops; the primitive mask SGPR reads 0 (the host interpolates); `s_brev_b32` and `v_cmp_class_f32` translate.
+**1,684 of 1,798 (93.7 %) now translate and compile.** Left: `v_interp_p1ll_f16` (62), untraced samplers (14),
+16-bit image addresses (11), `ds_swizzle_b32` (9), cube maps (6), and single programs.
+
 **Not yet proven correct:** these compile, but a program counts toward the 25,694 only when the execution
 check matches the oracle's output (tasks.md, Build 4). Next: resource tracing (descriptor loads from root
 parameters, decision 5), which unblocks 1,364 of the remaining 1,371.

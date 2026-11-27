@@ -33,6 +33,11 @@ impl Bindings<'_> {
         })
     }
 
+    /// The first SGPR after the user SGPRs: in a pixel shader, the hardware's primitive mask (PRIM_MASK).
+    pub fn after_user(&self) -> u8 {
+        self.layout.iter().map(|p| self.hw.user_sgpr(p.user_data) + p.sgprs.max(1) as u8).max().unwrap_or(0)
+    }
+
     /// SGPR `s` holds a dynamic-resource heap base (0 on the host).
     pub fn is_heap_base(&self, s: u8) -> bool {
         self.layout
@@ -127,11 +132,13 @@ impl Lifter<'_> {
         }
         self.out.sgprs.insert(dst);
         self.out.written.insert(dst);
+        self.consts.remove(&dst);
         let _ = writeln!(self.out.body, "    s{dst} = (uint)((int)s{base} + {byte_off}) / {stride}u;");
         self.descs.insert(dst, Desc { heap, dwords, user_data: p.user_data });
         for k in 1..dwords {
             self.desc_words.insert(dst + k);
             self.out.written.insert(dst + k);
+            self.consts.remove(&(dst + k));
         }
         Some(())
     }
@@ -169,6 +176,7 @@ impl Lifter<'_> {
             let s = dst + k;
             self.out.sgprs.insert(s);
             self.out.written.insert(s);
+            self.consts.remove(&s);
             self.desc_words.remove(&s);
             self.descs.remove(&s);
             let i = dw + u32::from(k);
@@ -239,8 +247,21 @@ impl Lifter<'_> {
         let sampler = |l: &mut Self| -> Option<String> {
             let s = (d.get("ssamp")? * 4) as u8;
             let Some(sd) = l.descs.get(&s).copied() else {
-                l.why = Some("sampler not traced".into());
-                return None;
+                // an immediate sampler: the four words are constants the code wrote
+                let words: Option<Vec<u32>> = (0..4u8).map(|k| l.consts.get(&(s + k)).copied()).collect();
+                let Some(w) = words.filter(|_| (0..4u8).all(|k| !l.out.masks.contains(&(s + k)))) else {
+                    l.why = Some("sampler not traced".into());
+                    return None;
+                };
+                let w = [w[0], w[1], w[2], w[3]];
+                let k = match l.out.immediate_samplers.iter().position(|x| *x == w) {
+                    Some(k) => k,
+                    None => {
+                        l.out.immediate_samplers.push(w);
+                        l.out.immediate_samplers.len() - 1
+                    }
+                };
+                return Some(format!("sir_imm{k}"));
             };
             if sd.heap != Heap::Sampler {
                 l.why = Some("sampler is no sampler descriptor".into());
@@ -278,10 +299,14 @@ impl Lifter<'_> {
                 };
                 let c = fcoord(self, 0);
                 // a gather returns four texels: all four channels are written
-                let n = s.trim_start_matches("sir_smp");
+                // a heap sampler is declared here; an immediate one is global
+                let decl = match s.strip_prefix("sir_smp") {
+                    Some(n) => format!(" SamplerState {s} = SamplerDescriptorHeap[s{n}];"),
+                    None => String::new(),
+                };
                 let _ = writeln!(
                     self.out.body,
-                    "    {{ {ty}<float4> t = ResourceDescriptorHeap[s{rsrc}]; SamplerState {s} = SamplerDescriptorHeap[s{n}]; float4 r = t.Gather{ch}({s}, {c});"
+                    "    {{ {ty}<float4> t = ResourceDescriptorHeap[s{rsrc}];{decl} float4 r = t.Gather{ch}({s}, {c});"
                 );
                 for k in 0..4u16 {
                     self.out.vgprs.insert(vdata + k);
