@@ -212,3 +212,5 @@ ebuild-oracle (backup in oracle-swapped-backup); `apps/rebuild/src/bin/oracle.rs
   exe+0xb5a5f8 (fn 0x140B5A5D0, rcx struct [0]=null, from exe+0x32764; game-side lookup returned null) on several threads.
 - Symbolize our frames offline: python scratch sym.py target\release\runtitle.exe <off>... (crash prints runtitle.exe+off).
 - Tests 445 green. Progress 57 %.
+
+- Round 5 helpers launched: lane `ondemand` (on-demand translation of programs missing from the library; status agents/ondemand.md) and lane `streampso` (0x2b0/0x50 graphics pipelines; agents/streampso.md). Lead: the null lookup at exe+0xb5a5f8, then Execute/PresentX.

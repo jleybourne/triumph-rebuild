@@ -334,7 +334,7 @@ tests     445 green, 0 warnings: cargo test --release --no-fail-fast
 | 6 list translation | 🔄 core built | `crates/xlist` | Build 0 (b) |
 | 7 upscaler | ⏳ (plan decision 5 corrected) | — | — |
 | 8 pacing · 9 AMD testers | ⏳ | — | — |
-| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | merged: rounds 1 and 2 (#1-#18). **Round 3 running: `gdk` G5, `dstorage` D5, `device-research`, `shader` S7** | their pull requests |
+| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | **Round 5 running (2026-11-27 night): `ondemand` (translate programs missing from the library at creation, disk cache), `streampso` (device 0x2b0 stream and 0x50 graphics pipelines)** | their pull requests |
 | launcher track | 🔄 C1 registry; L1-L4 + U6 merged; hardware limits for testing (RAM, VRAM, CPU cores, CPU usage) in the launcher and applied before the title; C2 and L5 ⏳ | `crates/config`, `apps/launcher`, `crates/runtime/src/limits.rs` | config, launcher tests |
 
 ## 9. Taking over as lead
