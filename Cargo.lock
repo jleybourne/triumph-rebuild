@@ -117,9 +117,12 @@ dependencies = [
 name = "rebuild"
 version = "0.1.0"
 dependencies = [
+ "rebuild-loader",
+ "rebuild-runtime",
  "rebuild-shader",
  "rebuild-sir",
  "rebuild-uma",
+ "rebuild-upscale",
  "rebuild-xlist",
  "windows",
 ]
@@ -129,6 +132,36 @@ name = "rebuild-config"
 version = "0.1.0"
 dependencies = [
  "toml",
+]
+
+[[package]]
+name = "rebuild-dstorage"
+version = "0.1.0"
+dependencies = [
+ "rebuild-vfs",
+ "zlib-rs",
+]
+
+[[package]]
+name = "rebuild-input"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
+name = "rebuild-loader"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
+name = "rebuild-runtime"
+version = "0.1.0"
+dependencies = [
+ "rebuild-loader",
+ "windows",
 ]
 
 [[package]]
@@ -150,6 +183,21 @@ version = "0.1.0"
 dependencies = [
  "windows",
 ]
+
+[[package]]
+name = "rebuild-upscale"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
+name = "rebuild-vfs"
+version = "0.1.0"
+
+[[package]]
+name = "rebuild-xg"
+version = "0.1.0"
 
 [[package]]
 name = "rebuild-xlist"
