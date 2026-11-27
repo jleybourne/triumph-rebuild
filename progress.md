@@ -2,7 +2,7 @@
 
 ```
 work toward 30 fps   [██████████░░░░░░░░░░]  49 %
-shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694 counted (oracle match needed) · 1,782 / 1,798 v0 pixel shaders translate and compile · all decode byte-exact
+shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694 counted (oracle match needed) · 1,788 / 1,798 v0 pixel shaders translate and compile · all decode byte-exact
 runtime functions    [███████████████████░]  69 / 73 ours bound (xmem, modules, memory, process, files, audio, DirectStorage, xg); 624 more bind to the host directly
 launcher track       [██████████████░░░░░░]  5 / 7 steps (C1 registry, L1-L4 launcher merged; C2 and L5 left); does not count toward the fps %
 measured fps         none yet — the title has not rendered a frame on this code
@@ -82,6 +82,18 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Cube maps: 1,788 of 1,798 v0 pixel shaders compile (99.4 %)
+
+```
+[██████████░░░░░░░░░░]  49 %   (unchanged: the pixel shader set's last forms)
+shaders     0 / 25,694 counted (oracle match needed); v0 pixel shaders: 1,788 / 1,798 translated and compiled by DXC
+```
+
+- **Built (Build 4):** `v_cubeid/sc/tc/ma_f32` as the ISA defines them, and cube sampling: the console's (s, t, face)
+  coordinates are turned back into the direction `TextureCube` takes (each face checked by hand to return a vector
+  proportional to the original). Left (10): `s_cselect_b64` (3), shifts on special operands (3), buffer loads and
+  stores (3), `image_atomic_or` (1).
 
 ### 2026-11-27 — 1,782 of 1,798 v0 pixel shaders compile (99.1 %): 16-bit addresses, lane swizzles
 

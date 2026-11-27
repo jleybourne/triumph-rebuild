@@ -71,6 +71,20 @@ bool sir_class(uint x, uint m) {
     else { bit = neg != 0 ? 3u : 8u; }
     return ((m >> bit) & 1) != 0;
 }
+// v_cubeid/sc/tc/ma_f32 as the ISA defines them: (face, sc, tc, 2 * major axis)
+float4 sir_cube(float3 d) {
+    float3 a = abs(d);
+    if (a.z >= a.x && a.z >= a.y) { return float4(d.z < 0.0f ? 5.0f : 4.0f, d.z < 0.0f ? -d.x : d.x, -d.y, 2.0f * d.z); }
+    if (a.y >= a.x) { return float4(d.y < 0.0f ? 3.0f : 2.0f, d.x, d.y < 0.0f ? -d.z : d.z, 2.0f * d.y); }
+    return float4(d.x < 0.0f ? 1.0f : 0.0f, d.x < 0.0f ? d.z : -d.z, -d.y, 2.0f * d.x);
+}
+// the console's cube coordinates (s, t in [1, 2] after the +1.5 bias, face) back to a direction for TextureCube
+float3 sir_cube_dir(float s, float t, float f) {
+    float u = (s - 1.5f) * 2.0f, v = (t - 1.5f) * 2.0f;
+    uint k = (uint)clamp(round(f), 0.0f, 5.0f);
+    float3 d[6] = { float3(1, -v, -u), float3(-1, -v, u), float3(u, 1, v), float3(u, -1, -v), float3(u, -v, 1), float3(-u, -v, -1) };
+    return d[k];
+}
 // float -> int, saturating, NaN -> 0 (as the console)
 int sir_f2i(float x) { return isnan(x) ? 0 : (x >= 2147483647.0f ? 2147483647 : (x <= -2147483648.0f ? (int)0x80000000 : (int)x)); }
 uint sir_f2u(float x) { return isnan(x) ? 0 : (x >= 4294967295.0f ? 0xffffffff : (x <= 0.0f ? 0 : (uint)x)); }
@@ -713,9 +727,14 @@ impl Lifter<'_> {
                 self.vwrite_f(d, if name == "v_fmaak_f32" { format!("mad({x}, {y}, {kk})") } else { format!("mad({x}, {y}, {kk})") });
                 Some(())
             }
-            "v_fma_f32" | "v_mad_f32" | "v_mad_legacy_f32" | "v_fma_legacy_f32" | "v_med3_f32" | "v_min3_f32" | "v_max3_f32" => {
+            "v_fma_f32" | "v_mad_f32" | "v_mad_legacy_f32" | "v_fma_legacy_f32" | "v_med3_f32" | "v_min3_f32" | "v_max3_f32"
+            | "v_cubeid_f32" | "v_cubesc_f32" | "v_cubetc_f32" | "v_cubema_f32" => {
                 let (x, y, z) = (f0(self)?, f1(self)?, f2(self)?);
                 let e = match name {
+                    "v_cubeid_f32" => format!("sir_cube(float3({x}, {y}, {z})).x"),
+                    "v_cubesc_f32" => format!("sir_cube(float3({x}, {y}, {z})).y"),
+                    "v_cubetc_f32" => format!("sir_cube(float3({x}, {y}, {z})).z"),
+                    "v_cubema_f32" => format!("sir_cube(float3({x}, {y}, {z})).w"),
                     "v_fma_f32" => format!("mad({x}, {y}, {z})"),
                     "v_mad_f32" => format!("mad({x}, {y}, {z})"),
                     "v_mad_legacy_f32" | "v_fma_legacy_f32" => format!("sir_mul_legacy({x}, {y}) + {z}"),

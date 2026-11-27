@@ -216,7 +216,8 @@ impl Lifter<'_> {
             self.why = Some("not a resource descriptor".into());
             return None;
         }
-        if matches!(d.get("dim")?, 3 | 6 | 7) {
+        let cube = d.get("dim")? == 3;
+        if matches!(d.get("dim")?, 6 | 7) || (cube && !matches!(name, "image_sample" | "image_sample_lz" | "image_sample_l" | "image_sample_b")) {
             self.why = Some(["", "", "", "cube", "", "", "msaa", "msaa array"][d.get("dim")? as usize].into());
             return None;
         }
@@ -226,7 +227,8 @@ impl Lifter<'_> {
             2 => ("Texture3D", "RWTexture3D", 3),
             4 => ("Texture1DArray", "RWTexture1DArray", 2),
             5 => ("Texture2DArray", "RWTexture2DArray", 3),
-            _ => return None, // cube and MSAA: next step
+            3 => ("TextureCube", "", 3),
+            _ => return None, // MSAA: next step
         };
         let vaddr = d.get("vaddr")? as u16;
         let vdata = d.get("vdata")? as u16;
@@ -246,6 +248,10 @@ impl Lifter<'_> {
         };
         let fcoord = |l: &mut Self, first: u16| -> String {
             let parts: Vec<String> = (0..ncoord as u16).map(|k| fcomp(l, first + k)).collect();
+            if cube {
+                // (s, t, face) as the console takes them, back to the direction the host takes
+                return format!("sir_cube_dir({})", parts.join(", "));
+            }
             format!("float{}({})", ncoord, parts.join(", ")).replace("float1(", "(")
         };
         let icoord = |l: &mut Self, extra_mip: bool| -> String {
