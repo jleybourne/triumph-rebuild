@@ -79,37 +79,63 @@ measured in Build 0, before anything else is built on it.
 Console slots are real memory in the title's address space, PC descriptors beside them, with a **dirty
 list** — never a per-frame scan (the old layer examined 203,127 slots to mirror 12,027 records).
 
-### 3. Command lists: recorded, translated in parallel, cached where it pays
+### 3. Command lists: translated where the title records them, no cache (corrected by Build 0 (b))
 
-The CPU budget at the target, if serial: **33.3 ms / 4,500 draws ≈ 7.4 µs per draw**, and
-**33.3 ms / 20,293 list calls ≈ 1.6 µs per call**. The old layer measured 0.029 ms (29 µs) per draw.
-That gap — about 4× — is the CPU half of the problem and is measured as its own number.
+The CPU budget at the target, if serial: **33.3 ms / 4,500 draws ≈ 7.4 µs per draw**. Build 0 (b) measured
+our translator plus D3D12 at **0.43 µs a draw, 1.9 ms a frame on one thread**. The old layer's 29 µs a
+draw was memory bookkeeping hung on every bind, which decision 1 removes. So:
 
-Lists are recorded as data and translated on worker threads (leave cores for the title — 8C/16T on
-the floor machine). Caching identical lists is tried, not assumed: console lists reference per-frame
-ring offsets, so the hit rate may be low and hashing has a cost. It ships only if the hit rate pays.
+- each list is translated on the thread that records it (the title's own job threads), at Close; no
+  extra pool;
+- **no list cache**: at ~2 ms a frame, hashing could not pay;
+- the rule for Build 5: per-draw work stays near 0.5 µs, and anything adding more than 1 µs a draw must
+  be measured and justified.
 
-### 4. Nothing compiles during a frame; shaders are wave32 everywhere
+### 4. Nothing compiles during a frame; shaders are ours, wave32 everywhere
 
-RDNA2 → DXIL offline, verified by census. Pipelines built into a hash-keyed library at start.
-**Wave64 is lowered to wave32 for every vendor**, including AMD (which could run wave64 natively): one
-shader path, fully testable on NVIDIA. A native-wave64 AMD path is a later option, never the default.
+RDNA2 → DXIL offline, for all 25,694 programs. Pipelines are built into a hash-keyed library at start.
+**Wave64 is lowered to wave32 for every vendor**: one shader path, fully testable on NVIDIA.
 
-### 5. One upscaler interface, two backends
+**The shader core is ours, because that is where GPU milliseconds are decided** (decided 2026-11-27).
+The fork's own analysis puts ~10-22 ms of the title's 43-63 ms GPU frame in choices made at the core of
+its translator. The core is designed from the first line around:
 
-The title already calls its own FSR (console device method 0x218). We capture that call's inputs once —
-colour, depth, motion vectors, jitter, exposure, reset, render and output size — into one interface:
+```
+lane state     each lane's EXEC bit carried as data, with live-mask analysis   (divergence: 3-7 ms)
+memory         console addresses are window GPU addresses (Build 1): no page
+               directory load, no fault store per access                         (2-5 ms)
+uniformity     wave-uniform values found and kept scalar; scalar work once       (3-6 ms)
+native ops     16-bit maths, quad and wave intrinsics instead of emulation       (2-4 ms)
+waves          32 lanes only; no pipeline asks for 64
+```
+
+Parts that carry no performance (the DXBC/DXIL container reader, the GFX10 instruction decoder) may be
+vendored from the fork's GPL-3.0-or-later `victory-shader` with credit to its authors. The fork's
+translations are the **oracle**: every program is checked against them. A program is done when it is
+translated, validated, built as a pipeline, wave32, and matches the oracle.
+
+### 5. One upscaler interface, two backends (corrected: the title's FSR is found, not called)
+
+The previous premise was wrong. Console method 0x218 creates pipelines; it is not an upscale call. Run as
+a Series X, the title never loads the FidelityFX loader. Its FSR is ordinary compute dispatches (fork
+commit `ee0b94a3`). So the layer **recognises the title's temporal upscale pass by its bindings**: the
+dispatch that writes a colour target at an upscale ratio of the render-size textures it reads. Its inputs
+are what the passes before it read: colour, depth (2560x1440), motion vectors (2560x1440
+R16G16_FLOAT), and jitter and vector scale from its FSR constant block. That pass is replaced by:
 
 ```
 NVIDIA   → DLSS, through NVIDIA Streamline
-AMD      → FSR, through AMD's FidelityFX SDK, integrated so AMD's driver upgrades it to
-           FSR 4 where the card supports it (RDNA4; INT8 FSR 4.1 on RDNA3, RDNA2 announced)
-           and FSR 3.1 otherwise
+AMD      → FSR, through AMD's FidelityFX SDK (driver-upgradable to FSR 4), FSR 3.1 otherwise
 ```
 
+**The upscaler only pays if the internal resolution drops.** The title renders 2560x1440 at every
+`fsrQuality`, and resizing its targets from the layer made it assert at load (fork). Lowering the
+internal resolution is therefore its own task in Build 7. Our memory model helps here: render targets
+are tiles at console addresses, so a smaller PC target can sit behind the title's address without the
+title seeing its size change.
+
 The inputs are where upscalers break (wrong jitter sign, wrong motion-vector scale, missing reset), and
-they are identical for both. **FSR 3.1 runs on NVIDIA**, so the FSR backend and the inputs are verified on
-the dev card side by side with DLSS. That covers most of the AMD risk without an AMD card.
+they are identical for both. **FSR 3.1 runs on NVIDIA**, so both backends are verified on the dev card.
 
 ### 6. Every number comes from the frame line
 
@@ -121,14 +147,14 @@ fps · ms · draws · dropped · upload MB · upload ms · translation ms · out
 
 | # | build | done when |
 |---|---|---|
-| 0 | **the three answers before more code**, all on our own code: (a) dirty-chunk upload benchmark at the old layer's write volume; (b) per-draw translation microbenchmark; (c) the title's real GPU time from per-pass timestamps | (a) write-watch + 64 B diff + PCIe 3.0 upload of 83-115 MB/frame timed; (b) µs per draw vs the 7.4 µs budget; (c) a measured replacement for the soft ~45 ms |
+| 0 | **the three answers before more code**, all on our own code: (a) dirty-chunk upload benchmark ✅; (b) per-draw translation microbenchmark ✅; (c) the title's real GPU time (needs a frame: closes in Build 5) | (a) [runs/build0a-upload.md](runs/build0a-upload.md); (b) [runs/build0b-lists.md](runs/build0b-lists.md); (c) a measured replacement for the soft ~45 ms |
 | 1 | tiled VRAM at console addresses, page sharing, arena for untileable resources | a shader reads and writes tiles at console addresses; two resources at one address see each other |
 | 2 | write-watch + dirty 64-byte chunks on an async ring; GPU→CPU region | submit thread blocked ~0 ms; title-polled labels work |
 | 3 | PE loader + console runtime (threads, events, files, overlay FS) | the title's own code runs to its first render call |
-| 4 | shader recompiler RDNA2 → DXIL, wave32, census | every program translated or refused with a reason |
+| 4 | shader recompiler RDNA2 → DXIL: our core, wave32, census against the fork's oracle | 25,694 translated, validated, built, matching the oracle; 0 refused |
 | 5 | D3D12.X device, lists, descriptor heaps, present | a non-black frame from the title |
-| 6 | parallel list translation (+ cache if it pays) | per-draw CPU cost on the critical thread ≤ 7.4 µs |
-| 7 | upscaler interface + DLSS + FSR backends | DLSS and FSR 3.1 both correct on NVIDIA; internal resolution drops |
+| 6 | list translation on the title's threads (no cache) | per-draw CPU cost ≤ 1 µs on the real stream |
+| 7 | find the title's upscale pass by bindings; lower the internal resolution; DLSS + FSR backends | DLSS and FSR 3.1 both correct on NVIDIA; internal resolution below 2560x1440 |
 | 8 | frame pacing: submit-ahead, fences, no stalls | frame time ≈ the card's own work |
 | 9 | AMD validation by testers | frame line + crash log from AMD cards at/above minimum spec; 30 fps there |
 

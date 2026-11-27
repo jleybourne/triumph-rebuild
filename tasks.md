@@ -70,14 +70,16 @@ The fork's translations are the **oracle**. They are data, not code. For each pr
 behaviour against its output on the same inputs (the fork's `census` lists every program by hash). A
 program counts as done only when it passes that diff.
 
-**Owner decision needed:** the fork's `victory-shader` is **GPL-3.0-or-later**, which a GPL-3.0-only project
-may use with its authors credited (Marvisak and the VIctory contributors, plus this fork). The plan says
-"code is ours", so the default is a fresh recompiler. Reusing that crate and changing only what decision 4
-needs (wave32 lowering, offline library) would cut Build 4 from the largest piece of work to a port.
+**Decided (2026-11-27): the shader core is ours.** That covers the IR, the lowering and the passes, built around
+lane state as data, direct window addressing, uniformity, native ops and wave32, because that is where the
+fork's own analysis puts ~10-22 ms of GPU time. The container reader and GFX10 decoder may be vendored
+from the fork's GPL-3.0-or-later `victory-shader` with credit; they carry no performance. See `plan.md`
+decision 4.
 
 | state | work | closes when |
 |---|---|---|
-| todo | owner: fresh recompiler, or reuse the fork's GPL-3.0-or-later `victory-shader` with credit | decided, recorded in `plan.md` |
+| done | decide: our own core; vendor only the decode front end, with credit | recorded in `plan.md` decision 4 |
+| todo | the core's IR: lane state (EXEC) as data, live-mask analysis, uniformity analysis, direct window addressing | IR unit tests; divergence and reduction tests pass exactly (no approximate masked reductions) |
 | todo | census tool: every program in `shaders.rpf` by hash, with stage, size and wave64 use; the census line above | `census` prints 25,694 rows; progress.md shows the shader bar |
 | todo | RDNA2 (GFX10) decode: VALU, SALU, LDS, scratch, images, samplers, control flow | corpus decodes; byte-exact re-encode |
 | todo | wave64 → wave32 lowering for every vendor; reductions that cannot reconverge are named | the 7 wave-64 pipelines build; divergence tests pass |

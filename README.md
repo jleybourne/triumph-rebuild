@@ -55,8 +55,8 @@ Measured on one machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB RAM, PCIe 3.0, Win
 | **CPU → GPU upload** | ✅ 16-30 ms of worker time at the title's real shape, off the submit thread ([Build 0 a](runs/build0a-upload.md)) | inside a frame, overlapped |
 | **List translation** | ✅ 0.43 µs a draw with the driver, 1.9 ms a frame ([Build 0 b](runs/build0b-lists.md)) | ≤ 7.4 µs a draw |
 | **Descriptors** | ✅ 12,027 a frame from a dirty list: 2.0 ms | no scan |
-| **Shaders** | 0 / 25,694 (the fork translates all 25,694) | 25,694, wave32, 0 refused |
-| **Upscaler** | not started; the plan's premise needs correcting | DLSS on NVIDIA, FSR on AMD |
+| **Shaders** | 0 / 25,694; our own core, designed for GPU time (the fork translates all 25,694) | 25,694, wave32, 0 refused |
+| **Upscaler** | not started; plan corrected (the title's upscale pass is found by bindings) | DLSS on NVIDIA, FSR on AMD |
 | **Tests** | 26 green (`crates/uma` 21, `crates/xlist` 5) | |
 
 Every result is reported as **fps · ms · draws · dropped** together, with resolution and upscaler mode.
@@ -119,10 +119,10 @@ and replacing only the memory model has not been costed, and no title frame has 
 | 1 | **Tiled VRAM at console addresses**, sharing by address, arena | no copy-back, ever | ✅ closed |
 | 2 | **CPU-written memory on an async ring**; the GPU→CPU region | uploads off the submit thread; labels the title polls | 🔄 next |
 | 3 | **PE loader + console runtime** | the title's own code runs | ⏳ |
-| 4 | **Shaders**: 25,694 programs, RDNA2 → DXIL, wave32, offline | the full scene, no refusals | 📐 planned · owner decision open |
+| 4 | **Shaders**: 25,694 programs, our own core, wave32, offline | the full scene, no refusals, ~10-22 ms of GPU time back | 📐 decided |
 | 5 | **D3D12.X device, lists, descriptors, present** | a frame, and the frame line | ⏳ |
 | 6 | **List translation** on the title's threads | the CPU half of the frame | 🔄 core built |
-| 7 | **Upscaler**: DLSS + FSR behind one interface | fewer pixels | ⏳ · premise to correct |
+| 7 | **Upscaler**: find the title's pass, lower the internal resolution, DLSS + FSR | fewer pixels | ⏳ |
 | 8 | **Frame pacing** | frame time ≈ the card's own work: **30 fps on NVIDIA** | ⏳ |
 | 9 | **AMD validation by testers** | 30 fps on AMD | ⏳ |
 

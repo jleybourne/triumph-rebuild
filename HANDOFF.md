@@ -96,7 +96,7 @@ list calls       20,293 a frame = 243.2 ms, spread over the title's 5 recording 
 descriptor sync  203,127 slots examined to mirror 12,027 records
 ```
 
-## Fork findings that contradict plan.md (verify these first)
+## Fork findings that contradicted plan.md (decisions 3, 4 and 5 were corrected on 2026-11-27; check the corrections)
 
 1. **Decision 5's premise is wrong.** Method 0x218 creates compute pipelines from shader containers; it is
    not an upscale call with inputs. Run as a Series X, the title never loads the FidelityFX loader. Its FSR

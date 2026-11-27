@@ -21,10 +21,10 @@ second row and is the number that counts.
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 20 % | 1.6 | 64 B diff and gather written and tested (7 tests); method chosen by measurement; ring, fence and pool todo |
 | 3 | PE loader + console runtime | 15 | 0 % | 0 | — |
-| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 0 % | 0 | plan written (census, oracle, wave32); owner decision: fresh code or reuse the fork's GPL-3.0-or-later crate |
+| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 0 % | 0 | decided: our own core (lane state as data, direct addressing, uniformity, native ops); decode front end may be vendored with credit |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
-| 7 | upscaler: DLSS + FSR | 10 | 0 % | 0 | plan correction needed: method 0x218 is not the upscale call |
+| 7 | upscaler: DLSS + FSR | 10 | 0 % | 0 | plan corrected: the upscale pass is found by bindings; lowering the internal resolution is its own task |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
 | | **total** | **100** | | **19.4 ≈ 19 %** | |
@@ -58,8 +58,8 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 ## Open problems that could move the target
 
-1. **Plan decision 5 is built on a wrong premise.** The fork found that method 0x218 creates pipelines; the
-   title's FSR runs as ordinary compute dispatches that must be found by their bindings.
+1. ~~Plan decision 5 is built on a wrong premise.~~ **Corrected 2026-11-27:** the title's upscale pass is
+   recognised by its bindings and replaced; lowering the internal resolution is its own task.
 2. **No known way to lower the internal resolution.** The fork's attempt to resize the title's targets made
    it assert at load. If the upscaler cannot lower 2560x1440, it buys little GPU time.
 3. **The title's GPU time is probably above 45 ms** (the fork measured 43-63 ms, RT off). Above ~33 ms of
@@ -70,6 +70,25 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Decisions: our own shader core; plan decisions 3 and 5 corrected
+
+```
+[████░░░░░░░░░░░░░░░░]  19 %   (unchanged: decisions only)
+shaders     0 / 25,694
+measured fps   none yet
+```
+
+- **Decided: the shader core is ours**, chosen for performance. The fork's own analysis puts ~10-22 ms of
+  the title's GPU frame in its translator's core choices: lane state, per-access address lookups, scalar work
+  done per lane, emulated 16-bit and wave ops. Ours is designed around fixing those from the first line.
+  Only the decode front end (no performance in it) may be vendored, with credit.
+- **Corrected decision 3:** translate on the title's own threads, no list cache, ≤ 1 µs a draw (from
+  Build 0 (b)).
+- **Corrected decision 5:** the title's FSR is found by its bindings, not called through 0x218. DLSS/FSR
+  replace that pass. Lowering the internal resolution is its own Build 7 task; tiles at console addresses
+  may let a smaller target sit behind the title's address.
+- **Next:** Build 2.
 
 ### 2026-11-27 — Build 1: tiled VRAM at console addresses
 
