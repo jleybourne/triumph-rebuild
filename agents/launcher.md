@@ -9,7 +9,7 @@ egui/eframe 0.31 (glow). No network crate, no telemetry, no browser engine.
 
 | # | task | state | proof |
 |:--:|:--|:--|:--|
-| U1 | shell; every settings widget generated from `rebuild_config::REGISTRY`; profiles | ✅ | `model::tests::every_registry_entry_round_trips_through_the_ui_model`: all 18 entries edited through the UI model, saved, read back by `Config::parse` with **0 problems** |
+| U1 | shell; every settings widget generated from `rebuild_config::REGISTRY`; profiles | ✅ | `model::tests::every_registry_entry_round_trips_through_the_ui_model`: all 18 entries (30 in the registry now) edited through the UI model, saved, read back by `Config::parse` with **0 problems** |
 | U2 | first-run setup and system check (8 checks, each pass/fail/skipped with a one-line fix) | ✅ | 4 unit tests with fakes (each failure caught alone, with a fix line); no device while the lock exists. On this machine: **8 / 8 pass** |
 | U3 | `title.*` written into a copy of `settings.xml` in the launcher's overlay | ✅ | synthetic test and the real file (via `REBUILD_TITLE_SETTINGS`): **SHA-256 unchanged** before and after |
 | U4 | mods: list, enable, reorder (drag or buttons), conflicts (later wins, case-insensitive) through lane `vfs`'s `ModSet::conflicts` | ✅ | 3 unit tests |
@@ -22,7 +22,7 @@ egui/eframe 0.31 (glow). No network crate, no telemetry, no browser engine.
 ## Measured
 
 ```
-cargo test --release                 148 green in the workspace; launcher 34 (27 unit, 4 launch, 3 UI: smoke, pangram, icons)
+cargo test --release                 148 green in the workspace when this lane closed; launcher 34 then (27 unit, 4 launch, 3 UI: smoke, pangram, icons), 59 now
 rebuild-launcher --check             8 checks, 0 failed
   GPU              NVIDIA GeForce RTX 4070 Ti
   Driver           610.88 (32.0.16.1088)

@@ -1,8 +1,10 @@
 //! `REBUILD_WATCH=<address>`: a hardware write watchpoint (debug register 0, 8 bytes) on every thread of the
 //! run, for finding who stores a value the title later trips over. A watcher thread arms each thread as it
-//! appears (suspend, set Dr0/Dr7, resume); a vectored handler reports each write: the value now there, the
-//! writing instruction (the one before the reported address) and the unwound call chain. The first 40 writes
-//! are printed, writes of zero always marked. Diagnostic only: it suspends threads briefly and allocates.
+//! appears (suspend, set Dr0/Dr7, resume); a vectored handler reports each write: the value now there and the
+//! call chain unwound from the reported RIP, which is the instruction after the write (a data breakpoint traps
+//! once the write is done; the writer is the instruction before it, not decoded here). The watcher arms threads
+//! for the first 120 s of the run only; threads made later are not watched. The first 40 writes are printed,
+//! writes of zero always marked. Diagnostic only: it suspends threads briefly and allocates.
 
 #![cfg(windows)]
 

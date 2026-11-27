@@ -6,7 +6,10 @@ with the raw output beside it. Machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB, PC
 | | run | answer | raw |
 |:--:|:--|:--|:--|
 | ✅ | [Build 3 — closed: the title reaches its first render call](build3-reached.md) | entry point → `D3D12XboxCreateDevice` in 1.4 s; TLS slot 0 given to the title; exit 0, machine unaffected | [runtitle --run](build3-reached.txt) |
-| 🔄 | [Build 4 — our v0 DXIL against the oracle](build4-oraclediff.md) | interface diffs SigIn 1,231 → 35, SigOut 801 → 3, Bindings 525 → 4 of 2,834; self-check 0, every mutation caught | — |
+| 🔄 | [Build 4 — execution against the oracle](build4-exec.md) | 5,195 shaders bit-exact on WARP (lane `shaderexec`) | [exec csv](build4-exec.csv) |
+| 🔄 | [Build 4 — wave-wide programs](build4-wave64.md) | a wave mapping per program from its census class, console wave size and stage (`wavetest`, `wavecost`) | — |
+| 🔄 | [Build 4 — v1: structurized control flow](build4-v1.md) | 7,402 / 9,128 agnostic programs compile (81.1 %); v0 2,837 / 2,881 | — |
+| 🔄 | [Build 4 — our v0 DXIL against the oracle](build4-oraclediff.md) | interface diffs SigIn 1,231 → 0, SigOut 801 → 0, Bindings 525 → 0 of 2,834 (35 / 3 / 4 before S7, PR #21; 0 / 1 / 0 after it; the last fixed with PR #26); self-check 0, every mutation caught | — |
 | 🔄 | [Build 4 — compute programs](build4-cs.md) | 117 / 132 v0 compute programs translate and compile (`cs_6_6`) | [translate cs](build4-cs.txt) |
 | 🔄 | [Build 4 — vertex shaders](build4-vs.md) | 926 / 951 v0 vertex shaders translate and compile (`vs_6_6`) | [translate vs](build4-vs.txt) |
 | 🔄 | [Build 4 — pixel shaders translated with IO and resources](build4-ps.md) | 1,791 / 1,798 v0 pixel shaders translate and compile with DXC (`ps_6_6`, `-O3`) | [translate ps](build4-ps.txt) |

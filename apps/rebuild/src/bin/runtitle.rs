@@ -4,7 +4,7 @@
 //! REBUILD_GAME_DIR=<the title's folder> cargo run --release --bin runtitle            # load and bind only
 //! REBUILD_GAME_DIR=<the title's folder> cargo run --release --bin runtitle -- --run   # and run its startup
 //!
-//! The run stops at `D3D12XboxCreateDevice` (the first render call), or after `--seconds N` (default 60),
+//! The run goes on past `D3D12XboxCreateDevice` (the first render call) until `--seconds N` (default 60),
 //! and prints the discovery list: every unbuilt import the title called, in first-call order. The game
 //! folder is only read; prepared copies go to %LOCALAPPDATA%\triumph-rebuild\images.
 //!

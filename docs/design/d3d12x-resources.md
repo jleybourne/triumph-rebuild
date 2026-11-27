@@ -7,14 +7,14 @@ decisions 1, 5 and 9, `agents/shader.md` S7 item 5. The fork (`victory-gpu` `des
 
 ## 1. What the crate is
 
-The lead's device (`crates/runtime`) owns the device object and its 160-slot table. For 24 of those slots it calls
+The lead's device (`crates/runtime`) owns the device object and its 160-slot table. For 27 of those slots it calls
 into this crate; the crate hands the title its own objects (resources, heaps, descriptor heaps) and writes views
 into the title's descriptor memory. The list translator (`crates/xlist`, `ListHost`) asks it what a console
 resource, heap, CPU descriptor or address is on the host.
 
 ```text
 Resources                     one per device; create functions per slot, lookups for the translator
-thunks::device_slots()        extern "system" functions for the 24 slots, over thunks::install(Resources)
+thunks::device_slots()        extern "system" functions for the 27 slots, over thunks::install(Resources)
 Host<P>                       ListHost: resources and descriptors from Resources, pipelines from the lead's P
 Memory (trait, the lead's)    console address -> host memory (plan decision 1); HostMemory: an upload-heap stand-in
 HostDevice (trait)            where host views, heaps, the shadow table and host textures are made;

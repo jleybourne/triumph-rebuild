@@ -23,7 +23,8 @@
 | buffer loads, offset form | 613 (64.5 %) |
 | indexed buffer loads (shadow table) | 860 (90.4 %) |
 | depth-only parameter exports | 911 (95.8 %) |
-| 16-bit integer image addresses | **923 (97.1 %)** |
+| 16-bit integer image addresses | 923 (97.1 %) |
+| later re-run, the raw output beside this write-up ([build4-vs.txt](build4-vs.txt)) | **926 (97.4 %)** |
 
 Left (28): `v_add_nc_u32` / `v_lshlrev_b32` forms (8), typed buffer loads
 (4), `exp pos1` (3), `s_buffer_load` forms (6), single programs.

@@ -1,6 +1,6 @@
 # Lane `pipelines`: root signatures, the program library, and pipeline creation off the critical path (Build 4/5)
 
-Crate `crates/pipelines` (package `rebuild-pipelines`), binary `pipelines` (`build`, `load`, `check`, `async`).
+Crate `crates/pipelines` (package `rebuild-pipelines`), binary `pipelines` (`build`, `load`, `check`, `async`, and `ondemand`, added by lane `ondemand`: see `agents/ondemand.md`).
 Task 1 (PR #22, branch `agent/pipelines`): root signatures and the hash-keyed program library, below.
 Task 2 (this, branch `agent/pipelines-2`): asynchronous PSO creation, a persistent `ID3D12PipelineLibrary1` cache,
 prewarm from the last session, and the translator's sampler sidecars. Nothing vendored; nothing game-derived in git.

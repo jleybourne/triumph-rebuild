@@ -20,7 +20,7 @@ log. The lead reads it before every step and never edits it.
 
 ## 1. Before you start (every helper agent)
 
-Read, in this order: `README.md`, `plan.md` (the six decisions), `tasks.md` (your lane's build),
+Read, in this order: `README.md`, `plan.md` (the nine decisions), `tasks.md` (your lane's build),
 `progress.md`, then this file again. Then:
 
 ```powershell
@@ -318,7 +318,7 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 updated   2026-11-27 (late), second lead session: Build 3 closed (the title reaches D3D12XboxCreateDevice in 1.4 s);
           v0 shaders 2,834 / 2,881 compile; round 3 of the lanes running
 progress  59 % (progress.md) · shaders 0 / 25,694 counted (they count once the execution check matches the oracle)
-tests     473 green, 0 warnings: cargo test --release --no-fail-fast
+tests     515 green (12 ignored), 0 warnings: cargo test --release --no-fail-fast
 ```
 
 | build | state | where | proof |

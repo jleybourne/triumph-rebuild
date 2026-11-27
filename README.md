@@ -14,7 +14,7 @@ built around the right memory model from the first line, aiming at 30 frames a s
   <a href="https://www.rust-lang.org"><img alt="Rust" src="https://img.shields.io/badge/Rust-1.100-000000?logo=rust"></a>
   <a href="https://learn.microsoft.com/windows/win32/direct3d12/directx-12-programming-guide"><img alt="Direct3D 12" src="https://img.shields.io/badge/Direct3D-12-0078D4"></a>
   <a href="HANDOFF.md"><img alt="GPU" src="https://img.shields.io/badge/tested%20on-RTX%204070%20Ti-76B900?logo=nvidia"></a>
-  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-500%20green-brightgreen"></a>
+  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-515%20green-brightgreen"></a>
   <a href="LICENSE"><img alt="licence" src="https://img.shields.io/badge/licence-GPL--3.0--only-blue"></a>
 </p>
 
@@ -24,7 +24,7 @@ built around the right memory model from the first line, aiming at 30 frames a s
 <table align="center">
   <tr>
     <td align="center"><a href="progress.md"><b>📈 Progress</b></a><br><sub>done, not done, one entry per upload</sub></td>
-    <td align="center"><a href="plan.md"><b>🗺️ The plan</b></a><br><sub>six decisions, Builds 0-9</sub></td>
+    <td align="center"><a href="plan.md"><b>🗺️ The plan</b></a><br><sub>nine decisions, Builds 0-9</sub></td>
     <td align="center"><a href="tasks.md"><b>✅ Tasks</b></a><br><sub>every task and the number that closes it</sub></td>
     <td align="center"><a href="runs/README.md"><b>📊 Runs</b></a><br><sub>every measurement, raw output beside it</sub></td>
     <td align="center"><a href="HANDOFF.md"><b>🔍 Review brief</b></a><br><sub>for an independent reviewer</sub></td>
@@ -56,9 +56,9 @@ Measured on one machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB RAM, PCIe 3.0, Win
 | **List translation** | ✅ 0.43 µs a draw with the driver, 1.9 ms a frame ([Build 0 b](runs/build0b-lists.md)) | ≤ 7.4 µs a draw |
 | **Descriptors** | ✅ 12,027 a frame from a dirty list: 2.0 ms | no scan |
 | **Shaders** | 0 / 25,694; core proven on the card: IR → HLSL → DXC → GPU exact, wave64 on wave32 exact ([run](runs/build4-sirtest.md)) | 25,694, wave32, 0 refused |
-| **Launcher** | settings registry built (18 options, validated); desktop launcher in progress ([design](docs/design/launcher.md)) | launcher, mods, profiles, in-game menu |
+| **Launcher** | settings registry built (30 options, validated); desktop launcher in progress ([design](docs/design/launcher.md)) | launcher, mods, profiles, in-game menu |
 | **Upscaler** | ✅ DLSS runs standalone through Streamline on a synthetic scene; FSR next; wiring to the title in Build 7 | DLSS on NVIDIA, FSR on AMD |
-| **Tests** | 97 green (`uma` 24, `xlist` 5, `sir` 13, `config` 6, `loader` 14, `input` 16, `vfs` 18, `runtime` 14, `upscale` 11) | |
+| **Tests** | 515 green, 12 ignored (`launcher` 59, `runtime` 50, `gdk` 46, `pipelines` 45, `shader` 42, `sir` 36, `d3d12x` 28, `uma` 24, `dstorage` 22, `vfs` 19, `xlist` 19, `audio` 18, `loader` 18, `input` 16, `config` 15, `xg` 15, `cardlock` 11, `upscale` 11, `winfiles` 11, `ffx` 9, `rebuild` 1) | |
 
 Every result is reported as **fps · ms · draws · dropped** together, with resolution and upscaler mode.
 A faster frame that draws less of the scene is not a win.
@@ -181,7 +181,7 @@ Full status with outcomes: **[tasks](tasks.md)** · **[progress](progress.md)**.
 Requirements: Windows 10/11 x64, a Direct3D 12 GPU with tiled resources tier 2 or higher, and Rust.
 
 ```powershell
-cargo test --release                                  # 121 tests, no GPU or game data needed
+cargo test --release                                  # 515 tests, no game data needed (GPU tests use WARP or skip)
 cargo run --release --bin gputest                     # the GPU writes, the CPU reads, no copy
 cargo run --release --bin gputest -- --bare           # control: never blame the machine
 cargo run --release --bin gputest -- --tiled          # Build 1: tiles, console addresses, sharing
@@ -204,13 +204,25 @@ crates/uma        the address space: windows, 64 KiB pages, placement, sharing, 
                   tiles (reserved windows on 64 MiB heaps), the arena, the 64 B chunk diff and upload
 crates/xlist      list calls as records; the lock-free translator into D3D12
 crates/sir        the shader core: IR, uniformity, wave-size classifier, lane doubling (EXEC as data)
+crates/shader     the shader front end: the title's archive, containers, GFX10 decode and re-encode
+crates/pipelines  pipelines built into a hash-keyed library at start; translation, PSO creation, the pool
+crates/d3d12x     the D3D12.X resource, heap, descriptor heap and view objects
+crates/xg         the console's texture layout calculator (xg_xs.dll)
 crates/config     every option, declared once: the launcher, the layer and the in-game menu read it
 crates/loader     PE32+ parser, map at base, bind through a resolver; the title's import census (apps/rebuild/src/bin/imports.rs)
 crates/vfs        console paths → host: read-only package, write overlay, mods as ordered layers
+crates/winfiles   the host's path-taking file functions over the console drives (crates/vfs)
+crates/dstorage   the console's DirectStorage, served on the host
+crates/gdk        the GDK runtime behind xgameruntime.dll
+crates/audio      the console's audio hardware, on the host
 crates/input      XInput pads, keyboard stand-in pad, in-game menu input isolation
 crates/runtime    what the title's imports bind to: host, override or console-only; xmem; physical pages
 crates/upscale    one upscaler interface; DLSS through Streamline (FSR next); a synthetic test scene
-apps/rebuild      the launcher, gputest, uploadbench, listbench
+crates/ffx        the FidelityFX API the title imports, on the host upscalers
+crates/cardlock   the helper lanes' card lock (agents\CARD): owner pid, stale locks taken over
+apps/launcher     the desktop launcher (settings, profiles, runs, mods, diagnostics)
+apps/rebuild      rebuild.exe (the layer; reads --config, does not run the title yet) and the proof and
+                  tool bins: runtitle (the title runner), gputest, uploadbench, listbench, sirtest, ...
 runs/             every measurement: a write-up and the raw output beside it
 ```
 </details>
@@ -230,7 +242,7 @@ runs/             every measurement: a write-up and the raw output beside it
 |:--:|:--|:--|
 | 🔬 | [Deep dive](deepdive.md) | the whole repository in depth: a title run end to end, every crate and bin, memory, GPU, shaders, env vars, gaps |
 | 📈 | [Progress](progress.md) | done / not done, % by build step, the shader bar, one entry per upload |
-| 🗺️ | [Plan](plan.md) | the six decisions, the build order, what we refuse to build |
+| 🗺️ | [Plan](plan.md) | the nine decisions, the build order, what we refuse to build |
 | ✅ | [Tasks](tasks.md) | every task with the number that closes it; known traps from the fork |
 | 📊 | [Runs](runs/README.md) | Build 0 (a) upload, Build 0 (b) translation, Build 1 tiles |
 | 🔍 | [Handoff](HANDOFF.md) · [Review prompt](REVIEW-PROMPT.md) | the brief for an independent review |

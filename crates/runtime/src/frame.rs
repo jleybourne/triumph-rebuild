@@ -2,7 +2,7 @@
 //! simple clock until Build 8 paces for real.
 //!
 //! - 0x270 `SetFrameIntervalX(output, interval µs (0 = 1/60 s), period, flags)`: the title sets 33.333 ms.
-//! - 0x278 `ScheduleFrameEventX(kind, offset, *list, flags)`: recorded.
+//! - 0x278 `ScheduleFrameEventX(kind, offset, *list, flags)`: counted only (no event is scheduled).
 //! - 0x280 `WaitFrameEventX(kind, timeout ms, *list, flags, *token)`: waits for the next frame origin on the
 //!   clock (origins every interval from the first wait); `S_FALSE` on timeout, with the token written when flag 2
 //!   asks for it.

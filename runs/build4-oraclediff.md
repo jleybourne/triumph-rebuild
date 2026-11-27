@@ -25,7 +25,7 @@ the oracle against itself is still **0 diffs**, and every injected mutation is s
 25,060 / 25,060, dropped output element 22,551 / 22,551, removed wave op 18,896 / 18,896).
 
 **Update (lane shader S7, PR #21):** all 39 programs classified. 4 oracle files were swapped in two pairs (the fork's
-cache entries share creation timestamps; S5 paired them by time): corrected in `D:ictory-dataebuild-oracle`
+cache entries share creation timestamps; S5 paired them by time): corrected in `D:\victory-data\rebuild-oracle`
 (originals kept in `oracle-swapped-backup`), self-check still 0. Three more named reasons, each interface-neutral:
 vertex inputs the oracle declares but never reads (22), `SV_Barycentrics` the oracle seeds and drops (12), the
 fork's own descriptor-kind table at `t255, space1` (1). **Interface diffs now: SigIn 0, SigOut 1, Bindings 0** —

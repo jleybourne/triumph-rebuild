@@ -15,7 +15,7 @@ bytes: every test and the benchmark make their own files. Reference read for des
 | D5b | our own BCPack decoder, exact against the fork's | ✅ on synthetic streams with the real tables; the title's own requests: **for the lead**, item 6 | `bcpack/`; `d5b_*` (5 tests); D5 below |
 | D5c | the decode cache | ✅ | `cache.rs`; `d5c_*` (4 tests), `d5_engine_requests_decode_through_the_decoder` |
 
-`cargo test --release -p rebuild-dstorage`: **21 tests green** (10 before D5), 0 warnings. With
+`cargo test --release -p rebuild-dstorage`: **22 tests green** (21 when this lane closed; 10 before D5), 0 warnings. With
 `REBUILD_BCPACK_TABLES` set, `d5b_output_equals_the_forks_on_the_real_tables` also checks the real tables; without
 it, it skips.
 
@@ -44,7 +44,8 @@ it, it skips.
   - **Destinations**: an address is written in place; a page destination (bit 21) goes through the `Pages` trait
     (64 KiB frames: the lead binds it over `runtime::physical`). Without one, page reads fail `E_NOTIMPL`.
   - **BCPack** (bits 1-4): through the `BcPack` trait (zlib first into `intermediate_size`, then BCPack: the
-    console's order). No decoder is installed, so these requests fail `E_NOTIMPL` and are counted
+    console's order). The runtime installs our decoder when the tables are found (`Decoder::from_config`,
+    `runtime/src/drives.rs`); without the tables these requests fail `E_NOTIMPL` and are counted
     (`Stats::bcpack_refused`).
 - **`zlib.rs`**: one inflate state per worker, reset per request, one `Finish` call straight into the destination.
 - **`bin/dsbench.rs`**: the D3 numbers.

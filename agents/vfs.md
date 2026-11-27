@@ -49,7 +49,8 @@ wrong           0 cold, 0 warm
 - Copy-up copies the whole file. The package's writable targets are small (settings, saves); a range-level
   copy-up was not worth its complexity. Measure again if the title writes over a large package file.
 - An overlay file's length is read from the host only when asked (`resolve`, `enumerate`): handles can change it.
-- `T:` is overlay-only and **persists** like storage. Whether `T:` is wiped at start is the runtime's call (below).
+- `T:` is overlay-only. The crate keeps it like storage; the runtime empties it at every start, as the console does
+  (`crates/runtime/src/drives.rs`).
 
 ## Next (not in this lane)
 
@@ -68,7 +69,8 @@ wrong           0 cold, 0 warm
 2. **Runtime wiring (Build 3, second half):** mount `G:` over the title's folder (`VfsBuilder::package`), `T:`
    and the storage drive with `VfsBuilder::writable`; the storage path the title gets is the root of its drive
    (`S:\` or any free letter), since the fork found the title keeps only what precedes the last `:\`. Decide
-   whether `T:` starts empty each run (the console clears it; the fork kept it under its data folder).
+   whether `T:` starts empty each run (the console clears it; the fork kept it under its data folder). Decided: the
+   runtime empties it at every start (`crates/runtime/src/drives.rs`).
 3. `tasks.md` Build 3 "files: console paths → game folder, write overlay, never modify the dump" can point at this
    crate once merged; its closing check ("game folder hash unchanged") is `v2_game_folder_unchanged` with
    `REBUILD_GAME_DIR` set.

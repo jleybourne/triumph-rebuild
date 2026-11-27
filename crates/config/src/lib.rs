@@ -154,6 +154,8 @@ pub static REGISTRY: &[Setting] = &[
     s("diagnostics.frame_log", "Frame line log", "Append the frame line once a second to a file the launcher reads.", Kind::Bool, Default::Bool(true), Live, Stable),
     s("diagnostics.capture_dir", "Capture folder", "Where frame captures go. Empty = off.", Kind::Path, Default::Path(""), Live, Stable),
     s("diagnostics.d3d12_debug", "D3D12 debug layer", "Names why a pipeline or command is refused. Slow: never for measuring.", Kind::Bool, Default::Bool(false), Restart, Experimental),
+    // The "Empty = REBUILD_*" fallbacks below describe the layer once it reads this file (C2). Today the layer
+    // reads no setting, and only `upscaletest` reads REBUILD_DLSS_DLL / _STREAMLINE_DIR / _FIDELITYFX_DIR.
     s("upscaler.dlss_dll", "DLSS DLL", "nvngx_dlss.dll, supplied by you; never shipped or committed. Empty = REBUILD_DLSS_DLL.", Kind::Path, Default::Path(""), Restart, Stable),
     s("upscaler.streamline_dir", "Streamline folder", "NVIDIA Streamline's runtime DLLs. Empty = REBUILD_STREAMLINE_DIR.", Kind::Path, Default::Path(""), Restart, Stable),
     s("upscaler.fidelityfx_dir", "FidelityFX folder", "AMD FidelityFX SDK runtime DLLs (FSR). Empty = REBUILD_FIDELITYFX_DIR.", Kind::Path, Default::Path(""), Restart, Stable),
@@ -168,6 +170,14 @@ pub static REGISTRY: &[Setting] = &[
     s("launcher.theme", "Launcher theme", "dark or light, for the launcher only (the title is not affected). Also switched from the top bar.", Kind::Choice { options: &["dark", "light"] }, Default::Choice("dark"), Live, Stable),
     s("menu.key", "In-game menu key", "Toggles the in-game menu. While it is open the title sees no input.", Kind::Choice { options: &["F10", "F11", "F12", "Insert", "Home"] }, Default::Choice("F10"), Restart, Stable),
 ];
+
+/// An `upscaler.mode` choice in the upscaler's spelling (see [`Config::upscaler_mode`]).
+pub fn upscaler_mode_name(choice: &str) -> String {
+    match choice {
+        "dlaa" => "native-aa".into(),
+        c => c.replace('_', "-"),
+    }
+}
 
 pub fn find(key: &str) -> Option<&'static Setting> {
     REGISTRY.iter().find(|s| s.key == key)
@@ -224,6 +234,12 @@ impl Config {
 
     pub fn choice(&self, key: &str) -> String {
         self.get(key).to_string()
+    }
+
+    /// `upscaler.mode` in the upscaler's own spelling (`rebuild_upscale::Mode::parse`): `dlaa` is `native-aa`,
+    /// `ultra_performance` is `ultra-performance`.
+    pub fn upscaler_mode(&self) -> String {
+        upscaler_mode_name(&self.choice("upscaler.mode"))
     }
 
     /// Set a value, checked against the registry.
@@ -358,6 +374,18 @@ mod tests {
             assert!(s.key.contains('.'), "{} has no group", s.key);
             s.check(&s.default.value()).unwrap_or_else(|e| panic!("default of {}: {e}", s.key));
         }
+    }
+
+    #[test]
+    fn every_upscaler_mode_choice_parses_in_the_upscaler() {
+        let Kind::Choice { options } = find("upscaler.mode").unwrap().kind else { panic!("upscaler.mode is a choice") };
+        for o in options {
+            let name = upscaler_mode_name(o);
+            assert!(rebuild_upscale::Mode::parse(&name).is_some(), "{o} -> {name}");
+        }
+        let mut c = Config::parse("").unwrap();
+        c.set("upscaler.mode", Value::Choice("dlaa".into())).unwrap();
+        assert_eq!(c.upscaler_mode(), "native-aa");
     }
 
     #[test]

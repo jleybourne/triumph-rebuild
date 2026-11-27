@@ -73,7 +73,7 @@ the transform is not computed and reverb returns are dry (same as the fork).
 ## Measured
 
 ```
-tests          14 green: heap 4, xma 2, acp 4 (layouts, messages, XMA ring, loops + input switch), xapu 2, xdsp 1, ring 1
+tests          14 green when measured (18 now, see the header): heap 4, xma 2, acp 4 (layouts, messages, XMA ring, loops + input switch), xapu 2, xdsp 1, ring 1
 A4 tone        0.5 s, 440 Hz, amplitude 0.05, 48 kHz stereo: 24,000 frames pushed in 64 pushes, worst push 4.4 us;
                26,400 frames played over 56 periods (device buffer 1,056 frames); device opened in 20 ms
 title calls    a4_title_calls_never_block_1ms, 3 runs (median / p99 / worst max):

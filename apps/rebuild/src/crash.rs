@@ -1,10 +1,12 @@
-//! Crash reports for title runs: where a fault happened, as image+rva, without touching the heap.
+//! Crash reports for title runs: where a fault happened, as image+rva.
 //!
 //! A vectored handler notes the first few first-chance access violations (the title may handle some itself),
 //! and the unhandled-exception filter reports the one that ends the run. Each report: the exception code,
-//! the faulting instruction as image+rva, the address it touched, and the stack words that point into the
-//! title's images (a heuristic call stack: return addresses are among them). Everything is formatted into a
-//! fixed stack buffer and written with one WriteFile, so a crash inside the allocator cannot deadlock it.
+//! the faulting instruction as image+rva, the address it touched, and the call chain from a real unwind of a
+//! copy of the context (`RtlVirtualUnwind` over the registered unwind tables; a leaf's return address is read
+//! from `[rsp]`). The facts are formatted into a fixed stack buffer and written first, with one WriteFile. Host
+//! frames are then named by function from DbgHelp, which is loaded at the first crash and allocates; handlers
+//! that may run inside the host heap (a watchpoint hit) skip it.
 
 #![cfg(windows)]
 
