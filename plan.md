@@ -167,6 +167,15 @@ result is cached on disk** (outside git). Later loads are plain reads at disk sp
 GPU-owned tiles of decision 1. The ~78 KB format tables are loaded at run time from a file outside git. A GPU
 decoder for cache misses is built only if the frame line shows first-load stutter.
 
+### 9. A descriptor shadow table for what host views do not carry (2026-11-27)
+
+Shaders reach resources through heap indices (decision 5), so they cannot read the console descriptor's own
+words. Indexed buffer loads need two of them: the stride and the record count (`buffer_load_* idxen`: address =
+index x stride + offset, and an index at or past the count reads 0). **The runtime keeps a shadow table beside the
+heap: 16 bytes per heap index (stride, records, 0, 0), written when it builds the host view from the console
+descriptor, read by shaders at `register(t0, space101)`.** One 8-byte load per indexed access, exact console
+semantics, no per-stride shader variants. Build 5 writes it.
+
 ## Order of work — each step ends in a number
 
 | # | build | done when |

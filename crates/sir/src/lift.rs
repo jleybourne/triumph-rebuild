@@ -43,7 +43,13 @@ pub struct Lifted {
     /// Immediate samplers: the console sampler words the code builds from constants, in register order
     /// (`sir_imm{k} : register(s{k}, space100)`); [`crate::sampler::decode`] gives the host's static sampler.
     pub immediate_samplers: Vec<[u32; 4]>,
+    /// The descriptor shadow table is read (`sir_shadow`, see [`SHADOW_SPACE`]).
+    pub uses_shadow: bool,
 }
+
+/// The register space of the descriptor shadow table: per heap index, 16 bytes the runtime writes from the
+/// console descriptor (stride, number of records, 0, 0), for what the host view does not carry.
+pub const SHADOW_SPACE: u32 = 101;
 
 /// The register space of immediate samplers (static samplers in the host root signature).
 pub const IMMEDIATE_SAMPLER_SPACE: u32 = 100;
@@ -362,6 +368,7 @@ impl Lifter<'_> {
             Encoding::Vintrp => self.interp(name, &d),
             Encoding::Smem => self.smem(name, &d),
             Encoding::Mimg => self.mimg(name, &d),
+            Encoding::Mubuf => self.mubuf(name, &d),
             Encoding::Exp => self.export(&d),
             Encoding::Vop3p => self.vop3p(name, &d),
             Encoding::Ds if name == "ds_swizzle_b32" => self.swizzle(&d),

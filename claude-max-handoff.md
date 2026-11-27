@@ -21,7 +21,7 @@ title       loads and runs its entry; the startup "wait" was likely our graphics
 runtime     GDK runtime (xgameruntime.dll) ours via LoadLibraryExA override; files 32 + CRT 13 bound
 lanes       round 1 and round 2 all merged (#1-#18); no lane running
 tests       311 green (one files F5 host-comparison test 46 vs 45 since the reboot: for the files lane)
-translate   `translate ps` over D:\victory-data\shaders.rpf: 1,788 / 1,798 v0 pixel shaders compile (99.4 %);
+translate   `translate ps` over D:\victory-data\shaders.rpf: 1,790 / 1,798 v0 pixel and 911 / 951 v0 vertex shaders compile;
             immediate samplers decode to static samplers (sir::sampler, space100: Build 5 must add them to
             the root signature); next: ten single forms, then vertex shaders (s_swappc fetch, exp pos/param)
 ```
@@ -136,8 +136,7 @@ The owner's rules, in their own words:
 
 ## In flight (2026-11-27, usage limit)
 
-- Vertex shaders: `sir` has `Stage::Vs(VsStage)`, the fetch call (`s_swappc_b64` -> attribute loads), `s_getpc_b64`,
-  VS exports (pos0, param n; fp16 outputs refused with a reason) and `vs_program` (v0 = SV_VertexID, v3 = SV_InstanceID,
-  per the fork's io.rs). Builds; NOT yet wired into `translate` (add a `vs` mode like `ps_report`, compile `vs_6_6`).
+- Vertex shaders: `translate vs` wired; 911 / 951 compile (runs/build4-vs.md). Descriptor shadow table (plan
+  decision 9) must be written by Build 5's descriptor code.
 - Owner request: user-set RAM / VRAM / CPU-core limits for testing (tasks.md, end).
 - The title has not been run since the kernel-spin fix (2a2af01); ask the owner before any run.

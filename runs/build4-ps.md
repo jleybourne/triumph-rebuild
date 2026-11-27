@@ -51,6 +51,9 @@ ops; the primitive mask SGPR reads 0 (the host interpolates); `s_brev_b32` and `
 **Update, same day: a16 and swizzles.** 16-bit sampling addresses, `ds_swizzle_b32`, and order-correct
 constant tracking. **1,782 of 1,798 (99.1 %).** Left: cube maps (6) and ten single forms.
 
+**Update, same day: buffer loads.** Untyped and indexed buffer loads (the latter through the descriptor shadow
+table, plan decision 9). **1,790 of 1,798 (99.6 %).**
+
 **Not yet proven correct:** these compile, but a program counts toward the 25,694 only when the execution
 check matches the oracle's output (tasks.md, Build 4). Next: resource tracing (descriptor loads from root
 parameters, decision 5), which unblocks 1,364 of the remaining 1,371.

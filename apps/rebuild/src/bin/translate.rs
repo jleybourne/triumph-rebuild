@@ -87,7 +87,8 @@ fn main() {
     match mode.as_str() {
         "coverage" => coverage(&picked.iter().map(|(s, o, _, _)| (*s, o.clone())).collect::<Vec<_>>()),
         "lift" => lift_report(&picked),
-        "ps" => ps_report(&walk),
+        "ps" => ps_report(&walk, false),
+        "vs" => ps_report(&walk, true),
         m => {
             eprintln!("translate: unknown mode {m}");
             std::process::exit(2);
@@ -172,7 +173,8 @@ fn dxc() -> Option<std::path::PathBuf> {
 }
 
 /// The v0 pixel shaders: lifted with IO, assembled, compiled.
-fn ps_report(walk: &census::Walk) {
+/// `ps` (pixel shaders) or `vs` (vertex shaders that run as the hardware VS): lift with IO, assemble, compile.
+fn ps_report(walk: &census::Walk, vs: bool) {
     use rebuild_shader::native::StageIo;
     use rebuild_shader::signature;
     let dxc = dxc().expect("dxc.exe (Windows SDK) or REBUILD_DXC");
@@ -190,7 +192,14 @@ fn ps_report(walk: &census::Walk) {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(p) = walk.programs.get(i) else { break };
-                    let StageIo::Ps { inputs, input_addr, .. } = &p.native.io else { continue };
+                    let io_ok = match &p.native.io {
+                        StageIo::Ps { .. } => !vs,
+                        StageIo::Vs { .. } => vs && p.native.stage == rebuild_shader::native::HwStage::Vs,
+                        _ => false,
+                    };
+                    if !io_ok {
+                        continue;
+                    }
                     let row = features::analyse(&p.native, &mut f);
                     if row.blocks != 1 || row.class() != WaveClass::Agnostic || row.decode_error.is_some() {
                         continue;
@@ -201,15 +210,28 @@ fn ps_report(walk: &census::Walk) {
                         bump("patched code does not decode".into());
                         continue;
                     };
-                    let stage = rebuild_sir::lift::PsStage { inputs, input_addr: *input_addr };
                     let bind = rebuild_sir::lift::Bindings { hw: p.native.stage, layout: &p.native.layout, used: &p.native.used };
-                    let l = rebuild_sir::lift::lift_stage(&insts, rebuild_sir::lift::Stage::Ps(stage), Some(bind));
-                    let stage = rebuild_sir::lift::PsStage { inputs, input_addr: *input_addr };
                     let (Ok(isg1), Ok(osg1)) = (signature::parse(&p.isg1), signature::parse(&p.osg1)) else {
                         bump("signature unreadable".into());
                         continue;
                     };
-                    let src = match rebuild_sir::lift::ps_program(&l, &stage, Some(&bind), &isg1, &osg1) {
+                    let (l, result) = match &p.native.io {
+                        StageIo::Ps { inputs, input_addr, .. } => {
+                            let stage = || rebuild_sir::lift::PsStage { inputs, input_addr: *input_addr };
+                            let l = rebuild_sir::lift::lift_stage(&insts, rebuild_sir::lift::Stage::Ps(stage()), Some(bind));
+                            let r = rebuild_sir::lift::ps_program(&l, &stage(), Some(&bind), &isg1, &osg1);
+                            (l, r)
+                        }
+                        StageIo::Vs { inputs, outputs } => {
+                            let stage = || rebuild_sir::lift::VsStage { inputs, outputs };
+                            let l = rebuild_sir::lift::lift_stage(&insts, rebuild_sir::lift::Stage::Vs(stage()), Some(bind));
+                            let r = rebuild_sir::lift::vs_program(&l, &stage(), Some(&bind), &isg1, &osg1);
+                            (l, r)
+                        }
+                        _ => unreachable!(),
+                    };
+                    let inputs = &p.native.io;
+                    let src = match result {
                         Ok(s) => s,
                         Err(e) => {
                             // REBUILD_TRANSLATE_DUMP=<text>: write refused programs whose reason contains it
@@ -233,11 +255,12 @@ fn ps_report(walk: &census::Walk) {
                             continue;
                         }
                     };
-                    let hl = out.join(format!("{}.ps.hlsl", p.hash));
-                    let obj = out.join(format!("{}.ps.dxil", p.hash));
+                    let ext = if vs { "vs" } else { "ps" };
+                    let hl = out.join(format!("{}.{ext}.hlsl", p.hash));
+                    let obj = out.join(format!("{}.{ext}.dxil", p.hash));
                     std::fs::write(&hl, &src).expect("write hlsl");
                     let r = std::process::Command::new(&dxc)
-                        .args(["-T", "ps_6_6", "-E", "main", "-O3", "-enable-16bit-types", "-Fo"])
+                        .args(["-T", if vs { "vs_6_6" } else { "ps_6_6" }, "-E", "main", "-O3", "-enable-16bit-types", "-Fo"])
                         .arg(&obj)
                         .arg(&hl)
                         .output()
@@ -255,7 +278,11 @@ fn ps_report(walk: &census::Walk) {
         }
     });
     let (n, ok) = (total.load(Ordering::Relaxed), compiled.load(Ordering::Relaxed));
-    println!("translate ps — v0 pixel shaders, lifted with IO and compiled by DXC (ps_6_6, -O3)");
+    if vs {
+        println!("translate vs — v0 vertex shaders (hardware VS), lifted with IO and compiled by DXC (vs_6_6, -O3)");
+    } else {
+        println!("translate ps — v0 pixel shaders, lifted with IO and compiled by DXC (ps_6_6, -O3)");
+    }
     println!("programs  {n} · compiled {ok} ({:.1} %)", 100.0 * ok as f64 / n.max(1) as f64);
     let mut v: Vec<_> = tally.into_inner().unwrap().into_iter().collect();
     v.sort_by(|a, b| b.1.cmp(&a.1));

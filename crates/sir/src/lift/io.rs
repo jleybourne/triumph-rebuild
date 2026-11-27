@@ -240,6 +240,10 @@ impl Lifter<'_> {
                 self.why = Some(format!("export target {target}"));
                 return None;
             }
+            if target >= 32 && vs.outputs.is_empty() {
+                // no output rows at all (a depth-only pass): nothing downstream reads the parameter
+                return Some(());
+            }
             if target >= 32 {
                 let Some(o) = vs.outputs.iter().find(|o| o.param == target - 32).copied() else {
                     self.why = Some("a parameter no output names".into());
@@ -336,6 +340,9 @@ pub fn ps_program(l: &Lifted, ps: &PsStage, bind: Option<&super::Bindings>, isg1
     let mut s = String::from(super::PRELUDE);
     for k in 0..l.immediate_samplers.len() {
         let _ = writeln!(s, "SamplerState sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
+    }
+    if l.uses_shadow {
+        let _ = writeln!(s, "ByteAddressBuffer sir_shadow : register(t0, space{});", super::SHADOW_SPACE);
     }
     if !user_init.is_empty() {
         s.push_str("cbuffer SirUserData : register(b0, space0) { uint4 sir_ud[16]; };\n");
@@ -437,6 +444,9 @@ pub fn vs_program(l: &Lifted, vs: &VsStage, bind: Option<&super::Bindings>, isg1
     let mut s = String::from(super::PRELUDE);
     for k in 0..l.immediate_samplers.len() {
         let _ = writeln!(s, "SamplerState sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
+    }
+    if l.uses_shadow {
+        let _ = writeln!(s, "ByteAddressBuffer sir_shadow : register(t0, space{});", super::SHADOW_SPACE);
     }
     if !user_init.is_empty() {
         s.push_str("cbuffer SirUserData : register(b0, space0) { uint4 sir_ud[16]; };\n");

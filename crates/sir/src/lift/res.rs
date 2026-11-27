@@ -192,6 +192,61 @@ impl Lifter<'_> {
         Some(())
     }
 
+    /// Untyped buffer loads (`buffer_load_dword`, `x2`, `x3`, `x4`) through a heap descriptor, as
+    /// `ByteAddressBuffer` loads at `vaddr (offen) + offset + soffset`. Out of range reads 0 on both. The
+    /// indexed form (`idxen`: index times the descriptor's stride) is refused until the stride is known.
+    pub(super) fn mubuf(&mut self, name: &str, d: &Decoded) -> Option<()> {
+        let n: u16 = match name {
+            "buffer_load_dword" => 1,
+            "buffer_load_dwordx2" => 2,
+            "buffer_load_dwordx3" => 3,
+            "buffer_load_dwordx4" => 4,
+            _ => return None,
+        };
+        if d.get("lds")? == 1 || d.get("tfe")? == 1 {
+            self.why = Some("lds or tfe".into());
+            return None;
+        }
+        let rsrc = (d.get("srsrc")? * 4) as u8;
+        let Some(res) = self.descs.get(&rsrc).copied() else {
+            self.why = Some("descriptor not traced".into());
+            return None;
+        };
+        if res.heap != Heap::Resource {
+            self.why = Some("not a resource descriptor".into());
+            return None;
+        }
+        let soff = self.usrc(d, "soffset")?;
+        let (idxen, offen) = (d.get("idxen")? == 1, d.get("offen")? == 1);
+        let vaddr = d.get("vaddr")? as u16;
+        let mut addr = format!("{}u + {soff}", d.get("offset")?);
+        // with idxen, vaddr is the index and vaddr + 1 the offset (when offen)
+        if offen {
+            let v = vaddr + u16::from(idxen);
+            self.out.vgprs.insert(v);
+            addr = format!("v{v} + {addr}");
+        }
+        let mut guard = String::new();
+        if idxen {
+            // the stride and record count are the console descriptor's: from the shadow table
+            self.out.vgprs.insert(vaddr);
+            self.out.uses_shadow = true;
+            addr = format!("v{vaddr} * sh.x + {addr}");
+            guard = format!(" if (v{vaddr} >= sh.y) r = 0;");
+        }
+        let vdata = d.get("vdata")? as u16;
+        let load = ["Load", "Load2", "Load3", "Load4"][n as usize - 1];
+        let ty = if n == 1 { String::new() } else { n.to_string() };
+        let sh = if idxen { format!(" uint2 sh = sir_shadow.Load2(s{rsrc} * 16u);") } else { String::new() };
+        let _ = writeln!(self.out.body, "    {{ ByteAddressBuffer b = ResourceDescriptorHeap[s{rsrc}];{sh} uint{ty} r = b.{load}({addr});{guard}");
+        for k in 0..n {
+            let e = if n == 1 { "r".to_string() } else { format!("r.{}", ["x", "y", "z", "w"][k as usize]) };
+            self.vwrite_raw(vdata + k, e);
+        }
+        self.out.body.push_str("    }\n");
+        Some(())
+    }
+
     /// Image sampling, loads and stores (2D, 2D array, 3D, 1D) through heap descriptors.
     pub(super) fn mimg(&mut self, name: &str, d: &Decoded) -> Option<()> {
         // unorm only changes how a sampler filters: loads, stores and atomics address texels by integer anyway

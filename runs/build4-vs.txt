@@ -1,0 +1,19 @@
+translate vs — v0 vertex shaders (hardware VS), lifted with IO and compiled by DXC (vs_6_6, -O3)
+programs  951 · compiled 911 (95.8 %)
+
+  not compiled, by first reason          programs
+  untranslated: image_load (16-bit address)     12
+  untranslated: v_add_nc_u32                    4
+  untranslated: v_lshlrev_b32                   4
+  untranslated: buffer_load_format_x            3
+  untranslated: exp (export target 13)          3
+  untranslated: s_buffer_load_dword             3
+  untranslated: s_buffer_load_dwordx2           3
+  untranslated: buffer_load_format_xyzw         1
+  untranslated: s_cselect_b64                   1
+  untranslated: s_lshr_b32                      1
+  untranslated: s_mulk_i32                      1
+  untranslated: v_add_co_ci_u32                 1
+  untranslated: v_cvt_f16_f32                   1
+  untranslated: v_cvt_f32_f16                   1
+  untranslated: v_lshlrev_b64                   1
