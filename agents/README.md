@@ -1,6 +1,6 @@
 # agents/
 
-The helper agents' hand-back notes (`<lane>.md`) and outputs (CSV tables of names, hashes and counts; never
+The helper agents' hand-back notes (`<lane>.md`: loader, shader, launcher, vfs, upscale, input) and outputs (CSV tables of names, hashes and counts; never
 game bytes). See [`../secondary-agent.md`](../secondary-agent.md).
 
 **[`secondary-agents-updates.md`](secondary-agents-updates.md)**: the helper lanes' live status, their pull

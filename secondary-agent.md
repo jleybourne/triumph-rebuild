@@ -26,7 +26,7 @@ Read, in this order: `README.md`, `plan.md` (the six decisions), `tasks.md` (you
 ```powershell
 cd D:\Developer\triumph-rebuild
 git fetch origin
-git worktree add ..\triumph-rebuild-<lane> -b agent/<lane> origin/master    # <lane> = loader, shader or launcher
+git worktree add ..\triumph-rebuild-<lane> -b agent/<lane> origin/master    # <lane> = loader, shader, launcher, vfs, upscale or input
 cd ..\triumph-rebuild-<lane>
 cargo test --release                                                         # must be green before you change anything
 ```
@@ -42,7 +42,7 @@ That is the lead's working tree, and switching it breaks a run in progress.
 | You **may** add one line to the root `Cargo.toml` `members` list for your crate | the lead resolves that one line on merge |
 | **Measurement lock:** while `D:\Developer\triumph-rebuild\agents\MEASURING` exists, run **no** builds, tests or other heavy work. Check before every build: `if (Test-Path D:\Developer\triumph-rebuild\agents\MEASURING) { "wait" }` | the lead's GPU and CPU timings need a quiet machine. One background build once turned 7.3 fps into 2.3. |
 | Build with `cargo build --release -j 4` | leaves cores free for the lead |
-| **No GPU work** of any kind (no D3D12 device creation, no `gputest`, no `sirtest`) | GPU timings are the lead's; a second device skews them |
+| **No GPU work**, except lane `upscale` and the launcher's system check, and **only while `agents\MEASURING` is absent**. Never `gputest`, `sirtest` or the benches | GPU timings are the lead's; a second device during a run skews them |
 | Push only `agent/<lane>`. Never push `master`, never force-push, never rewrite history | the lead merges |
 | **No game bytes in git**: no shader binaries, no disassembly of title shaders, no title files, no paths to them in committed code (read the path from config at run time) | asset policy; this repository holds no game content |
 | Every task ends in a test or a number, never "done because it compiles" | the project's first rule |
@@ -99,7 +99,9 @@ file).
 | S3 | GFX10 (RDNA2) decoder: every encoding the corpus uses (SOP1/2/C/K/P, SMEM, VOP1/2/3/3P/C, DPP, SDWA, DS, MUBUF, MTBUF, MIMG, FLAT/GLOBAL/SCRATCH, EXP). Vendoring the fork's `gfx10` opcode tables is allowed | **byte-exact re-encode** of every instruction in all 25,694 programs; 0 unknown opcodes, or a named list |
 | S4 | per-program feature summary for the lead: register counts, branch structure (structured or not), wave-uniform vs per-lane branch share, and the count of wave ops inside divergent branches (these become predication) | a section in `agents/shader.md` |
 
-Stop after S4. Translating decoded GFX10 into `sir` is the lead's (section 8).
+| S5 | **the oracle set**: for each program hash, the fork's translated output (its shader cache under `D:\victory-data\cache-fx`, or by running the fork's offline `translate` command; read its CLI with `git show triumph/main:apps/victory/src/main.rs`). Write it to `D:\victory-data\rebuild-oracle\<hash>.dxil`, **outside git** (game-derived bytes), plus an index `agents/shader-oracle.csv` (hash, present yes/no, size) | the index covers 25,694 hashes; the missing ones are named |
+
+Stop after S5. Translating decoded GFX10 into `sir` is the lead's (section 8).
 
 ### Lane `launcher` — the desktop launcher (design: `docs/design/launcher.md`)
 
@@ -115,8 +117,42 @@ telemetry, no browser engine.
 | U4 | mods tab: list `mods/<name>/` folders, enable/disable, reorder, and show conflicts (two enabled mods with the same relative path: the later wins) | conflict detection unit-tested |
 | U5 | Play: [Launch] starts `rebuild.exe` with `--config <path>`; shows the frame-line log file (`diagnostics.frame_log`) as it grows. Until the layer runs the title, launch the proofs (`gputest --bare`) to show the path works | launch and log tail work with the proof binaries |
 
-Launch-time integration with the real layer (C2), the overlay file system and the in-game menu (L5) are the
-lead's.
+Launch-time integration with the real layer (C2) and the in-game menu (L5) are the lead's. The mods tab
+uses lane `vfs`'s crate once it merges; until then, detect conflicts by walking the folders itself.
+
+### Lane `vfs` — the overlay file system (Build 3 piece; feeds the launcher's mods tab)
+
+New crate `crates/vfs` (package `rebuild-vfs`). Pure Rust, no GPU, no title code.
+
+| # | task | closes when |
+|:--:|:--|:--|
+| V1 | console path → host path: the title's drive prefixes and its storage paths (the fork's `victory-hle` files module is the reference for which prefixes the title uses: read, don't copy) mapped onto a read-only base (the game folder) | unit tests per prefix; case-insensitive lookup like the console's |
+| V2 | a **write overlay**: every create, write, rename or delete lands in an overlay folder (e.g. `%APPDATA%\triumph-rebuild\overlay`); reads see overlay-then-base | a test hashes the base folder before and after a write-heavy run: unchanged |
+| V3 | **mods**: ordered layers between overlay and base (`mods/<name>/`, later wins); `conflicts()` lists every path more than one enabled mod provides, and which wins | unit tests: order, enable/disable, conflicts |
+| V4 | a file-handle API the runtime will call (open, read at offset, size, enumerate a directory, close), with no global state | tests; a benchmark of open+read on 10,000 small files (number in `agents/vfs.md`) |
+
+### Lane `upscale` — the DLSS and FSR backends, standalone (Build 7 piece)
+
+New crate `crates/upscale` (package `rebuild-upscale`), plus a binary `apps/rebuild/src/bin/upscaletest.rs`.
+**GPU allowed** only while `agents\MEASURING` is absent; check before each run.
+
+| # | task | closes when |
+|:--:|:--|:--|
+| P1 | one interface, from plan decision 5: inputs colour, depth, motion vectors, jitter, exposure, reset, render size, output size, mode | the trait, with docs on every field's convention (jitter sign, motion-vector scale) |
+| P2 | a synthetic test scene, rendered by the test itself: moving geometry, Halton jitter, motion vectors and depth at a render size below the output | the scene renders; vectors are checked against analytic motion |
+| P3 | **FSR** through AMD's FidelityFX SDK (MIT), FSR 3.1 path; it runs on the NVIDIA card | output frames written as PNG to a folder outside git; no NaN or black; a temporal-stability number (frame-to-frame difference on a static camera) |
+| P4 | **DLSS** through NVIDIA Streamline (MIT headers). The DLSS runtime DLL is never committed: its path comes from the registry entry the lead adds (propose `upscaler.dlss_dll` in `agents/upscale.md`) | same checks as P3; DLSS and FSR side by side on the same scene |
+| P5 | the conventions table: jitter sign, motion-vector units, depth (reversed or not), what "reset" means, for both SDKs | in `agents/upscale.md`; the lead uses it when wiring the title's pass in Build 7 |
+
+### Lane `input` — controller and keyboard (Build 3 piece; the in-game menu needs it)
+
+New crate `crates/input` (package `rebuild-input`). No GPU.
+
+| # | task | closes when |
+|:--:|:--|:--|
+| I1 | XInput pads (slots 0-3) and a keyboard stand-in pad (the fork's mapping in its README "Running it" section is the reference: WASD / IJKL sticks, arrows D-pad, Enter / Backspace / X / Y faces, Q / E shoulders, Z / C triggers, Esc / Tab Menu / View) as one `PadState` | unit tests with a fake source |
+| I2 | **menu isolation** (the fork's `docs/design/debug-menu.md` A1): while the menu is open the title sees a neutral pad and no keys; on close, neutral until every key and button is up; rumble stopped on open | unit tests: open, hold, close-while-held, all-up |
+| I3 | which GameInput functions the title imports (lane `loader`'s `agents/loader-imports.csv`, once merged) mapped onto `PadState` | a table in `agents/input.md` |
 
 ## 6. Handing back
 
@@ -157,7 +193,7 @@ tests     43 green: cargo test --release  (uma 24, xlist 5, sir 8, config 6)
 | 6 list translation | 🔄 core built | `crates/xlist` | Build 0 (b) |
 | 7 upscaler | ⏳ (plan decision 5 corrected) | — | — |
 | 8 pacing · 9 AMD testers | ⏳ | — | — |
-| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | `agent/loader`, `agent/shader` (from 12:40), `agent/launcher` (to start) | their pull requests |
+| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | running from 12:40: `agent/loader`, `agent/shader` (S5 added). Written, to start: `agent/launcher`, `agent/vfs`, `agent/upscale`, `agent/input` | their pull requests |
 | launcher track | 🔄 C1 registry built; launcher app in lane `launcher` | `crates/config`, [design](docs/design/launcher.md) | 6 unit tests |
 
 ## 9. Taking over as lead
