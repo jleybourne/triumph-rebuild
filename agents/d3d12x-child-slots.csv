@@ -1,0 +1,75 @@
+object,offset_this_title,offset_2020_layout,name,pc_equivalent,args_after_this,returns,notes,fork_source
+all,0x000,0x000,QueryInterface,IUnknown,"iid, *out",HRESULT,device children also answer ID3D12Pageable/DeviceChild/Object ids,resource.rs PAGEABLE_IIDS
+all,0x008,0x008,AddRef,IUnknown,-,u32,,object.rs
+all,0x010,0x010,Release,IUnknown,-,u32,,object.rs release_boxed
+all,0x018-0x030,0x018-0x030,"GetPrivateData, SetPrivateData, SetPrivateDataInterface, SetName",ID3D12Object,as PC,HRESULT,SetPrivateDataInterface unwritten in the fork,object.rs d3d12_object
+all children,0x038,0x038,GetDevice,ID3D12DeviceChild,"iid, *out",HRESULT,answers every device level,object.rs parent_device
+queue,0x050,0x050,ExecuteCommandLists,same,"count, *lists",void,,queue.rs:1033 execute
+queue,0x058-0x068,0x058-0x068,"SetMarker, BeginEvent, EndEvent",same,-,void,profiler only; ignore,queue.rs METHODS
+queue,0x070-0x078,-,two console methods added before Signal (unknown),none,-,-,"not seen called; the reason every later slot moved +0x10",queue.rs:1561 newer_slot
+queue,0x080,0x070,Signal,same,"fence, value u64",HRESULT,"title's first Signal sets its fence to 1 before the first Present (timing-run L220)",queue.rs signal
+queue,0x088,0x078,Wait,same,"fence, value u64",HRESULT,GPU-side wait,queue.rs wait
+queue,0x090,0x080,GetTimestampFrequency,same,*u64,HRESULT,title+0x24841a6; fork answers 100 MHz,queue.rs:1220
+queue,0x0b8/0x0c0,-,suspend / resume (fork's reading),console,?,?,named from call shapes only,queue.rs newer_slot doc
+queue,0x0e0,0x0d0,GetDesc,same,(hidden *out),*desc,,queue.rs desc
+queue,0x0f8,0x0e8,page mapping batch (UpdateTileMappings-like),console,"count, *batches{dest, count, *ranges{kind 0 range/1 repeat/2 null/3 skip, start, count}}, pool address, pool pages, flags",HRESULT,maps 64 KiB pages of a registered pool (device 0x250) into tiled resources,queue.rs:1479 copy_page_mappings
+queue,0x100,0x0f0,PresentX,console,"plane count, *planes{frame token u64, resource count u32, *resources}, *parameters",HRESULT,"one plane (run 28); first Present at timing-run L223 with 0 draws",queue.rs:1119 Plane / :1288 present
+queue,0x110,0x100,Signal with top/bottom-of-pipe sync settings,console,"fence, value, *bottom, *top",HRESULT,,queue.rs:1131 signal2_x
+queue,0x118,0x108,ExecuteCommandListsX (frame-token submission),console,"count, *lists, frame token u64, flags",void,title+0x24821dd,queue.rs:1126 execute_x
+allocator,0x040,0x040,Reset,same,-,HRESULT,,list.rs:1438
+allocator,0x048,0x048,allocation callback (console),console,?,HRESULT,ignored S_OK,list.rs:1444
+list,0x040,0x040,GetType,ID3D12CommandList,-,type,,list.rs list_type
+list,0x048,0x048,Close,same,-,HRESULT,translate here (plan decision 3),list.rs close
+list,0x050,0x050,Reset,same,"allocator, pipeline",HRESULT,,list.rs reset
+list,0x060,0x060,DrawInstanced,same,"verts, inst, first vert, first inst",void,,list.rs METHODS
+list,0x068,0x068,DrawIndexedInstanced,same,"idx, inst, first idx, base vert, first inst",void,,
+list,0x070,0x070,Dispatch,same,"x, y, z",void,,
+list,0x078-0x098,0x078-0x098,"CopyBufferRegion, CopyTextureRegion, CopyResource, (0x090 CopyTiles unwritten), ResolveSubresource",same,as PC,void,,
+list,0x0a0-0x0c0,0x0a0-0x0c0,"IASetPrimitiveTopology, RSSetViewports, RSSetScissorRects, OMSetBlendFactor, OMSetStencilRef",same,as PC,void,,
+list,0x0c8,0x0c8,SetPipelineState,same,pipeline,void,title also copies the pipeline's 32-byte packet inline (list+0x544),list.rs set_pipeline
+list,0x0d0,0x0d0,ResourceBarrier,same,"count, *barriers",void,,list.rs barrier
+list,0x0e0-0x0f0,0x0e0-0x0f0,"BeginQuery, EndQuery, ResolveQueryData",same (console moved them before SetDescriptorHeaps; PC has them at 0x1a0+),as PC,void,"fork fakes results (occlusion answers 1M); 0x0d8 ExecuteBundle and 0x0f8 unwired",list.rs:2166 MORE_METHODS
+list,0x100,0x100,SetDescriptorHeaps,same,"count, *heaps",void,,
+list,0x108/0x110,0x108/0x110,SetComputeRootSignature / SetGraphicsRootSignature,same,root sig,void,fork ignores (its own root layout),
+list,0x118-0x170,0x118-0x170,"Set{Compute,Graphics}Root{DescriptorTable, 32BitConstant, 32BitConstants, CBV, SRV, UAV}",same,as PC,void,,
+list,0x178/0x180,0x178/0x180,IASetIndexBuffer / IASetVertexBuffers,same,as PC,void,,
+list,0x190,0x190,OMSetRenderTargets,same,as PC,void,,
+list,0x198/0x1a0,0x198/0x1a0,ClearDepthStencilView / ClearRenderTargetView,same,as PC,void,,
+list,0x1a8-0x1d0,0x1a8-0x1d0,"ClearUAVUint, ClearUAVFloat, DiscardResource, markers (PC order, with the query methods moved up to 0x0e0-0x0f8)",same,as PC,void,"not wired by the fork; never logged as called",list.rs:2111 METHODS (gaps)
+list,0x1d8/0x1e0,-,two console methods newer lists add (unknown),console,-,-,"fork assumes they sit exactly at 0x1d8; every 2020 slot from 0x1d8 moves +0x10",list.rs:2186 newer_slot
+list,0x1e8,0x1d8,ExecuteIndirect,same,"signature, max count, args, args offset, count buffer, count offset",void,"most of the title's draws (passthrough.md fact 4)",list.rs execute_indirect
+list,0x1f0,0x1e0,CopyMemoryToMemoryX,console,"dst va, src va, size, flags",void,,list.rs copy_memory
+list,0x230,0x220,OMSetDepthBounds,ID3D12GraphicsCommandList1,"min, max",void,,
+list,0x238/0x240,0x228/0x230,write 32 / 64-bit value at bottom of pipe,console,"address, value-or-kind (value, GPU timestamp, system timestamp)",void,GPU->CPU labels: Build 2 labels,list.rs write32/write64
+list,0x248/0x250,0x238/0x240,wait for memory value 32 / 64-bit,console,"address, comparison, reference u64",void,"first one: address 0xdd2b00000, comparison 7, reference 1, 64-bit, already met (timing-run L217)",list.rs:1943 wait_for
+list,0x258,0x248,pixel shader depth order (fork's reading),console,?,void,ignored,
+list,0x280,0x270,DispatchX,console,"x, y, z, flags",void,the BVH builder's,list.rs dispatch_x
+list,0x2a8/0x2b0,0x298/0x2a0,CopyTextureRegionX / CopyResourceX,console,as PC + console,void,,
+list,0x320,0x310,DispatchMeshX,console,?,void,,
+list,0x328,0x318,DriverHintX,console,"feature u64, value u64",u64 0,,list.rs driver_hint
+list,0x3f0/0x400,0x3e0/0x3f0,shading rate,ID3D12GraphicsCommandList5,-,void,title makes zero calls (CLAUDE.md vrsEnabled),
+list,0x408,0x3f8,DispatchMesh,ID3D12GraphicsCommandList6,"x, y, z",void,,
+list,0x418/0x420,0x408/0x410,pipeline sync top / bottom of pipe,console,"flags, control, address, size",void,cache flush + wait; no-op when submissions are ordered,list.rs sync
+list,0x458,0x448,ResetX,console,"allocator, pipeline, flags",HRESULT,title asserts on failure,list.rs reset_x
+list,0x470,-,unknown (u64 arg),console,u64,?,"called from the title's state flush, result unused; fork ignores",list.rs:2196 NEWER_METHODS
+list,0x490,-,enhanced barrier groups,ID3D12GraphicsCommandList7::Barrier,"group count, *groups{type, count, *barriers} (buffer barrier 40 bytes)",void,title+0x95e0,list.rs barrier_groups
+list,0x4a0,-,allocate upload memory owned by the list,console,"size, alignment",*u8 (null on failure),"BVH builder writes instance descs there; returning E_NOTIMPL crashed it (used as a pointer)",list.rs:1473 allocate_upload
+fence,0x040,0x040,GetCompletedValue,same,-,u64,,fence.rs completed
+fence,0x048,0x048,SetEventOnCompletion,same,"value, event (null = block)",HRESULT,fork fails a null-event wait (E_NOTIMPL),fence.rs:110
+fence,0x050,0x050,Signal (CPU),same,value,HRESULT,,fence.rs signal
+fence,0x058,0x058,GetCreationFlags,ID3D12Fence1,-,u32,,
+fence,0x060,0x060,GetGpuAddress (console),console,-,u64,the title reads the fence value at this address,fence.rs:148 gpu_address
+heap,0x040,0x040,GetDesc,ID3D12Heap,(hidden *out),*desc,,resource.rs HEAP_FUNCTIONS
+resource,0x040/0x048,0x040/0x048,Map / Unmap,same,as PC,HRESULT,,resource.rs:2842
+resource,0x050,0x050,GetDesc,same,(hidden *out),*desc,,
+resource,0x058,0x058,GetGPUVirtualAddress,same,-,u64 (= CPU address),,
+resource,0x070,0x070,GetHeapProperties,same,"*props, *flags",HRESULT,resource table is 7 PC + 3 console methods,
+descriptor heap,0x040,0x040,GetDesc,same,(hidden *out),*desc,,descriptor.rs:1159
+descriptor heap,0x048,0x048,GetCPUDescriptorHandleForHeapStart,same,(hidden *out),handle = address,,
+descriptor heap,0x050,0x050,GetGPUDescriptorHandleForHeapStart,same,(hidden *out),handle = same address,,
+DXGI device,0x030,0x030,GetParent,IDXGIObject,"iid, *out",HRESULT,,dxgi.rs:181
+DXGI device,0x038,0x038,GetAdapter,IDXGIDevice,*out,HRESULT,,
+adapter,0x030/0x038/0x040,0x030/0x038/0x040,"GetParent, EnumOutputs, GetDesc",IDXGIAdapter,as PC,HRESULT,,dxgi.rs:190
+factory,0x038/0x060,0x038/0x060,EnumAdapters / EnumAdapters1,IDXGIFactory,as PC,HRESULT,,dxgi.rs FACTORY_FUNCTIONS
+output,0x030,0x030,GetParent,IDXGIObject,as PC,HRESULT,,dxgi.rs OUTPUT_FUNCTIONS
+output,0x0a8,0x0a8,display mode list (console),console,mode list,HRESULT,"one 3840x2160 60 Hz mode; title looks for 120 Hz before allowing 120 Hz intervals (timing-run L58)",dxgi.rs:243
