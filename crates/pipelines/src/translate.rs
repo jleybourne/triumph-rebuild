@@ -290,6 +290,11 @@ pub fn compile_hlsl(dxc: &Path, work: &Path, hash: u64, h: &Hlsl) -> Result<Vec<
 /// Compute containers in an archive (a copy of `shaders.rpf`, never the game folder), in file order, each once:
 /// `(hash, container)`, until `want` accepts `limit` of them. For tests and benches.
 pub fn compute_containers(rpf: &[u8], limit: usize, want: impl Fn(u64) -> bool) -> Vec<(u64, Vec<u8>)> {
+    stage_containers(rpf, Stage::Cs, limit, want)
+}
+
+/// [`compute_containers`] for any host stage.
+pub fn stage_containers(rpf: &[u8], stage: Stage, limit: usize, want: impl Fn(u64) -> bool) -> Vec<(u64, Vec<u8>)> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for r in rebuild_shader::sgd5::records(rpf) {
@@ -301,7 +306,7 @@ pub fn compute_containers(rpf: &[u8], limit: usize, want: impl Fn(u64) -> bool) 
         if !seen.insert(h) || !want(h) {
             continue;
         }
-        if native_of(&bytes).is_ok_and(|(p, _, _)| host_stage(&p) == Some(Stage::Cs)) {
+        if native_of(&bytes).is_ok_and(|(p, _, _)| host_stage(&p) == Some(stage)) {
             out.push((h, container_bytes(&bytes).unwrap().to_vec()));
         }
     }
