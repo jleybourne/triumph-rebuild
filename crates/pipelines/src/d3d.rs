@@ -1,4 +1,4 @@
-﻿//! The host side: the root signature serializer (no device), and a device check that root signatures and
+//! The host side: the root signature serializer (no device), and a device check that root signatures and
 //! pipelines are accepted. The device is created only by `pipelines check`, only while the measurement lock is
 //! absent.
 
@@ -250,7 +250,7 @@ impl Gpu {
 }
 
 /// A render-target format with as many channels as the output writes (three float channels: R11G11B10).
-fn target_format(comp: u32, n: u32) -> DXGI_FORMAT {
+pub fn target_format(comp: u32, n: u32) -> DXGI_FORMAT {
     match (comp, n) {
         (3, 3) => DXGI_FORMAT_R11G11B10_FLOAT,
         (6, 3) => DXGI_FORMAT_R11G11B10_FLOAT,
@@ -260,7 +260,7 @@ fn target_format(comp: u32, n: u32) -> DXGI_FORMAT {
 }
 
 /// A vertex format for a signature component type and component count.
-fn format(comp: u32, n: u32) -> DXGI_FORMAT {
+pub fn format(comp: u32, n: u32) -> DXGI_FORMAT {
     let n = n.clamp(1, 4) as usize;
     let pick = |f: [DXGI_FORMAT; 4]| f[n - 1];
     let pick16 = |f: [DXGI_FORMAT; 3]| f[if n == 1 { 0 } else if n == 2 { 1 } else { 2 }];
@@ -282,8 +282,8 @@ mod tests {
     #[test]
     fn host_serializer_keeps_the_layout() {
         let words = [0, 15 << 20, 1 << 20 | 1 << 22 | 2 << 26, 0];
-        let vs = StageLayout { user_data: true, shadow: true, samplers: vec![words] };
-        let ps = StageLayout { user_data: true, shadow: false, samplers: vec![words, words] };
+        let vs = StageLayout { user_data: true, shadow: true, samplers: vec![words], compare: 0 };
+        let ps = StageLayout { user_data: true, shadow: false, samplers: vec![words, words], compare: 0 };
         let blob = serialize(&RootDesc::graphics(&vs, &ps, USER_DATA_DWORDS)).unwrap();
         let (f, params, samplers) = describe(&blob).unwrap();
         assert_eq!(f, flags::GRAPHICS);

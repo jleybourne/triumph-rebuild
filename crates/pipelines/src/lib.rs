@@ -9,13 +9,24 @@
 //!   loaded at start in parallel, looked up by hash with no index to build.
 //! - `d3d` (Windows): the host serializer, and a device check that every root signature and pipeline is
 //!   accepted.
+//! - [`state`]: a pipeline as plain data ([`state::Desc`]) and its [`state::Key`].
+//! - [`pool`]: pipeline creation on worker threads; the title's create call returns at once.
+//! - `pso` (Windows): the host creator, through a persistent `ID3D12PipelineLibrary1` cache.
+//! - [`session`]: the pipelines a session used, for the next session's prewarm.
+//! - [`sidecar`]: the translator's `<hash>.<stage>.samplers` files.
 
 pub mod bindings;
 pub mod layout;
 pub mod library;
+pub mod pool;
+pub mod session;
+pub mod sidecar;
+pub mod state;
 
 #[cfg(windows)]
 pub mod d3d;
+#[cfg(windows)]
+pub mod pso;
 
 /// A program's stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
