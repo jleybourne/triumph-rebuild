@@ -21,16 +21,16 @@ Order and decisions are `plan.md`'s; overall progress is in [`progress.md`](prog
 | blocked | (c) the title's real GPU time from per-list timestamp pairs, RT on and off. Needs the title rendering on our code, so it closes in Build 5; until then the fork's 43-63 ms (RT off) stands | a measured replacement for the soft ~45 ms |
 | todo | owner: fill the minimum spec in `plan.md` (GPUs, VRAM, ReBAR, output resolution, upscaler mode) | filled before Build 7 |
 
-## Build 1 — tiled VRAM at console addresses
+## Build 1 — tiled VRAM at console addresses  ✅ closed — [`runs/build1-tiles.md`](runs/build1-tiles.md)
 
 | state | work | closes when |
 |---|---|---|
-| doing | reserved 4 GiB buffer per window; 64 KiB tiles mapped onto a VRAM heap as pages commit | `gputest --tiled` writes tile N from a shader and reads page N |
-| todo | console addresses: a title pointer maps to the tile that covers it, and a shader reads it | synthetic title: shader reads a value at a console address through the tiles |
-| todo | page sharing by address: two resources at one address see each other's writes | unit + GPU test |
-| todo | arena for untileable resources (unaligned, D32S8, MSAA), released after last user | 10 GB commit run without a device removal |
-| todo | straddle refusals (window, arena) | unit tests |
-| todo | upload destination = the tiled windows (Build 0 (a) used a plain default-heap buffer) | `uploadbench` re-run against tiles, within 10 % of Build 0 (a) |
+| done | reserved 4 GiB buffer per window; 64 KiB tiles mapped onto 64 MiB heaps as pages commit; card pages reused after release | `gputest --tiled`: tile N written by a shader reads back N, in 2 windows |
+| done | console addresses: a title pointer maps to the tile that covers it, and a shader reads it | CPU pattern → shader doubles it at another console address → CPU reads doubled |
+| done | page sharing by address: two resources at one address see each other's writes | second buffer and a render target aliased onto the same card pages: writes and clears seen through the window |
+| done | arena for untileable resources, released after last user | only stencil formats need it on this card; 10 GiB commit run, 0 wrong, no device removal |
+| done | straddle refusals (window, arena) | unit tests: window straddle, arena partial overlap |
+| done | upload destination = the tiled windows | `uploadbench --tiled`: no measurable penalty (clock-state noise dominates) |
 
 ## Build 2 — CPU-written memory on an async ring; the GPU→CPU region
 
@@ -54,14 +54,37 @@ Order and decisions are `plan.md`'s; overall progress is in [`progress.md`](prog
 | todo | the title's own DLLs: Bink video, its FSR module, GDK HTTP | each loads or is replaced with a stated stub |
 | todo | input (controller + keyboard/mouse) and audio | title responds to input; audio plays without stalling the frame |
 
-## Build 4 — shaders
+## Build 4 — shaders: all 25,694, wave32, offline
+
+The fork (jleybourne/Triumph) translates **25,694 / 25,694** programs, but 7 pipelines are still refused
+because they want 64-lane waves. The rebuild keeps the same corpus and the same 100 % bar, and raises it in
+three ways:
+
+```
+census line, per program   translated · validated (DXC validator) · pipeline built · wave32 · refused (reason)
+fork today                 25,694 translated · 7 pipelines refused (wave 64) · ~16.5 % wave64 divergence overhead
+rebuild target             25,694 translated AND validated AND built, 0 refused, every program wave32
+```
+
+The fork's translations are the **oracle**. They are data, not code. For each program we diff our output's
+behaviour against its output on the same inputs (the fork's `census` lists every program by hash). A
+program counts as done only when it passes that diff.
+
+**Owner decision needed:** the fork's `victory-shader` is **GPL-3.0-or-later**, which a GPL-3.0-only project
+may use with its authors credited (Marvisak and the VIctory contributors, plus this fork). The plan says
+"code is ours", so the default is a fresh recompiler. Reusing that crate and changing only what decision 4
+needs (wave32 lowering, offline library) would cut Build 4 from the largest piece of work to a port.
 
 | state | work | closes when |
 |---|---|---|
-| todo | RDNA2 decode: VALU, SALU, LDS, scratch, images, samplers, control flow | corpus of real programs decodes byte-exact against reference dumps |
-| todo | wave64 → wave32 lowering for every vendor, reductions that cannot reconverge named | divergence tests; refusals carry reasons |
-| todo | DXIL emit, validated by the platform compiler | N programs compile, 0 errors |
-| todo | census of the whole shader pack; pipelines into a hash-keyed library at start | 100 % translated or refused-with-reason; 0 runtime compiles |
+| todo | owner: fresh recompiler, or reuse the fork's GPL-3.0-or-later `victory-shader` with credit | decided, recorded in `plan.md` |
+| todo | census tool: every program in `shaders.rpf` by hash, with stage, size and wave64 use; the census line above | `census` prints 25,694 rows; progress.md shows the shader bar |
+| todo | RDNA2 (GFX10) decode: VALU, SALU, LDS, scratch, images, samplers, control flow | corpus decodes; byte-exact re-encode |
+| todo | wave64 → wave32 lowering for every vendor; reductions that cannot reconverge are named | the 7 wave-64 pipelines build; divergence tests pass |
+| todo | DXIL emit, validated by the platform validator | N programs compile, 0 validator errors |
+| todo | root signatures always set `SAMPLER_HEAP_DIRECTLY_INDEXED` (fork trap: 311 refusals) | 0 refusals from root signatures |
+| todo | oracle diff against the fork's translation, per program | 25,694 / 25,694 match or differ with a named reason |
+| todo | pipelines built into a hash-keyed library at start (fork: 8,169 pipelines) | 0 runtime compiles; library build time on the frame line |
 
 ## Build 5 — first frame
 

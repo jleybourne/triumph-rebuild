@@ -2,6 +2,7 @@
 //!
 //! cargo run --release --bin uploadbench                 the full matrix (the Build 0 answer)
 //! cargo run --release --bin uploadbench -- --quick      a short smoke run
+//! --tiled: the destination is a tiled window (Build 1) instead of a committed buffer
 //! options: --mb N (bytes the title writes per frame, default 115) --region-mb N (default 1024)
 //!          --frames N (default 20)
 
@@ -18,6 +19,7 @@ fn arg(name: &str, default: usize) -> usize {
 
 fn main() {
     let quick = std::env::args().any(|a| a == "--quick");
+    let tiled = std::env::args().any(|a| a == "--tiled");
     let written = arg("--mb", 115) << 20;
     let region = arg("--region-mb", 1024) << 20;
     let frames = arg("--frames", if quick { 5 } else { 20 });
@@ -39,6 +41,7 @@ fn main() {
         region >> 20,
         frames
     );
+    println!("dst       {}", if tiled { "a tiled window: reserved 4 GiB buffer, 64 KiB tiles mapped on 64 MiB heaps (Build 1)" } else { "a committed default-heap buffer" });
     println!(
         "gpu ms    {}",
         if gpu.copy_timestamps() { "copy-queue and compute timestamps" } else { "compute timestamps only (copy queue has none)" }
@@ -86,7 +89,7 @@ fn main() {
         for diff in [Diff::Shadow, Diff::Hash] {
             for path in [Path::Copy, Path::Scatter] {
                 for &t in threads {
-                    let cfg = Config { region, written, change, diff, path, threads: t, frames, warmup: 3, seed: 0x7121_0001 };
+                    let cfg = Config { region, written, change, diff, path, threads: t, frames, warmup: 3, seed: 0x7121_0001, tiled };
                     match upload::run(&mut gpu, &cfg) {
                         Ok(s) => {
                             let m = s.median;

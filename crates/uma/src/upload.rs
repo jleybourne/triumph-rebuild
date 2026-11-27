@@ -82,6 +82,8 @@ pub struct Config {
     pub frames: usize,
     pub warmup: usize,
     pub seed: u64,
+    /// destination is a tiled window (Build 1) instead of a committed default-heap buffer
+    pub tiled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -597,7 +599,22 @@ pub fn run(gpu: &mut Gpu, cfg: &Config) -> Result<Summary, String> {
     let pages = cfg.region / OS_PAGE;
     let mut shadow: Vec<u8> = if cfg.diff == Diff::Shadow { vec![0u8; cfg.region] } else { Vec::new() };
     let mut sent: Vec<u64> = if cfg.diff == Diff::Hash { vec![chunks::zero_hash(); cfg.region / CHUNK] } else { Vec::new() };
-    let dst = committed(&gpu.device, D3D12_HEAP_TYPE_DEFAULT, cfg.region, true, D3D12_RESOURCE_STATE_COMMON)?;
+    // keep the tiles alive as long as the destination
+    let (dst, _tiles) = if cfg.tiled {
+        let mut uma = crate::Uma::new(1, cfg.region);
+        let (_, mapped) = uma.place(0, cfg.region).map_err(|e| format!("place: {e:?}"))?;
+        let q = gpu.copy_queue.clone();
+        let mut tiles = crate::tiles::Tiles::new(&gpu.device, &q, 1)?;
+        tiles.map(&mapped)?;
+        unsafe {
+            gpu.fence_value += 1;
+            q.Signal(&gpu.fence, gpu.fence_value).map_err(|e| format!("signal: {e}"))?;
+            gpu.fence.SetEventOnCompletion(gpu.fence_value, HANDLE::default()).map_err(|e| format!("wait: {e}"))?;
+        }
+        (tiles.windows[0].clone(), Some(tiles))
+    } else {
+        (committed(&gpu.device, D3D12_HEAP_TYPE_DEFAULT, cfg.region, true, D3D12_RESOURCE_STATE_COMMON)?, None)
+    };
     let ranges = title_ranges(cfg.region, cfg.written, cfg.seed);
     let mut rng = Rng(cfg.seed ^ 0xA5A5);
     let mut addresses: Vec<*mut std::ffi::c_void> = vec![std::ptr::null_mut(); pages];

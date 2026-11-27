@@ -1,7 +1,8 @@
 # Progress
 
 ```
-work toward 30 fps   [██░░░░░░░░░░░░░░░░░░]  11 %
+work toward 30 fps   [████░░░░░░░░░░░░░░░░]  19 %
+shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (fork reference: 25,694 translated, 7 pipelines refused)
 measured fps         none yet — the title has not rendered a frame on this code
 baseline to beat     7.6 fps · 131.3 ms · ~4,500 draws · 356 dropped   (the layer being replaced)
 target               30 fps · 33.3 ms · same draws · stated output resolution and upscaler mode
@@ -17,23 +18,23 @@ second row and is the number that counts.
 | # | build | weight | done | earned | state |
 |---|---|---:|---:|---:|---|
 | 0 | three answers before more code | 10 | 70 % | 7.0 | (a) upload **done**; (b) translation **done**: 0.43 µs a draw; (c) blocked until the title renders (moved to Build 5) |
-| 1 | tiled VRAM at console addresses | 10 | 20 % | 2.0 | page bookkeeping (8 tests) and the GPU↔CPU proof done; tiles on the GPU not started |
+| 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 20 % | 1.6 | 64 B diff and gather written and tested (7 tests); method chosen by measurement; ring, fence and pool todo |
 | 3 | PE loader + console runtime | 15 | 0 % | 0 | — |
-| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 0 % | 0 | — |
+| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 0 % | 0 | plan written (census, oracle, wave32); owner decision: fresh code or reuse the fork's GPL-3.0-or-later crate |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 0 % | 0 | plan correction needed: method 0x218 is not the upscale call |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **11.4 ≈ 11 %** | |
+| | **total** | **100** | | **19.4 ≈ 19 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
 
 ## Done
 
-- Address space: 4 GiB windows, 64 KiB pages, placement, sharing by address, lifetime by user count (8 tests).
+- Address space: 4 GiB windows, 64 KiB pages, placement, sharing by address, lifetime by user count, card-page reuse.
 - GPU writes into CPU-mapped memory, and the CPU reads the same bytes back (`gputest`), plus the control (`gputest --bare`).
 - **Build 0 (a) — upload benchmark** (`uploadbench`, [`runs/build0a-upload.md`](runs/build0a-upload.md)):
   12.64 GB/s ceiling over PCIe 3.0. At the title's real shape (~226k ranges, ~31-48 MB) the upload costs
@@ -44,11 +45,16 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
   our translator plus D3D12 costs 0.43 µs a draw, 1.9 ms for the title-shaped frame on one thread, which is 18×
   under budget. 12,027 descriptor writes from a dirty list cost 2.0 ms. List translation is not the CPU problem.
 
+- **Build 1 — tiled VRAM** ([`runs/build1-tiles.md`](runs/build1-tiles.md)): 4 GiB reserved windows with 64 KiB tiles
+  on 64 MiB heaps. Shaders read and write at console addresses. Two buffers, or a buffer and a render target,
+  at one address see each other's writes. Only stencil formats need the arena. 10 GiB committed at random
+  addresses with 0 wrong. The upload has no measurable tile penalty.
+
 ## Not done
 
 - Build 0 (c): the title's real GPU time, with RT on and off. Blocked: it needs the title rendering, so it moved to Build 5.
 - Minimum spec in `plan.md` (owner decision, needed before Build 7).
-- Everything from Build 1 tiles onward: see [`tasks.md`](tasks.md).
+- Everything from Build 2 onward: see [`tasks.md`](tasks.md).
 
 ## Open problems that could move the target
 
@@ -64,6 +70,27 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Build 1: tiled VRAM at console addresses
+
+```
+[████░░░░░░░░░░░░░░░░]  19 %   (was 11 %: +8.0 Build 1 closed)
+shaders     0 / 25,694 (bar added; the census tool is the first Build 4 task)
+measured fps   none yet
+```
+
+- **Built** `crates/uma/src/tiles.rs`: reserved 4 GiB windows, 64 MiB tile heaps, an `UpdateTileMappings`
+  batcher, and aliasing for other resources at one address. Also `arena.rs` for untileable resources, and
+  card-page reuse in `Uma` (it used to grow forever). 21 tests in `crates/uma`.
+- **Proven on the card:** 7 `gputest --tiled` proofs; the `--arena` split (only D32S8 and D24S8 need it); a
+  `--scale 10` run of 10 GiB in 5,120 random placements, 0 wrong, no device removal.
+- **Measured:** `uploadbench --tiled` shows no penalty from tiles. Both destinations swing between ~7-10 and
+  ~19 ms of GPU time with the card's clock state.
+- **Shaders:** Build 4 rewritten as a census against the fork's 25,694 programs, used as an oracle. The goal
+  is 0 refusals and wave32 everywhere. A separate shader bar is on this page.
+- **Owner decision raised:** the fork's shader crate is GPL-3.0-or-later and could legally be reused here
+  with credit. Fresh code or reuse?
+- **Next:** Build 2, CPU-written memory on an async ring.
 
 ### 2026-11-27 — Build 0 (b): per-draw translation
 
