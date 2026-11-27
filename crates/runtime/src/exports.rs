@@ -345,6 +345,8 @@ pub fn override_export(name: &str) -> Option<u64> {
         "VirtualFree" => VirtualFree as *const (),
         "GetCommandLineA" => GetCommandLineA as *const (),
         "GetCommandLineW" => GetCommandLineW as *const (),
+        // the console's device type (registry OEM\ConsoleMode)
+        other if other.starts_with("Reg") => return crate::registry::export(other).or_else(|| rebuild_winfiles::override_export(other)),
         // files: console drives through the overlay file system (lane `files`, PR #12)
         other => return rebuild_winfiles::override_export(other),
     };

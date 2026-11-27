@@ -31,6 +31,7 @@ pub mod exports;
 pub mod modules;
 pub mod physical;
 pub mod pipeline;
+pub mod registry;
 pub mod present;
 #[cfg(all(test, windows))]
 mod present_card;
@@ -56,6 +57,12 @@ pub enum Tier {
 /// Host functions whose meaning differs on the console, by function name (any DLL that exports it:
 /// the same function is reached through several API-set names).
 pub const OVERRIDES: &[(&str, &str)] = &[
+    // the console's device type: the registry value OEM\ConsoleMode (registry.rs)
+    ("RegOpenKeyW", "registry"),
+    ("RegOpenKeyExW", "registry"),
+    ("RegQueryValueExW", "registry"),
+    ("RegGetValueW", "registry"),
+    ("RegCloseKey", "registry"),
     // memory: the title's allocations must land in watched regions or tiled windows (Builds 1-2)
     ("VirtualAlloc", "memory"),
     ("VirtualAllocEx", "memory"),
