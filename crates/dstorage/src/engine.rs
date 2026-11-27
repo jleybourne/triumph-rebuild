@@ -42,7 +42,7 @@ pub trait Pages: Send + Sync {
     fn write(&self, pages: &[u64], offset: usize, data: &[u8]) -> bool;
 }
 
-/// A BCPack decoder (see D4 in `agents/dstorage.md`); none is built in.
+/// A BCPack decoder: [`crate::bcpack::Decoder`] (D5 in `agents/dstorage.md`), or none (requests refused).
 pub trait BcPack: Send + Sync {
     /// Decodes BCPack data of BC format `bc` from `src` into `out` (whole BC blocks).
     fn decode(&self, bc: u8, src: &[u8], out: &mut [u8]) -> bool;

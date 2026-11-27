@@ -437,40 +437,53 @@ fn d2_full_queue_blocks_then_drains_and_close_drops_unsubmitted() {
 
 #[test]
 fn d2_priorities_share_the_workers() {
+    // The order is recorded by the worker itself (each read writes through `Pages`, page 0 for the low queue,
+    // page 1 for real-time), so the check does not depend on when this thread gets to look: it held once under
+    // a loaded machine only by luck of scheduling.
+    struct Order(std::sync::Mutex<Vec<u64>>);
+    impl Pages for Order {
+        fn write(&self, pages: &[u64], _offset: usize, _data: &[u8]) -> bool {
+            self.0.lock().unwrap().push(pages[0]);
+            true
+        }
+    }
     let s = Scratch::new("prio");
-    let f = setup(&s, 1, None);
+    let order = Arc::new(Order(std::sync::Mutex::new(Vec::new())));
+    let f = setup(&s, 1, Some(order.clone()));
     let engine = f.engine();
     let low = engine.create_queue(4000, -1);
     let rt = engine.create_queue(4000, 2);
     let src = data(11, 64 << 10);
-    let mut dl: Vec<Vec<u8>> = (0..400).map(|_| vec![0u8; 64 << 10]).collect();
-    let mut dh: Vec<Vec<u8>> = (0..400).map(|_| vec![0u8; 64 << 10]).collect();
+    let (page_low, page_rt) = ([0u64], [1u64]);
     let (al, ah) = (StatusArray::new(400), StatusArray::new(400));
     for i in 0..400 {
-        // SAFETY: buffers outlive the queues (closed below).
+        // SAFETY: the page lists and the source outlive the queues (closed below).
         unsafe {
-            engine.enqueue_request(low, read(MEMORY_SOURCE, dl[i].as_mut_ptr(), 1 << 16, src.as_ptr().cast(), 0, 1 << 16));
-            engine.enqueue_request(rt, read(MEMORY_SOURCE, dh[i].as_mut_ptr(), 1 << 16, src.as_ptr().cast(), 0, 1 << 16));
+            engine.enqueue_request(low, read(MEMORY_SOURCE | PAGE_DESTINATION, page_low.as_ptr() as *mut u8, 1 << 16, src.as_ptr().cast(), 0, 1 << 16));
+            engine.enqueue_request(rt, read(MEMORY_SOURCE | PAGE_DESTINATION, page_rt.as_ptr() as *mut u8, 1 << 16, src.as_ptr().cast(), 0, 1 << 16));
         }
         engine.enqueue_status(low, &al, i as u32);
         engine.enqueue_status(rt, &ah, i as u32);
     }
-    engine.submit(low);
+    // Real-time first: submitting low first would let the worker start on it alone, which is not priority.
     engine.submit(rt);
+    engine.submit(low);
+    // Generous: only a hung engine takes this long.
     let start = Instant::now();
-    while !ah.is_complete(399) {
-        assert!(start.elapsed() < Duration::from_secs(20));
-        std::thread::yield_now();
-    }
-    let low_done = (0..400).filter(|&i| al.is_complete(i)).count();
-    // With one worker and weights 1000:1, the real-time queue finishes while low has done few.
-    assert!(low_done < 100, "low priority finished {low_done} of 400 before real-time finished");
-    while !al.is_complete(399) {
-        assert!(start.elapsed() < Duration::from_secs(20));
+    while !(ah.is_complete(399) && al.is_complete(399)) {
+        assert!(start.elapsed() < Duration::from_secs(120), "the reads did not finish");
         std::thread::yield_now();
     }
     engine.close(low);
     engine.close(rt);
+    let order = order.0.lock().unwrap().clone();
+    assert_eq!(order.len(), 800);
+    let last_rt = order.iter().rposition(|&p| p == 1).unwrap();
+    let low_before = order[..last_rt].iter().filter(|&&p| p == 0).count();
+    // With one worker and weights 1000:1, real-time finishes while low has done few.
+    assert!(low_before < 100, "low priority finished {low_before} of 400 before real-time finished");
+    assert_eq!(ah.result(399), S_OK);
+    assert_eq!(al.result(399), S_OK);
 }
 
 #[test]
