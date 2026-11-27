@@ -1,0 +1,11 @@
+[package]
+name = "rebuild-vfs"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+
+[[bin]]
+name = "vfsbench"
+path = "src/bin/vfsbench.rs"
