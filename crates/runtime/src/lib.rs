@@ -21,14 +21,19 @@ pub mod cpu;
 pub mod drives;
 pub mod dxgi;
 pub mod frame;
+pub mod framelog;
 pub mod fence;
 pub mod queue;
+pub mod submit;
 #[cfg(windows)]
 pub mod exports;
 #[cfg(windows)]
 pub mod modules;
 pub mod physical;
 pub mod pipeline;
+pub mod present;
+#[cfg(all(test, windows))]
+mod present_card;
 #[cfg(windows)]
 pub mod title;
 pub mod tls;

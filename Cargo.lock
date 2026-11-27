@@ -2175,6 +2175,7 @@ dependencies = [
 name = "rebuild-runtime"
 version = "0.1.0"
 dependencies = [
+ "png 0.17.16",
  "rebuild-audio",
  "rebuild-d3d12x",
  "rebuild-dstorage",

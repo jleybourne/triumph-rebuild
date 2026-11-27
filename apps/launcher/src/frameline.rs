@@ -230,6 +230,22 @@ pub fn matrix_csv(rows: &[MatrixRow], target: f64) -> String {
 mod tests {
     use super::*;
 
+    /// The line the layer writes (crates/runtime/src/framelog.rs formats exactly this sample in its own test).
+    #[test]
+    fn the_layers_frame_line_parses() {
+        let f = parse(include_str!("../../../crates/runtime/src/frameline.sample").trim_end()).unwrap();
+        assert_eq!(f.fps, Some(30.8));
+        assert_eq!(f.ms, Some(32.5));
+        assert_eq!(f.gpu_ms, Some(21.0));
+        assert_eq!(f.draws, Some(4512));
+        assert_eq!(f.dropped, Some(0));
+        assert_eq!(f.wait_ms, Some(6.0));
+        assert_eq!((f.upload_ms, f.xlate_ms, f.upscale_ms), (None, None, None), "not measured yet: absent");
+        assert_eq!(f.internal, Some((2560, 1440)));
+        assert_eq!(f.output, Some((3840, 2160)));
+        assert_eq!(f.upscaler, None);
+    }
+
     #[test]
     fn a_full_frame_line_parses() {
         let f = parse("t  12s | fps 30.8 | ms 32.5 | gpu 21.0 ms | draws 4,512 | dropped 3 | upload 1.9 ms | xlate 2.4 ms | upscale 1.1 ms | wait 6.0 ms | 1707x960 -> 2560x1440 dlss quality").unwrap();

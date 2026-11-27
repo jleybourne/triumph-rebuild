@@ -77,6 +77,11 @@ pub fn get() -> Option<&'static Device> {
     DEVICE.get()
 }
 
+/// The lists' view of resources and memory (submission reads memory waits through it, present the back buffer).
+pub fn list_host() -> Option<&'static std::sync::Arc<dyn rebuild_xlist::console::ListHost>> {
+    LIST_HOST.get()
+}
+
 /// Names of the slots we know (research CSV), for the trap report.
 fn slot_name(off: usize) -> &'static str {
     match off {
@@ -465,6 +470,9 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
     if !riid.is_null() && !is_device_iid(unsafe { &*riid }) {
         return E_NOINTERFACE;
     }
+    // one creation at a time (two callers at once must not make two host devices)
+    static CREATING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = CREATING.lock().unwrap_or_else(|e| e.into_inner());
     if DEVICE.get().is_none() {
         let mut host: Option<ID3D12Device> = None;
         if let Err(e) = unsafe { D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_1, &mut host) } {
@@ -501,6 +509,7 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
         }
         resources_ref.set_device(object.as_ptr() as _);
         let _ = DEVICE.set(Device { host, object: object.as_ptr() as usize, created: Instant::now() });
+        crate::framelog::start();
     }
     let d = DEVICE.get().expect("device");
     REFS.fetch_add(1, Ordering::Relaxed);
