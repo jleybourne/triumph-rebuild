@@ -46,7 +46,7 @@ impl Hal {
         Hal {
             heap,
             shape: RwLock::new(None),
-            factory: Mutex::new(xma::silence()),
+            factory: Mutex::new(crate::wma::factory()),
         }
     }
 
@@ -54,7 +54,7 @@ impl Hal {
         &self.heap
     }
 
-    /// The frame decoder for XMA voices enabled from now on (the default writes silence).
+    /// The frame decoder for XMA voices enabled from now on (the default is ours, wma::Xma2).
     pub fn set_xma_decoder(&self, factory: DecoderFactory) {
         *lock(&self.factory) = factory;
     }

@@ -22,8 +22,8 @@
 //! Output is 16-bit PCM, interleaved when stereo, into a ring of 256-byte blocks. The title takes what
 //! lies between its read block and our write block, then advances its read block by command.
 //!
-//! **Decoding.** The frame decoder (WMA Pro's transform) is the `FrameDecoder` trait; this crate ships
-//! `Silence`, which keeps every timing exact and writes zeros. See `agents/audio.md` for the decoder.
+//! **Decoding.** The frame decoder is the `FrameDecoder` trait: `wma::Xma2` (ours, the default), or
+//! `Silence`, which keeps every timing exact and writes zeros.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
