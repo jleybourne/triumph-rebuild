@@ -95,11 +95,14 @@ pub enum Edit {
 pub struct Model {
     pub config: Config,
     pub refusal: Option<(&'static str, String)>,
+    /// keys the user set (or the file held): saved explicitly even when equal to today's default, so a
+    /// later change of default never resets them (`store`)
+    pub explicit: std::collections::BTreeSet<&'static str>,
 }
 
 impl Model {
     pub fn new(config: Config) -> Model {
-        Model { config, refusal: None }
+        Model { config, refusal: None, explicit: Default::default() }
     }
 
     pub fn badges(&self, s: &Setting) -> Badges {
@@ -139,6 +142,7 @@ impl Model {
         };
         match self.config.set(s.key, v) {
             Ok(()) => {
+                self.explicit.insert(s.key);
                 if self.refusal.as_ref().is_some_and(|(k, _)| *k == s.key) {
                     self.refusal = None;
                 }
@@ -153,6 +157,7 @@ impl Model {
 
     pub fn reset(&mut self, s: &Setting) {
         self.config.reset(s.key);
+        self.explicit.remove(s.key);
         if self.refusal.as_ref().is_some_and(|(k, _)| *k == s.key) {
             self.refusal = None;
         }

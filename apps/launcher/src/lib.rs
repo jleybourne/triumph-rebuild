@@ -7,11 +7,17 @@
 //! - [`title`]: `title.*` written into a copy of the title's `settings.xml` (U3)
 //! - [`mods`]: mod folders, order, enable, conflicts (U4)
 //! - [`play`]: launching the layer and tailing its frame-line log (U5)
+//! - [`library`]: more than one game, each with its own data folder; detectors
+//! - [`store`]: per-game settings saved safely: explicit values kept, unknown keys kept, `.bak` recovery
+//! - [`gamemeta`]: the title's name and key art from its package, read-only, for the Play hero
 
+pub mod gamemeta;
 pub mod home;
+pub mod library;
 pub mod model;
 pub mod mods;
 pub mod play;
+pub mod store;
 pub mod syscheck;
 pub mod title;
 

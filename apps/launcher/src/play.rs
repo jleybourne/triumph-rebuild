@@ -116,10 +116,40 @@ impl LogTail {
     }
 }
 
+/// The fps of the last frame line that has one (`... fps 29.8 ...` or `fps=29.8`).
+pub fn last_fps<S: AsRef<str>>(lines: &[S]) -> Option<f32> {
+    lines.iter().rev().find_map(|l| {
+        let mut words = l.as_ref().split(|c: char| c.is_whitespace() || c == '|' || c == '=' || c == ':').filter(|w| !w.is_empty());
+        while let Some(w) = words.next() {
+            if w.eq_ignore_ascii_case("fps") {
+                if let Some(v) = words.next().and_then(|v| v.parse::<f32>().ok()).filter(|v| v.is_finite()) {
+                    return Some(v);
+                }
+            }
+        }
+        None
+    })
+}
+
+/// The last session's lines from a frame log (the last 200), for the Play tab at start.
+pub fn read_last(path: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<String> = text.lines().map(String::from).collect();
+    lines[lines.len().saturating_sub(200)..].to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn last_fps_reads_the_newest_frame_line() {
+        assert_eq!(last_fps(&["fps 30.0 | ms 33.3", "fps 29.5 | ms 33.9", "exited"]), Some(29.5));
+        assert_eq!(last_fps(&["fps=7.6 ms=131.3"]), Some(7.6));
+        assert_eq!(last_fps(&["config ok", "fps nan"]), None);
+        assert_eq!(last_fps::<&str>(&[]), None);
+    }
 
     #[test]
     fn the_tail_reads_whole_lines_and_restarts_on_a_new_file() {
