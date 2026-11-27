@@ -177,3 +177,13 @@ ebuild-oracle (backup in oracle-swapped-backup); `apps/rebuild/src/bin/oracle.rs
   frame-line.log `key value | ...` fields fps ms gpu draws dropped upload xlate upscale wait + resolution segment;
   summary.toml [summary] avg_fps low1_fps frame_ms gpu_ms upload_ms frames seconds measured_from; capture.request).
   BCPack: decoder bound, capture via REBUILD_BCPACK_CAPTURE (D5b in tasks.md). Running: resources. 406 tests green.
+
+## 2026-11-27 evening — Build 5 device setup passes (aabacde)
+- Built in crates/runtime: device.rs (static 0x58 object, +0x18=1, unwritten slots = timed traps), queue.rs (incl. X queues),
+  fence.rs (value cell at obj+0x10 + host fence + watcher), dxgi.rs (console-shaped device/adapter/output, host mode),
+  frame.rs (simple clock), cpu.rs (VEH NOPs `clwb` per site on first fault; host CPU lacks it).
+- xmem: base-0 commit adds MEM_RESERVE; placeholders get no write-watch; 2M/64K + REPLACE_PLACEHOLDER at a base keeps a
+  placeholder; free with PRESERVE_PLACEHOLDER keeps the region; failures logged.
+- Guarded run: 1 queue, 5 fences, 4 X-queues, 439 allocators, 581 lists, DXGI, 2 frame events, 1 clwb site; then
+  int3 assert at exe+0x247af2d (arena: end-start+[0x1475E6FF0] <= 0x1FFFFF; arena size 0x4000000 or 0x5200000).
+- Tests: 437 passed, 0 failed. Next: find which allocation misses the arena; then queue Execute/PresentX, pipelines.
