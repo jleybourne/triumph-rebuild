@@ -205,7 +205,7 @@ runs/             every measurement: a write-up and the raw output beside it
 | ✅ | [Tasks](tasks.md) | every task with the number that closes it; known traps from the fork |
 | 📊 | [Runs](runs/README.md) | Build 0 (a) upload, Build 0 (b) translation, Build 1 tiles |
 | 🔍 | [Handoff](HANDOFF.md) · [Review prompt](REVIEW-PROMPT.md) | the brief for an independent review |
-| 🤝 | [Helper agents and handover](secondary-agent.md) | helper lanes and rules; the live state; how a new session takes over as lead |
+| 🤝 | [Helper agents and handover](secondary-agent.md) · [agent updates](agents/secondary-agents-updates.md) | helper lanes and rules; the live state; how a new session takes over as lead; what the helpers have done |
 | 🚀 | [Launcher design](docs/design/launcher.md) | settings registry, launcher, mods, in-game menu |
 | 📐 | [Shader core design](docs/design/shader-ir.md) | classify, uniformity, lane doubling, window addressing, HLSL → DXC |
 | 💭 | [Thoughts](thoughts.md) | the first reasoning, before the plan's corrections |

@@ -9,9 +9,14 @@ This file has two jobs:
 It is updated by the lead after every step. Section 8 is always the current state.
 
 ```
-lead session   owns the main line (crates/uma, crates/xlist, crates/sir), all measurements, every shared doc
+lead session   owns the main line (crates/uma, crates/xlist, crates/sir, crates/config), measurements, shared docs
 helper agents  own one lane each, in their own worktree, branch and crate; hand back by pull request
+coordinator    the session that starts the helpers; keeps agents/secondary-agents-updates.md
 ```
+
+**Where agent updates go:** [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md). The
+coordinating session keeps it: each lane's state, its pull requests, anything flagged "for the lead", and a
+log. The lead reads it before every step and never edits it.
 
 ## 1. Before you start (every helper agent)
 
@@ -120,13 +125,16 @@ lead's.
 2. Commit small, with messages that say what was measured. End each with the attribution line your session
    gives you.
 3. Push `agent/<lane>` and open a pull request to `master` titled `agent/<lane>: <what closed>`. **Do not merge it.**
-4. The lead reviews, merges, writes the `progress.md` entry (one per upload, with its own bar), and
-   updates `tasks.md`.
+4. The coordinator records the lane's state and the pull request in
+   [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md).
+5. The lead reviews, merges, writes the `progress.md` entry (one per upload, with its own bar), and
+   updates `tasks.md` and section 8 here.
 
 ## 7. If something looks wrong in the lead's code or documents
 
 Don't fix it. Write it in `agents/<lane>.md` under "for the lead", with the file, the line and the
-evidence. The lead picks it up at merge.
+evidence. The coordinator adds a one-line pointer under "For the lead" in
+`agents/secondary-agents-updates.md`, and the lead answers it in the next step.
 
 ## 8. Current state (updated by the lead every step)
 
@@ -149,17 +157,21 @@ tests     43 green: cargo test --release  (uma 24, xlist 5, sir 8, config 6)
 | 6 list translation | 🔄 core built | `crates/xlist` | Build 0 (b) |
 | 7 upscaler | ⏳ (plan decision 5 corrected) | — | — |
 | 8 pacing · 9 AMD testers | ⏳ | — | — |
+| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | `agent/loader`, `agent/shader` (from 12:40), `agent/launcher` (to start) | their pull requests |
 | launcher track | 🔄 C1 registry built; launcher app in lane `launcher` | `crates/config`, [design](docs/design/launcher.md) | 6 unit tests |
 
 ## 9. Taking over as lead
 
 If the owner hands you the whole job, you are the lead. Read `README.md`, `plan.md`, `tasks.md`,
-`progress.md` (top block and the latest three entries), `docs/design/shader-ir.md`, and this file. Run
+`progress.md` (top block and the latest three entries), `docs/design/shader-ir.md`, this file, and
+`agents/secondary-agents-updates.md` (what the helper lanes have done and flagged). Run
 `cargo test --release` (must be green) and `cargo run --release --bin gputest -- --bare` (the control).
 
 ### How the owner wants the work done
 
 - **Keep building until there are no tasks.** Don't stop to offer menus.
+- **Before every step, read `agents/secondary-agents-updates.md`.** Merge any open lane pull request first,
+  and answer every "For the lead" item.
 - **Decide technical questions yourself, choosing whatever performs best.** Record each decision and its
   reason in `plan.md` and `tasks.md`. Stop only for owner-only items (below).
 - **Every push adds a new dated entry at the top of `progress.md` "Updates"**, with its own bar
