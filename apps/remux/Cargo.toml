@@ -1,0 +1,8 @@
+[package]
+name = "remux"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+remux-uma = { path = "../../crates/uma" }
