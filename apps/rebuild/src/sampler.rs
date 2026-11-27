@@ -2,7 +2,9 @@
 //! unwind tables Windows registered for every image (the title's prepared copies included), resume it.
 //! Each frame is named as `image+rva`, from the title's images or the host's modules.
 //!
-//! While a thread is suspended nothing here allocates or prints: a suspended thread may hold the heap lock.
+//! While a thread is suspended this only copies: its registers and the top of its stack. Nothing allocates,
+//! prints or takes a lock (a suspended thread may hold the heap lock or the function-table lock that
+//! `RtlLookupFunctionEntry` takes). The stack is walked on the copy after the thread runs again.
 
 #![cfg(windows)]
 
@@ -35,28 +37,70 @@ pub struct Sample {
     pub len: usize,
 }
 
+/// Bytes of the stack copied from RSP up.
+const STACK_COPY: usize = 256 << 10;
+
 /// Samples one thread (never the calling one). `None` if it could not be suspended or read.
 pub fn sample(thread: HANDLE) -> Option<Sample> {
     let mut s = Sample { frames: [0; MAX_FRAMES], len: 0 };
     let mut c = Box::new(Aligned(CONTEXT::default())); // allocated before the thread stops
     c.0.ContextFlags = CONTEXT_FLAGS(CONTEXT_CONTROL_INTEGER);
+    let mut stack = vec![0u8; STACK_COPY];
+    let copied;
     unsafe {
         if SuspendThread(thread) == u32::MAX {
             return None;
         }
         let ok = GetThreadContext(thread, &mut c.0).is_ok();
+        // copy what is committed of the stack above RSP (ReadProcessMemory stops at an unreadable page)
+        let mut n = 0usize;
         if ok {
-            walk(&mut c.0, &mut s);
+            let _ = windows::Win32::System::Diagnostics::Debug::ReadProcessMemory(
+                windows::Win32::System::Threading::GetCurrentProcess(),
+                c.0.Rsp as *const c_void,
+                stack.as_mut_ptr() as *mut c_void,
+                STACK_COPY,
+                Some(&mut n),
+            );
+            if n == 0 {
+                // partial reads fail whole: retry with what is left of the stack page by page
+                let mut len = STACK_COPY;
+                while len >= 4096 && n == 0 {
+                    len /= 2;
+                    let _ = windows::Win32::System::Diagnostics::Debug::ReadProcessMemory(
+                        windows::Win32::System::Threading::GetCurrentProcess(),
+                        c.0.Rsp as *const c_void,
+                        stack.as_mut_ptr() as *mut c_void,
+                        len,
+                        Some(&mut n),
+                    );
+                }
+            }
         }
+        copied = n;
         ResumeThread(thread);
-        ok.then_some(s)
+        if !ok {
+            return None;
+        }
     }
+    // walk on the copy: stack addresses are moved into it, code addresses stay
+    let (lo, hi) = (c.0.Rsp, c.0.Rsp + copied as u64);
+    let delta = stack.as_ptr() as u64 as i64 - lo as i64;
+    let moved = |a: u64| if a >= lo && a < hi { (a as i64 + delta) as u64 } else { a };
+    c.0.Rsp = moved(c.0.Rsp);
+    c.0.Rbp = moved(c.0.Rbp);
+    unsafe { walk(&mut c.0, &mut s, stack.as_ptr() as u64, stack.as_ptr() as u64 + copied as u64) };
+    Some(s)
 }
 
-unsafe fn walk(c: &mut CONTEXT, s: &mut Sample) {
+/// Walks the stack in the copy `[lo, hi)`; stops at a frame whose stack leaves the copy.
+unsafe fn walk(c: &mut CONTEXT, s: &mut Sample, lo: u64, hi: u64) {
     while s.len < MAX_FRAMES && c.Rip != 0 {
         s.frames[s.len] = c.Rip;
         s.len += 1;
+        if c.Rsp < lo || c.Rsp + 8 > hi {
+            break;
+        }
         let mut base = 0u64;
         let f = RtlLookupFunctionEntry(c.Rip, &mut base, None);
         if f.is_null() {

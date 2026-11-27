@@ -80,6 +80,17 @@ fn dependency_order(images: &[Loaded]) -> Vec<usize> {
     order
 }
 
+/// Writes to stderr with one WriteFile: no Rust lock, no allocation (the title may hold the heap lock).
+fn raw_err(b: &[u8]) {
+    use windows::Win32::Storage::FileSystem::WriteFile;
+    use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
+    unsafe {
+        if let Ok(h) = GetStdHandle(STD_ERROR_HANDLE) {
+            let _ = WriteFile(h, Some(b), None, None);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let run = args.iter().any(|a| a == "--run");
@@ -169,6 +180,7 @@ fn main() {
     let mut last: Vec<u64> = Vec::new();
     let outcome = loop {
         let wait = Duration::from_secs(every).min(deadline.saturating_duration_since(Instant::now()));
+        raw_err(b"beat: waiting\n");
         match rx.recv_timeout(wait) {
             Ok(code) => break Some(code),
             Err(mpsc::RecvTimeoutError::Disconnected) => break None,
@@ -177,7 +189,11 @@ fn main() {
         if Instant::now() >= deadline {
             break None;
         }
-        if let Some(s) = sampler::sample(handle) {
+        // heartbeats on stderr (one WriteFile, no Rust lock, no allocation): where the main thread is
+        raw_err(b"beat: sampling\n");
+        let sampled = sampler::sample(handle);
+        raw_err(b"beat: sampled\n");
+        if let Some(s) = sampled {
             let frames = s.frames[..s.len].to_vec();
             let t = unsafe { STARTED }.unwrap().elapsed().as_secs_f64();
             if frames == last {
