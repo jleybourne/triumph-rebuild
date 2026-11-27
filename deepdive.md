@@ -1807,12 +1807,12 @@ code does) or **deferred** (with the reason). Items in `crates/sir`, `crates/d3d
 | 7 | deferred | `apps/rebuild/src/sampler.rs` and `crash.rs`: a change to what runs while a thread is suspended needs a title run to verify, and this lane runs no title |
 | 8 | deferred | `crates/d3d12x` |
 | 9 | **fixed** `aaa2e14` (lane `deferred`) | fence objects live in one reserved arena; `by_cell` is arithmetic plus one acquire load (no lock, no scan); every fence served is found (past 1M `CreateFence` fails); tests in `fence.rs` |
-| 10 | **fixed** `dfb5943` (in part) | `rebuild.exe` reads and checks `--config`, reports the settings and exits 3 ("does not run the title yet") instead of passing silently; running the title from it is C2 |
-| 11 | **fixed** `dfb5943` (in part) | the launcher's `title_source` uses `game.title_settings` before `REBUILD_TITLE_SETTINGS` (test `the_title_settings_setting_comes_before_the_variable`); the other keys wait for C2 (the layer reading `rebuild.toml`) and `runtime/src/drives.rs` |
+| 10 | **fixed** (lane `launch`, C2) | `rebuild.exe --config <file>` reads the file, sets the runtime's variables and runs the title through `apps/rebuild/src/launch.rs`, which `runtitle` now shares; no deadline unless `--seconds`; a missing game folder or a broken file fails with one line (and `summary.toml` in the session); tests in `args.rs`, `main.rs` |
+| 11 | **fixed** (lane `launch`, C2, in part) | `rebuild_config::runtime` maps every key the runtime reads: `game.dir`, new `game.console` and `diagnostics.warp`, `display.vsync`, `display.frame_cap` / `frame_rate`, `upscaler.backend` and its three paths, `diagnostics.frame_log*`, `diagnostics.d3d12_debug`, `limits.*`; `dstorage.bcpack_tables` goes to the drives' new `bcpack_tables` argument. Still unread, listed with reasons in `NOT_RUNTIME`: `display.width/height/window`, `upscaler.mode`, `memory.*`, `shaders.wave64`, `diagnostics.overlay`, `diagnostics.capture_dir`, `menu.key` (L5). A test fails when a new key is in neither list |
 | 12 | **fixed** `dfb5943` | `Config::upscaler_mode()` / `upscaler_mode_name` give the upscaler's spelling (`dlaa` → `native-aa`); test checks every choice against `rebuild_upscale::Mode::parse` |
-| 13 | doc-corrected `dfb5943` | a comment at the push says nothing reads it until C2; the session records the id |
+| 13 | **fixed** (lane `launch`, C2) | the layer writes `matrix = "<id>"` into the session's `summary.toml` |
 | 14 | **fixed** `aaa2e14` (lane `deferred`, in part) | `Input::with_menu_key` and `menu_key_named` take every `menu.key` choice (config test checks each); handing the setting to the layer is C2 |
-| 15 | doc-corrected `dfb5943` | a comment above the three entries says the fallback is the layer's once C2 lands; only `upscaletest` reads the variables |
+| 15 | **fixed** (lane `launch`, C2) | the layer sets `REBUILD_DLSS_DLL`, `REBUILD_STREAMLINE_DIR`, `REBUILD_FIDELITYFX_DIR` from the settings when they are not empty (read by `crates/ffx`) |
 | 16 | doc-corrected `dfb5943` | README table, "Running it" and badge, `secondary-agent.md` §8: 515 green, 12 ignored |
 | 17 | doc-corrected `dfb5943` | README: 30 options; `tasks.md` and `agents/launcher.md` say 18 was the count then |
 | 18 | doc-corrected `dfb5943` | entries for 58, 59 and 61 % added from the commits that moved the header |

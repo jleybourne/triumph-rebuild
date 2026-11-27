@@ -5,6 +5,7 @@
 //! <home>/sessions/<UTC stamp>-<profile>/     e.g. 20261127T153012Z-series-x
 //!   session.toml       written by the launcher: [session] at launch, [end] when the child exits
 //!   frame-line.log     the frame line (REBUILD_FRAME_LOG points here)
+//!   layer.log          the layer's console output: the settings it applied, the run, a crash
 //!   summary.toml       the run's summary (the layer writes it; see `frameline::Summary`)
 //!   crash-*.txt        crash reports (the layer / runtitle)
 //!   captures/          frame captures (the layer)
@@ -21,6 +22,8 @@ use std::path::{Path, PathBuf};
 pub const ENV_SESSION_DIR: &str = "REBUILD_SESSION_DIR";
 pub const SESSION_TOML: &str = "session.toml";
 pub const FRAME_LOG: &str = "frame-line.log";
+/// the layer's standard output and error
+pub const LAYER_LOG: &str = "layer.log";
 pub const SUMMARY_TOML: &str = "summary.toml";
 pub const CAPTURES: &str = "captures";
 pub const CAPTURE_REQUEST: &str = "capture.request";
@@ -34,39 +37,13 @@ pub fn now_unix() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Days since 1970-01-01 to (year, month, day), proleptic Gregorian (Howard Hinnant's algorithm).
-fn civil(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (yoe + era * 400 + i64::from(m <= 2), m, d)
-}
-
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y.rem_euclid(400);
-    let m = m as i64;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
+pub use rebuild_config::session::{folder_part, stamp};
+use rebuild_config::session::{civil, days_from_civil};
 
 fn parts(secs: u64) -> (i64, u32, u32, u64, u64, u64) {
     let (y, m, d) = civil((secs / 86_400) as i64);
     let s = secs % 86_400;
     (y, m, d, s / 3600, s / 60 % 60, s % 60)
-}
-
-/// `20261127T153012Z`: the folder-name stamp (sorts by time, no characters a path refuses).
-pub fn stamp(secs: u64) -> String {
-    let (y, m, d, h, mi, s) = parts(secs);
-    format!("{y:04}{m:02}{d:02}T{h:02}{mi:02}{s:02}Z")
 }
 
 /// `2026-11-27T15:30:12Z`
@@ -102,17 +79,6 @@ pub fn parse_stamp(name: &str) -> Option<u64> {
     Some(days as u64 * 86_400 + h * 3600 + mi * 60 + s)
 }
 
-/// A profile name as a folder-name part: letters, digits, `-` and `_`; anything else becomes `-`.
-pub fn folder_part(profile: &str) -> String {
-    let s: String = profile.trim().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).take(40).collect();
-    let s = s.trim_matches('-').to_string();
-    if s.is_empty() {
-        "default".into()
-    } else {
-        s
-    }
-}
-
 /// What the launcher records at launch.
 #[derive(Debug, Clone)]
 pub struct Start<'a> {
@@ -139,15 +105,7 @@ fn toml_value(v: Value) -> toml::Value {
 /// `session.toml`: the profile, every registry setting's effective value, the limits in force, the start
 /// time and the launcher's version.
 pub fn create(sessions: &Path, s: &Start, now: u64) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(sessions).map_err(|e| format!("{}: {e}", sessions.display()))?;
-    let base = format!("{}-{}", stamp(now), folder_part(s.profile));
-    let mut dir = sessions.join(&base);
-    let mut n = 2;
-    while dir.exists() {
-        dir = sessions.join(format!("{base}-{n}"));
-        n += 1;
-    }
-    std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let dir = rebuild_config::session::new_dir(sessions, s.profile, now)?;
     let mut sess = toml::Table::new();
     let mut put = |k: &str, v: toml::Value| {
         sess.insert(k.into(), v);

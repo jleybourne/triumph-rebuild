@@ -791,7 +791,7 @@ impl App {
                 if let Some(p) = &self.plan {
                     env.push(("REBUILD_RUN_SECONDS".into(), p.run_seconds.to_string()));
                     env.push(("REBUILD_MEASURE_FROM".into(), p.measure_from.key().into()));
-                    // for the layer's summary once it reads its settings (C2); nothing reads it yet (the session records the id)
+                    // the layer records it in the session's summary.toml (`matrix = "<id>"`)
                     env.push(("REBUILD_MATRIX_ID".into(), p.id.clone()));
                 }
                 b.name.to_string()
