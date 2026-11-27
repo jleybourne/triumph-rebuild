@@ -1,0 +1,31 @@
+vfsbench  10000 files, 23.0 MB, layers: base + 2 mods (500 conflicts) + overlay; 7 warm rounds
+layer check     10000 / 10000 files served by the expected layer
+cold vfs pass      921.7 ms   92.17 us/file   (directory listings built on first use)
+warm vfs pass      770.1 ms   77.01 us/file   median open+size+read+close
+OS floor           737.3 ms   73.73 us/file   median File::open + read_to_end on the same host files
+vfs overhead       +32.9 ms   +3.29 us/file   warm vfs - OS floor
+lookup only         13.8 ms    1.54 us/file   median resolve() of the 9000 base and mod files, no host call
+4 threads         1451.4 ms   36.28 us/file   40,000 opens on one shared Vfs, wall
+wrong           0 cold, 0 warm
+---
+    Blocking waiting for file lock on package cache
+vfsbench  10000 files, 23.0 MB, layers: base + 2 mods (500 conflicts) + overlay; 7 warm rounds
+layer check     10000 / 10000 files served by the expected layer
+cold vfs pass      832.3 ms   83.23 us/file   (directory listings built on first use)
+warm vfs pass      753.6 ms   75.36 us/file   median open+size+read+close
+OS floor           714.1 ms   71.41 us/file   median File::open + read_to_end on the same host files
+vfs overhead       +39.5 ms   +3.95 us/file   warm vfs - OS floor
+lookup only         14.1 ms    1.57 us/file   median resolve() of the 9000 base and mod files, no host call
+4 threads         1482.0 ms   37.05 us/file   40,000 opens on one shared Vfs, wall
+wrong           0 cold, 0 warm
+---
+vfsbench  10000 files, 23.0 MB, layers: base + 2 mods (500 conflicts) + overlay; 7 warm rounds
+layer check     10000 / 10000 files served by the expected layer
+cold vfs pass      815.7 ms   81.57 us/file   (directory listings built on first use)
+warm vfs pass      729.7 ms   72.97 us/file   median open+size+read+close
+OS floor           696.6 ms   69.66 us/file   median File::open + read_to_end on the same host files
+vfs overhead       +33.0 ms   +3.30 us/file   warm vfs - OS floor
+lookup only         14.1 ms    1.57 us/file   median resolve() of the 9000 base and mod files, no host call
+4 threads         1555.6 ms   38.89 us/file   40,000 opens on one shared Vfs, wall
+wrong           0 cold, 0 warm
+---
