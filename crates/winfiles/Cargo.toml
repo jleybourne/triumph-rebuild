@@ -1,0 +1,11 @@
+[package]
+name = "rebuild-winfiles"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+rebuild-vfs = { path = "../vfs" }
+
+[dev-dependencies]
+rebuild-runtime = { path = "../runtime" }
