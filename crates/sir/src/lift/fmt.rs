@@ -149,11 +149,12 @@ impl Lifter<'_> {
                     self.why = Some("not a resource descriptor".into());
                     return None;
                 }
-                // the heap's raw view of the buffer, its stride and records from the shadow table
+                // the heap's raw view of the buffer (from `lead` bytes below it), its stride and records from the
+                // shadow table
                 self.out.uses_shadow = true;
                 let _ = write!(
                     head,
-                    "    {{ ByteAddressBuffer w = ResourceDescriptorHeap[s{rsrc}]; uint2 sh = sir_shadow.Load2(s{rsrc} * 16u); uint sir_st = sh.x, sir_nr = sh.y, sir_i = {idx}, sir_o = {voff}; uint a = {soff} + sir_i * sir_st + sir_o;"
+                    "    {{ ByteAddressBuffer w = ResourceDescriptorHeap[s{rsrc}]; uint4 sh = sir_shadow.Load4(s{rsrc} * 16u); uint sir_st = sh.x, sir_nr = sh.y, sir_i = {idx}, sir_o = {voff}; uint a = sh.w + {soff} + sir_i * sir_st + sir_o;"
                 );
                 // a heap view's channel order is the view's: identity here
                 w3 = Some(format!("{}u", 4 | 5 << 3 | 6 << 6 | 7 << 9));

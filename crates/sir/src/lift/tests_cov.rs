@@ -52,6 +52,9 @@ fn compile(l: &Lifted, name: &str) {
     if l.uses_shadow {
         src.push_str(&format!("ByteAddressBuffer sir_shadow : register(t0, space{SHADOW_SPACE});\n"));
     }
+    for k in 0..l.immediate_samplers.len() {
+        src.push_str(&format!("SamplerState sir_imm{k} : register(s{k}, space{IMMEDIATE_SAMPLER_SPACE});\n"));
+    }
     src.push_str("RWStructuredBuffer<uint> io : register(u0);\n[WaveSize(32)] [numthreads(32, 1, 1)]\nvoid main(uint t : SV_DispatchThreadID) {\n");
     src.push_str(&declarations(l));
     for r in &l.sgprs {
@@ -282,8 +285,47 @@ fn a_typed_access_with_no_index_and_no_offset_is_element_0() {
     ];
     let l = lifted(&parts, &layout, &used);
     assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
-    assert!(l.body.contains("Buffer<float4> b = ResourceDescriptorHeap[s8]; float4 r = b[0u];"), "{}", l.body);
+    // the typed view is the shadow entry's alternate
+    assert!(l.body.contains("Buffer<float4> b = ResourceDescriptorHeap[sir_shadow.Load(s8 * 16u + 8u)]; float4 r = b[0u];"), "{}", l.body);
     compile(&l, "cov_typed0");
+}
+
+#[test]
+fn data_embedded_in_the_code_is_read_from_the_programs_own_words() {
+    // s[10:11] = pc; s10 += 8 (two words on, the table); s12 = index * 4; s14 = s10 + s12; s_load_dwordx2 from s[14:15]
+    let parts = [
+        sop1("s_getpc_b64", 10, 0),
+        sop2("s_add_u32", 10, 10, 128 + 16),
+        sop2("s_lshl_b32", 12, 2, 128 + 2),
+        sop2("s_add_u32", 14, 10, 12),
+        smem("s_load_dwordx2", 16, 14, 4),
+        vec![0xBF81_0000], // s_endpgm, then the table
+        vec![0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444],
+    ];
+    let bytes: Vec<u8> = parts.iter().flatten().flat_map(|w| w.to_le_bytes()).collect();
+    let insts = rebuild_shader::gfx10::decode(&bytes).unwrap();
+    let bind = Bindings { hw: HwStage::Cs, layout: &[], used: &[] };
+    // without the bytes (only the decoded, reachable instructions) the load is refused, not read as zeros
+    assert_eq!(lift_program(&insts, Stage::None, Some(bind), true).unsupported.len(), 1);
+    let l = lift_program_code(&insts, &bytes, Stage::None, Some(bind), true);
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let b = &l.body;
+    assert!(b.contains("s10 = 4u;"), "{b}");
+    assert!(b.contains("s16 = sir_code[min(((uint)((int)s14 + 4) >> 2) + 0u,"), "{b}");
+    assert!(l.code.contains(&0x3333_3333), "{:?}", l.code);
+}
+
+#[test]
+fn a_wave32_mask_survives_a_mask_written_to_the_next_sgpr() {
+    // wave32: masks in s1 and s2 are separate registers, not a pair
+    let p = program(&[
+        vop3("v_cmp_lt_f32", 1, [V + 0, V + 1, 0], 0, 0, 0, 0),
+        vop3("v_cmp_gt_f32", 2, [V + 0, V + 1, 0], 0, 0, 0, 0),
+        sop2("s_or_b32", 3, 1, 2),
+    ]);
+    let l = lift_program(&p, Stage::None, None, false);
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    assert!(l.body.contains("m3 = m1 || m2;"), "{}", l.body);
 }
 
 #[test]
@@ -375,7 +417,8 @@ fn buffer_and_lds_atomics() {
     );
     assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
     let b = &l.body;
-    assert!(b.contains("RWByteAddressBuffer w = ResourceDescriptorHeap[s8];") && b.contains("w.InterlockedAdd(a & ~3u, v4, o);"), "{b}");
+    assert!(b.contains("uint4 sh = sir_shadow.Load4(s8 * 16u); RWByteAddressBuffer w = ResourceDescriptorHeap[sh.z];"), "{b}");
+    assert!(b.contains("uint a = sh.w + sir_i * 0u + sir_o + 0u;") && b.contains("w.InterlockedAdd(a & ~3u, v4, o);"), "{b}");
     assert!(b.contains("int o = 0; if (true) w.InterlockedMax(a & ~3u, (int)v5, o);"), "{b}");
     assert!(b.contains("w.InterlockedCompareExchange(a & ~3u, v7, v6, o);") && b.contains("v6 = (uint)o;"), "{b}");
     assert!(b.contains(&format!("ResourceDescriptorHeap[{WINDOW_HEAP_BASE}u + (s5 & 32767u)]")) && b.contains("w.InterlockedMin(a & ~3u, v8, o);"), "{b}");
@@ -394,4 +437,83 @@ fn buffer_and_lds_atomics() {
     // signed LDS min/max would compile unsigned on the uint array: refused
     let l = lift_stage(&program(&[ds("ds_max_i32")]), Stage::Cs(io), None);
     assert_eq!(l.unsupported.len(), 1);
+}
+
+#[test]
+fn global_memory_small_lds_access_and_image_forms() {
+    let (layout, used) = table();
+    let flat = |name: &str, fields: &[(&str, u32)]| build(&e::FLAT, Encoding::Global, name, fields);
+    let img = |name: &str, fields: &[(&str, u32)]| {
+        let mut f = vec![("dim", 1), ("srsrc", 2), ("ssamp", 4)];
+        f.extend_from_slice(fields);
+        build(&e::MIMG, Encoding::Mimg, name, &f)
+    };
+    let l = lifted(
+        &[
+            smem("s_load_dwordx8", 8, 0, 0),
+            // an immediate sampler in s[16:19]
+            sop1("s_mov_b32", 16, 128),
+            sop1("s_mov_b32", 17, 128),
+            sop1("s_mov_b32", 18, 128),
+            sop1("s_mov_b32", 19, 128),
+            // global_load_dwordx2 v[4:5], v0, s[2:3] offset -4; global_store_dword v[0:1] (64-bit address), v6
+            flat("global_load_dwordx2", &[("seg", 2), ("addr", 0), ("saddr", 2), ("vdst", 4), ("offset", 0xffc)]),
+            flat("global_store_dword", &[("seg", 2), ("addr", 0), ("saddr", 0x7d), ("data", 6)]),
+            img("image_sample", &[("dmask", 0b0111), ("d16", 1), ("vaddr", 0), ("vdata", 10)]),
+            img("image_gather4_lz_o", &[("dmask", 1), ("vaddr", 0), ("vdata", 12)]),
+            img("image_load_mip", &[("dmask", 1), ("vaddr", 0), ("vdata", 14)]),
+        ],
+        &layout,
+        &used,
+    );
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let b = &l.body;
+    assert!(b.contains(&format!("RWByteAddressBuffer w = ResourceDescriptorHeap[{WINDOW_HEAP_BASE}u + (s3 & 32767u)]; uint a = (s2 + v0 + (uint)-4) & ~3u;")), "{b}");
+    assert!(b.contains(&format!("ResourceDescriptorHeap[NonUniformResourceIndex({WINDOW_HEAP_BASE}u + (v1 & 32767u))]")) && b.contains("w.Store(a + 0u, v6);"), "{b}");
+    assert!(b.contains("v10 = sir_f16(r.x) | (sir_f16(r.y) << 16);") && b.contains("v11 = sir_f16(r.z) | 0u;"), "{b}");
+    assert!(b.contains("t.GatherRed(sir_imm0, float2(asfloat(v1), asfloat(v2)), int2(((int)v0 << 26) >> 26, ((int)v0 << 18) >> 26));"), "{b}");
+    assert!(b.contains("t.Load(int3((int)v0, (int)v1, (int)v2))"), "{b}");
+    compile(&l, "cov_global_image");
+
+    let io = rebuild_shader::native::ComputeIo { rsrc2: 0, threads: [64, 1, 1] };
+    let ds = |name: &str| build(&e::DS, Encoding::Ds, name, &[("addr", 0), ("data0", 1), ("vdst", 3), ("offset0", 2)]);
+    let l = lift_stage(&program(&[ds("ds_read_i16"), ds("ds_read_u8"), ds("ds_write_b16")]), Stage::Cs(io), None);
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let b = &l.body;
+    assert!(b.contains("v3 = (uint)(((int)(sir_lds[(v0 + 2u) >> 2] >> (((v0 + 2u) & 3u) * 8u)) << 16) >> 16);"), "{b}");
+    assert!(b.contains("InterlockedAnd(sir_lds[sir_b >> 2], ~(65535u << sir_sh)); InterlockedOr(sir_lds[sir_b >> 2], (v1 & 65535u) << sir_sh);"), "{b}");
+}
+
+#[test]
+fn buffer_views_are_the_heaps_alternates_and_raw_reads_apply_the_lead() {
+    // d3d12x: the console index holds a raw SRV from the 16-byte aligned address `lead` bytes below the buffer;
+    // the CBV, UAV and typed views are at the shadow entry's alternate (`(stride, records, alternate, lead)`)
+    let layout = vec![RootParam { root: RootType::Table, table_offset_dwords: 0, sgprs: 1, base_register: 0, user_data: 0, slot: 0 }];
+    let cbv = vec![UsedResource { kind: ResourceType::Cbv, root: RootType::Table, table_offset_dwords: 0, lower_bound: 0, stride: 0, dwords: 4, user_data: 0, slot: 0 }];
+    let l = lifted(&[smem("s_load_dwordx4", 8, 0, 0), smem("s_buffer_load_dwordx2", 12, 8, 16)], &layout, &cbv);
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    assert!(l.body.contains("ConstantBuffer<SirCb> c = ResourceDescriptorHeap[sir_shadow.Load(s8 * 16u + 8u)];"), "{}", l.body);
+    assert!(l.body.contains("s12 = c.d[1].x;"), "{}", l.body);
+    compile(&l, "cov_alt_cbv");
+
+    let (layout, used) = table();
+    let mubuf = |name: &str, vdata: u32| build(&e::MUBUF, Encoding::Mubuf, name, &[("offen", 1), ("vaddr", 0), ("vdata", vdata), ("srsrc", 2), ("soffset", 128)]);
+    let l = lifted(
+        &[
+            smem("s_load_dwordx4", 8, 0, 0),
+            smem("s_buffer_load_dword", 12, 8, 4),
+            mubuf("buffer_load_dwordx2", 4),
+            mubuf("buffer_store_dword", 6),
+            build(&e::MTBUF, Encoding::Mtbuf, "tbuffer_load_format_x", &[("offen", 1), ("format", 22), ("vaddr", 0), ("vdata", 7), ("srsrc", 2), ("soffset", 128)]),
+        ],
+        &layout,
+        &used,
+    );
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let b = &l.body;
+    assert!(b.contains("ByteAddressBuffer c = ResourceDescriptorHeap[s8]; uint sir_ld = sir_shadow.Load(s8 * 16u + 12u);") && b.contains("s12 = c.Load(sir_ld + 4u);"), "{b}");
+    assert!(b.contains("ByteAddressBuffer b = ResourceDescriptorHeap[s8]; uint4 sh = sir_shadow.Load4(s8 * 16u); uint2 r = b.Load2(sh.w + v0 + 0u + 0u);"), "{b}");
+    assert!(b.contains("uint4 sh = sir_shadow.Load4(s8 * 16u); RWByteAddressBuffer b = ResourceDescriptorHeap[sh.z]; if (true) b.Store(sh.w + v0 + 0u + 0u, v6);"), "{b}");
+    assert!(b.contains("uint a = sh.w + 0u + sir_i * sir_st + sir_o;"), "{b}");
+    compile(&l, "cov_alt_raw");
 }

@@ -140,8 +140,10 @@ impl Lifter<'_> {
         let Stage::Ps(ps) = &self.stage else { return None };
         let (attr, chan, vdst) = (d.get("attr")? as u8, d.get("attrchan")? as u8, d.get("vdst")? as u16);
         let input = ps.inputs.iter().find(|i| i.attr == attr)?;
-        if input.fp16 || input.pack2 {
-            return None; // 16-bit attributes: next step
+        // a flat 16-bit attribute, one per dword: the dword holds its f16 bits (the high half 0)
+        let flat16 = input.fp16 && !input.pack2 && name == "v_interp_mov_f32";
+        if (input.fp16 || input.pack2) && !flat16 {
+            return None; // interpolated or packed 16-bit attributes: next step
         }
         let mode = match name {
             "v_interp_mov_f32" => Interp::Flat,
@@ -161,7 +163,7 @@ impl Lifter<'_> {
         }
         e.0 |= 1 << chan;
         // resolved against the signature when the program is assembled (rows can hold several elements)
-        let expr = format!("@in{}.{chan}@", input.row);
+        let expr = if flat16 { format!("sir_f16(asfloat(@in{}.{chan}@))", input.row) } else { format!("@in{}.{chan}@", input.row) };
         // p1's partial result only ever feeds p2 on the same register, so both may write the value
         self.vwrite_raw(vdst, expr);
         Some(())
@@ -242,14 +244,12 @@ impl Lifter<'_> {
                 return Some(());
             }
             if target >= 32 {
-                let Some(o) = vs.outputs.iter().find(|o| o.param == target - 32).copied() else {
+                let Some(_) = vs.outputs.iter().find(|o| o.param == target - 32).copied() else {
                     self.why = Some("a parameter no output names".into());
                     return None;
                 };
-                if o.fp16 {
-                    self.why = Some(if o.pack2 { "packed fp16 output" } else { "fp16 output" }.into());
-                    return None;
-                }
+                // a 16-bit parameter: its dwords are exported as they are and unpacked into the signature's
+                // elements when the program is assembled ([`half_outputs`])
             }
             *self.out.io.exports.entry(target).or_default() |= en;
             for c in 0..4u8 {
@@ -310,6 +310,15 @@ fn as_type(comp: u32, e: &str) -> String {
     }
 }
 
+/// `static const uint sir_code[]`: the program's words, when it reads data embedded in its code.
+fn code_table(l: &Lifted) -> String {
+    if l.code.is_empty() {
+        return String::new();
+    }
+    let words: Vec<String> = l.code.iter().map(|w| format!("{w}u")).collect();
+    format!("static const uint sir_code[{}] = {{ {} }};\n", l.code.len(), words.join(", "))
+}
+
 /// A whole pixel shader: inputs and outputs named by the container's signatures, the system values the
 /// input VGPRs carry, the lifted body. `Err` names what is missing.
 pub fn ps_program(l: &Lifted, ps: &PsStage, bind: Option<&super::Bindings>, isg1: &[Element], osg1: &[Element]) -> Result<String, String> {
@@ -335,6 +344,7 @@ pub fn ps_program(l: &Lifted, ps: &PsStage, bind: Option<&super::Bindings>, isg1
         return Err("an input read with two interpolation modes".into());
     }
     let mut s = String::from(super::PRELUDE);
+    s.push_str(&code_table(l));
     for k in 0..l.immediate_samplers.len() {
         let ty = if l.immediate_compare.contains(&k) { "SamplerComparisonState" } else { "SamplerState" };
         let _ = writeln!(s, "{ty} sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
@@ -496,6 +506,7 @@ pub fn vs_program(l: &Lifted, vs: &VsStage, bind: Option<&super::Bindings>, isg1
         let _ = writeln!(user_init, "    s{s} = sir_ud[{}].{};", k / 4, ["x", "y", "z", "w"][k as usize % 4]);
     }
     let mut s = String::from(super::PRELUDE);
+    s.push_str(&code_table(l));
     for k in 0..l.immediate_samplers.len() {
         let ty = if l.immediate_compare.contains(&k) { "SamplerComparisonState" } else { "SamplerState" };
         let _ = writeln!(s, "{ty} sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
@@ -544,6 +555,7 @@ pub fn vs_program(l: &Lifted, vs: &VsStage, bind: Option<&super::Bindings>, isg1
     let mut pos_done = false;
     let mut outs: Vec<&Element> = osg1.iter().collect();
     outs.sort_by_key(|e| (e.register, e.mask.trailing_zeros()));
+    let halves = half_outputs(vs, osg1);
     for e in outs {
         let first = e.mask.trailing_zeros() as u8;
         let n = e.mask.count_ones() as usize;
@@ -554,6 +566,27 @@ pub fn vs_program(l: &Lifted, vs: &VsStage, bind: Option<&super::Bindings>, isg1
                     returns.push_str("    r.pos = asfloat(o12);\n");
                 }
                 pos_done = true;
+            }
+            // an element carried in 16-bit halves of parameters
+            0 if (first..first + n as u8).any(|c| halves.contains_key(&(e.register as u8, c))) => {
+                let row = e.register as u8;
+                let _ = writeln!(s, "    {} p{row}_{first} : {}{};", hlsl_type(e.comp, n), e.name, e.index);
+                let parts: Vec<String> = (first..first + n as u8)
+                    .map(|c| match halves.get(&(row, c)) {
+                        Some(&(t, dw, high)) if l.io.exports.contains_key(&t) => {
+                            rows_done.insert(t);
+                            let x = format!("((o{t}.{} >> {}u) & 0xffffu)", ["x", "y", "z", "w"][dw as usize], if high { 16 } else { 0 });
+                            match e.comp {
+                                1 | 4 => x,
+                                2 | 5 => format!("(int)((int){x} << 16) >> 16"),
+                                _ => format!("f16tof32({x})"),
+                            }
+                        }
+                        _ => "0".into(),
+                    })
+                    .collect();
+                let ty = hlsl_type(e.comp, n);
+                let _ = writeln!(returns, "    r.p{row}_{first} = {ty}({});", parts.join(", "));
             }
             0 => {
                 let row = e.register as u8;
@@ -596,6 +629,72 @@ pub fn vs_program(l: &Lifted, vs: &VsStage, bind: Option<&super::Bindings>, isg1
     Ok(s)
 }
 
+/// Where each 16-bit output channel comes from: (row, column) of the output signature → (export target,
+/// dword, high half). A 16-bit parameter without `pack2` carries one f16 per dword, in the low half. With
+/// `pack2` (the oracle's rule, `victory-shader` `packed_layout`): its partner row is the next 16-bit row of
+/// the signature that no output entry names, taken in row order; the parameter carries the leading element of
+/// its row, then of its partner row, each in whole dwords (two halves a dword); an element sharing a register
+/// behind another follows in the first parameter, in row order, that has whole dwords left.
+fn half_outputs(vs: &VsStage, osg1: &[Element]) -> BTreeMap<(u8, u8), (u8, u8, bool)> {
+    let mut out = BTreeMap::new();
+    let half = |e: &Element| e.system == 0 && (e.min_precision != 0 || e.comp >= 4);
+    let mut free: Vec<u8> = osg1.iter().filter(|e| half(e)).map(|e| e.register as u8).filter(|r| !vs.outputs.iter().any(|o| o.row == *r)).collect();
+    free.sort_unstable();
+    free.dedup();
+    let mut fp16: Vec<_> = vs.outputs.iter().filter(|o| o.fp16).collect();
+    fp16.sort_by_key(|o| o.row);
+    let of_row = |r: u8| {
+        let mut v: Vec<(u8, u8)> = osg1
+            .iter()
+            .filter(|e| e.system == 0 && e.register as u8 == r)
+            .map(|e| (e.mask.trailing_zeros() as u8, e.mask.count_ones() as u8))
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    // per packed parameter: its target, the dwords used, (dword, row, column, columns) of its elements
+    let mut layout: Vec<(u8, u8, Vec<(u8, u8, u8, u8)>)> = Vec::new();
+    let mut behind = Vec::new();
+    for o in fp16 {
+        let t = 32 + o.param;
+        if !o.pack2 {
+            for c in 0..4 {
+                out.insert((o.row, c), (t, c, false));
+            }
+            continue;
+        }
+        let b = free.iter().position(|&r| r > o.row).map(|i| free.remove(i));
+        let (mut placed, mut at) = (Vec::new(), 0u8);
+        if !of_row(o.row).is_empty() {
+            for r in [Some(o.row), b].into_iter().flatten() {
+                let of = of_row(r);
+                let Some((lead, more)) = of.split_first() else { continue };
+                placed.push((at, r, lead.0, lead.1));
+                at += lead.1.div_ceil(2);
+                behind.extend(more.iter().map(|e| (r, e.0, e.1)));
+            }
+        }
+        layout.push((t, at, placed));
+    }
+    behind.sort_unstable();
+    for (r, col, cols) in behind {
+        let need = cols.div_ceil(2);
+        if let Some(p) = layout.iter_mut().find(|p| p.1 + need <= 4) {
+            p.2.push((p.1, r, col, cols));
+            p.1 += need;
+        }
+    }
+    for (t, _, placed) in layout {
+        for (dword, r, col, cols) in placed {
+            for k in 0..cols {
+                let h = 2 * dword + k;
+                out.insert((r, col + k), (t, h / 2, h % 2 == 1));
+            }
+        }
+    }
+    out
+}
+
 /// A whole compute program: `numthreads` and the LDS size from the dispatch settings, thread ids (v0-v2) and
 /// group ids (the system SGPRs) as system values. It writes only through UAVs, so it returns nothing.
 pub fn cs_program(l: &Lifted, cs: &ComputeIo, bind: Option<&super::Bindings>) -> Result<String, String> {
@@ -620,6 +719,7 @@ pub fn cs_program(l: &Lifted, cs: &ComputeIo, bind: Option<&super::Bindings>) ->
         let _ = writeln!(init, "    s{s} = sir_ud[{}].{};", k / 4, ["x", "y", "z", "w"][k as usize % 4]);
     }
     let mut s = String::from(super::PRELUDE);
+    s.push_str(&code_table(l));
     for k in 0..l.immediate_samplers.len() {
         let ty = if l.immediate_compare.contains(&k) { "SamplerComparisonState" } else { "SamplerState" };
         let _ = writeln!(s, "{ty} sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
@@ -678,5 +778,41 @@ mod tests {
         let ps = PsStage { inputs: &[], input_addr: 0 };
         let e = ps_program(&l, &ps, None, &[], &[]).unwrap_err();
         assert!(e.contains("s2, which is no user data"), "{e}");
+    }
+
+    #[test]
+    fn sixteen_bit_outputs_follow_the_packed_layout() {
+        use rebuild_shader::native::{Usage, VsOutput};
+        let el = |register: u32, mask: u8, half: bool| Element {
+            stream: 0,
+            name: "TEXCOORD".into(),
+            index: register,
+            system: 0,
+            comp: 3,
+            register,
+            mask,
+            rw: 0,
+            min_precision: u32::from(half),
+        };
+        // the oracle's pedestrian case: TEXCOORD0 (register 1, columns 0-1) with TEXCOORD7 behind it (columns
+        // 2-3), TEXCOORD1 (register 2, the partner row no entry names); register 3 a plain 16-bit output
+        let osg1 = [el(1, 0b0011, true), el(1, 0b1100, true), el(2, 0b1111, true), el(3, 0b0111, true), el(4, 0b1111, false)];
+        let outputs = [
+            VsOutput { usage: Usage::Generic, row: 1, param: 0, fp16: true, pack2: true },
+            VsOutput { usage: Usage::Generic, row: 3, param: 1, fp16: true, pack2: false },
+            VsOutput { usage: Usage::Generic, row: 4, param: 2, fp16: false, pack2: false },
+        ];
+        let vs = VsStage { inputs: &[], outputs: &outputs };
+        let h = half_outputs(&vs, &osg1);
+        // parameter 0: TEXCOORD0 in dword 0 (two halves), TEXCOORD1 in dwords 1-2, TEXCOORD7 behind in dword 3
+        assert_eq!(h[&(1, 0)], (32, 0, false));
+        assert_eq!(h[&(1, 1)], (32, 0, true));
+        assert_eq!(h[&(2, 0)], (32, 1, false));
+        assert_eq!(h[&(2, 3)], (32, 2, true));
+        assert_eq!(h[&(1, 2)], (32, 3, false));
+        assert_eq!(h[&(1, 3)], (32, 3, true));
+        // one f16 per dword, in the low half
+        assert_eq!(h[&(3, 2)], (33, 2, false));
+        assert!(!h.contains_key(&(4, 0)));
     }
 }

@@ -49,6 +49,9 @@ pub struct Lifted {
     pub uses_shadow: bool,
     /// LDS is read or written (`groupshared uint sir_lds[]`).
     pub uses_lds: bool,
+    /// The program's own words, when it reads data embedded in its code (`s_getpc_b64` and a load from
+    /// there): `static const uint sir_code[]`, indexed by byte offset / 4.
+    pub code: Vec<u32>,
 }
 
 /// The register space of the descriptor shadow table: per heap index, 16 bytes the runtime writes from the
@@ -202,6 +205,9 @@ pub(crate) struct FlowState {
     stale: BTreeSet<u8>,
     /// EXEC may be narrower than at entry (VALU writes are predicated)
     narrowed: bool,
+    /// SGPRs (the low half of a pair) holding a byte offset into the program's code: `s_getpc_b64` and
+    /// values added to it
+    code_of: BTreeSet<u8>,
 }
 
 impl FlowState {
@@ -220,6 +226,7 @@ impl FlowState {
             mask_cur: self.mask_cur.intersection(&o.mask_cur).copied().collect(),
             stale: self.stale.union(&o.stale).copied().collect(),
             narrowed: self.narrowed || o.narrowed,
+            code_of: self.code_of.intersection(&o.code_of).copied().collect(),
         }
     }
 }
@@ -243,6 +250,9 @@ struct Lifter<'a> {
     /// inside an SDWA instruction: the operands are `sir_a` / `sir_b` (selected and extended), and the op's
     /// result goes to `sir_r` (merged into the destination's selected bits afterwards)
     sdwa: bool,
+    /// the program's words by byte offset / 4 (empty unless given: [`lift_program_code`]), for data embedded in
+    /// the code
+    code: Vec<u32>,
 }
 
 /// What an operand reads, as a `uint` expression; `None` if not translated yet.
@@ -647,6 +657,22 @@ impl Lifter<'_> {
                 self.line(format!("{guard}sir_lds[(v{a} >> 2) + {}u] = {x};", o0 * m));
                 self.line(format!("{guard}sir_lds[(v{a} >> 2) + {}u] = {y};", o1 * m));
             }
+            // 8- and 16-bit reads (zero- or sign-extended) and writes; a write clears and sets its bits with two
+            // atomics, so writes to the other bytes of the dword by other lanes are kept
+            "ds_read_u8" | "ds_read_i8" | "ds_read_u16" | "ds_read_i16" => {
+                let vdst = d.get("vdst")? as u16;
+                let bits = if name.ends_with("8") { 8 } else { 16 };
+                let x = format!("(sir_lds[(v{a} + {off}u) >> 2] >> (((v{a} + {off}u) & 3u) * 8u))");
+                let e = if name.contains("_i") { format!("(uint)(((int){x} << {}) >> {})", 32 - bits, 32 - bits) } else { format!("({x} & {}u)", (1u32 << bits) - 1) };
+                self.vwrite_raw(vdst, e);
+            }
+            "ds_write_b8" | "ds_write_b16" => {
+                let x = data(self, "data0", 0)?;
+                let m = if name.ends_with("8") { 0xffu32 } else { 0xffff };
+                self.line(format!("{{ uint sir_b = v{a} + {off}u, sir_sh = (sir_b & 3u) * 8u;"));
+                self.line(format!("  {guard}{{ InterlockedAnd(sir_lds[sir_b >> 2], ~({m}u << sir_sh)); InterlockedOr(sir_lds[sir_b >> 2], ({x} & {m}u) << sir_sh); }}"));
+                self.line("}".into());
+            }
             // atomics, with the old value returned by the `_rtn` forms
             n if lds_atomic(n).is_some() => {
                 let (f, rtn) = lds_atomic(n)?;
@@ -861,9 +887,13 @@ impl Lifter<'_> {
         self.f.desc_words.remove(&s);
         self.f.consts.remove(&s);
         self.f.table_of.remove(&s);
+        self.f.code_of.remove(&s);
         self.f.stale.remove(&s);
         self.f.mask_cur.remove(&s);
-        self.f.mask_cur.remove(&s.wrapping_sub(1));
+        // in wave64 a mask is a pair: writing its high SGPR ends it too
+        if self.wave64 {
+            self.f.mask_cur.remove(&s.wrapping_sub(1));
+        }
     }
 
     /// SCC after a lane-mask op: is any lane's bit set (only computed when something reads it).
@@ -1003,6 +1033,20 @@ impl Lifter<'_> {
                 self.swrite(s, "0u".into())?;
                 self.swrite(s + 1, "0u".into())
             }
+            // the address of the next instruction, as a byte offset into the code (data embedded after the
+            // program is read from there: [`Lifted::code`])
+            Encoding::Sop1 if name == "s_getpc_b64" => {
+                let s = d.get("sdst")?;
+                let pc = (i.offset + 4 * i.words.len()) as u32;
+                self.swrite(s, format!("{pc}u"))?;
+                self.swrite(s + 1, "0u".into())?;
+                if let Src::Sgpr(n) = enc::src(s) {
+                    self.f.code_of.insert(n);
+                    self.f.consts.insert(n, pc);
+                    self.f.consts.insert(n + 1, 0);
+                }
+                Some(())
+            }
             Encoding::Sop1 | Encoding::Sop2 | Encoding::Sopc | Encoding::Sopk => self.salu(name, &d),
             Encoding::Vintrp => self.interp(name, &d),
             Encoding::Smem => self.smem(name, &d),
@@ -1013,6 +1057,7 @@ impl Lifter<'_> {
             Encoding::Vop3p => self.vop3p(name, &d),
             Encoding::Ds if name == "ds_swizzle_b32" => self.swizzle(&d),
             Encoding::Ds => self.lds(name, &d),
+            Encoding::Global => self.global(name, &d),
             Encoding::Vop1 | Encoding::Vop2 | Encoding::Vop3 | Encoding::Vopc => {
                 if let Some((x, v)) = &d.extra {
                     if x.name == "dpp16" {
@@ -1050,8 +1095,13 @@ impl Lifter<'_> {
             Src::Sgpr(n) => self.table_origin(n),
             _ => None,
         });
+        let code = matches!(name, "s_add_u32" | "s_add_i32" | "s_sub_u32" | "s_sub_i32" | "s_mov_b32" | "s_mov_b64")
+            && [d.get("ssrc0"), d.get("ssrc1")].into_iter().flatten().any(|c| matches!(enc::src(c), Src::Sgpr(n) if self.f.code_of.contains(&n)));
         let r = self.salu_inner(name, d);
         if r.is_some() {
+            if let (true, Some(Src::Sgpr(dst))) = (code, d.get("sdst").map(enc::src)) {
+                self.f.code_of.insert(dst);
+            }
             if let Some(Src::Sgpr(dst)) = d.get("sdst").map(enc::src) {
                 match table {
                     Some(t) => {
@@ -1215,6 +1265,22 @@ impl Lifter<'_> {
             // s_waitcnt_vscnt / vmcnt / expcnt / lgkmcnt (SOPK): no effect on results
             n if n.starts_with("s_waitcnt") => Some(()),
             "s_not_b64" | "s_not_b32" => self.s_not(name, d),
+            "s_lshl_b64" | "s_lshr_b64" | "s_ashr_i64" => {
+                let x = self.src64(d.get("ssrc0")?)?;
+                let k = b(self)?;
+                let e = match name {
+                    "s_lshl_b64" => format!("{x} << ({k} & 63u)"),
+                    "s_lshr_b64" => format!("{x} >> ({k} & 63u)"),
+                    _ => format!("(uint64_t)((int64_t){x} >> ({k} & 63u))"),
+                };
+                let dst = sdst?;
+                self.line(format!("{{ uint64_t sir_s = {e};"));
+                self.line("  scc = sir_s != 0;".into());
+                self.swrite(dst, "(uint)sir_s".into())?;
+                self.swrite(dst + 1, "(uint)(sir_s >> 32)".into())?;
+                self.line("}".into());
+                Some(())
+            }
             "s_bfm_b32" => {
                 let (x, y) = (a(self)?, b(self)?);
                 self.swrite(sdst?, format!("((1u << ({x} & 31u)) - 1u) << ({y} & 31u)"))
@@ -2003,13 +2069,20 @@ pub fn lift_stage<'a>(insts: &[Instruction], stage: Stage<'a>, bind: Option<Bind
 /// `if`/loops ([`cfg`]). `wave64` is the console's wave size for this program (lane-mask ops are `_b64`).
 /// An irreducible graph or a branch kind not translated is named in [`Lifted::unsupported`].
 pub fn lift_program<'a>(insts: &[Instruction], stage: Stage<'a>, bind: Option<Bindings<'a>>, wave64: bool) -> Lifted {
-    let l = Lifter::new(stage, bind, wave64);
+    lift_program_code(insts, &[], stage, bind, wave64)
+}
+
+/// [`lift_program`] with the program's code bytes, so data embedded in the code (read through `s_getpc_b64`;
+/// the decoder decodes only reachable code) can be read: [`Lifted::code`]. Without them such reads are refused.
+pub fn lift_program_code<'a>(insts: &[Instruction], code: &[u8], stage: Stage<'a>, bind: Option<Bindings<'a>>, wave64: bool) -> Lifted {
+    let mut l = Lifter::new(stage, bind, wave64);
+    l.code = code.chunks_exact(4).map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]])).collect();
     cfg::lift(l, insts)
 }
 
 impl<'a> Lifter<'a> {
     fn new(stage: Stage<'a>, bind: Option<Bindings<'a>>, wave64: bool) -> Self {
-        Lifter { out: Lifted::default(), stage, bind, f: FlowState::default(), why: None, wave64, scc_live: false, dpp: None, sdwa: false, hi16: false }
+        Lifter { out: Lifted::default(), stage, bind, f: FlowState::default(), why: None, wave64, scc_live: false, dpp: None, sdwa: false, hi16: false, code: Vec::new() }
     }
 
     /// Lifts instructions in order; `live[k]` says whether SCC is read after instruction k.
