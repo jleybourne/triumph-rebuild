@@ -133,8 +133,8 @@ use Tier::*;
 pub static REGISTRY: &[Setting] = &[
     s("game.dir", "Game folder", "The title's folder. Read-only: nothing is ever written into it.", Kind::Path, Default::Path(""), Restart, Stable),
     s("display.width", "Output width", "The size of the window or screen the frame is presented at.", Kind::Int { min: 640, max: 7680 }, Default::Int(3840), Restart, Stable),
-    s("display.height", "Output height", "", Kind::Int { min: 360, max: 4320 }, Default::Int(2160), Restart, Stable),
-    s("display.window", "Window mode", "", Kind::Choice { options: &["windowed", "borderless", "fullscreen"] }, Default::Choice("borderless"), Restart, Stable),
+    s("display.height", "Output height", "The height of the window or screen the frame is presented at.", Kind::Int { min: 360, max: 4320 }, Default::Int(2160), Restart, Stable),
+    s("display.window", "Window mode", "borderless = a window the size of the screen (fastest to switch away from); fullscreen = exclusive.", Kind::Choice { options: &["windowed", "borderless", "fullscreen"] }, Default::Choice("borderless"), Restart, Stable),
     s("display.vsync", "Vsync", "Wait for the display's refresh before presenting.", Kind::Bool, Default::Bool(false), Live, Stable),
     s("display.frame_cap", "Frame cap", "0 = no cap. The title also caps itself at 30 in menus.", Kind::Int { min: 0, max: 360 }, Default::Int(0), Live, Stable),
     s("upscaler.backend", "Upscaler", "auto = DLSS on NVIDIA, FSR on AMD (Build 7). native = the title's own pass.", Kind::Choice { options: &["auto", "dlss", "fsr", "native"] }, Default::Choice("auto"), Restart, Stable),
@@ -151,6 +151,12 @@ pub static REGISTRY: &[Setting] = &[
     s("diagnostics.frame_log", "Frame line log", "Append the frame line once a second to a file the launcher reads.", Kind::Bool, Default::Bool(true), Live, Stable),
     s("diagnostics.capture_dir", "Capture folder", "Where frame captures go. Empty = off.", Kind::Path, Default::Path(""), Live, Stable),
     s("diagnostics.d3d12_debug", "D3D12 debug layer", "Names why a pipeline or command is refused. Slow: never for measuring.", Kind::Bool, Default::Bool(false), Restart, Experimental),
+    s("upscaler.dlss_dll", "DLSS DLL", "nvngx_dlss.dll, supplied by you; never shipped or committed. Empty = REBUILD_DLSS_DLL.", Kind::Path, Default::Path(""), Restart, Stable),
+    s("upscaler.streamline_dir", "Streamline folder", "NVIDIA Streamline's runtime DLLs. Empty = REBUILD_STREAMLINE_DIR.", Kind::Path, Default::Path(""), Restart, Stable),
+    s("upscaler.fidelityfx_dir", "FidelityFX folder", "AMD FidelityFX SDK runtime DLLs (FSR). Empty = REBUILD_FIDELITYFX_DIR.", Kind::Path, Default::Path(""), Restart, Stable),
+    s("dstorage.bcpack_tables", "BCPack tables", "The ~78 KB BCPack format tables, a file kept outside the repository. Empty = REBUILD_BCPACK_TABLES; without it, BCPack textures are refused.", Kind::Path, Default::Path(""), Restart, Stable),
+    s("game.title_settings", "Title settings file", "The title's own settings.xml (it lives in the title's storage, not the game folder). Empty = search.", Kind::Path, Default::Path(""), Restart, Stable),
+    s("diagnostics.frame_log_path", "Frame line log file", "Where the frame line log is written. Empty = REBUILD_FRAME_LOG, else frame-line.log in the launcher's folder.", Kind::Path, Default::Path(""), Live, Stable),
     s("menu.key", "In-game menu key", "Toggles the in-game menu. While it is open the title sees no input.", Kind::Choice { options: &["F10", "F11", "F12", "Insert", "Home"] }, Default::Choice("F10"), Restart, Stable),
 ];
 
@@ -164,15 +170,29 @@ pub struct Mod {
     pub enabled: bool,
 }
 
+/// The `schema` this code writes. A file from a newer schema loads; whatever this code doesn't know is kept.
+pub const SCHEMA: i64 = 1;
+
 /// A loaded `rebuild.toml`: the values set, the mods in load order, and what was wrong with the file.
+///
+/// **A user's settings are never replaced** (owner rule): every value set explicitly is kept and written back
+/// even when it equals today's default (so a later change of default never moves it), and every entry this
+/// code can't use (an unknown key, a wrong type, a refused value, an unknown top-level key) is kept as written
+/// and written back unchanged.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Config {
+    /// The file's schema: never lowered on save, so a newer version's file stays marked as newer.
+    pub schema: i64,
     pub profile: String,
     pub stable_only: bool,
     values: BTreeMap<&'static str, Value>,
     pub mods: Vec<Mod>,
     /// unknown keys and refused values found while loading (each kept out of `values`)
     pub problems: Vec<String>,
+    /// `[settings]` entries not applied (unknown, wrong type, refused), exactly as written
+    kept: toml::Table,
+    /// top-level keys this code doesn't know, exactly as written
+    kept_top: toml::Table,
 }
 
 impl Config {
@@ -204,23 +224,33 @@ impl Config {
         if self.stable_only && s.tier == Tier::Experimental && v != s.default.value() {
             return Err(format!("{key} is experimental; this profile is stable-only"));
         }
-        if v == s.default.value() {
-            self.values.remove(s.key);
-        } else {
-            self.values.insert(s.key, v);
-        }
+        // explicit, even when equal to today's default: a later change of default never moves it
+        self.values.insert(s.key, v);
+        self.kept.remove(s.key);
         Ok(())
     }
 
+    /// Back to the default: the key is removed from the file, so it follows the default from now on.
     pub fn reset(&mut self, key: &str) {
         if let Some(s) = find(key) {
             self.values.remove(s.key);
         }
+        self.kept.remove(key);
     }
 
-    /// Only the values that differ from their defaults.
+    /// The values that differ from their defaults (what the launcher marks as changed).
     pub fn changed(&self) -> impl Iterator<Item = (&'static str, &Value)> {
+        self.values.iter().filter(|(k, v)| find(k).is_some_and(|s| s.default.value() != **v)).map(|(k, v)| (*k, v))
+    }
+
+    /// Every value set explicitly, including those equal to the default.
+    pub fn explicit(&self) -> impl Iterator<Item = (&'static str, &Value)> {
         self.values.iter().map(|(k, v)| (*k, v))
+    }
+
+    /// `[settings]` entries kept as written because this code couldn't use them.
+    pub fn kept(&self) -> &toml::Table {
+        &self.kept
     }
 
     pub fn parse(text: &str) -> Result<Config, String> {
@@ -230,10 +260,17 @@ impl Config {
             stable_only: doc.get("stable_only").and_then(|v| v.as_bool()).unwrap_or(false),
             ..Config::default()
         };
+        c.schema = doc.get("schema").and_then(|v| v.as_integer()).unwrap_or(SCHEMA).max(SCHEMA);
+        for (k, v) in &doc {
+            if !matches!(k.as_str(), "schema" | "profile" | "stable_only" | "settings" | "mods") {
+                c.kept_top.insert(k.clone(), v.clone());
+            }
+        }
         if let Some(settings) = doc.get("settings").and_then(|v| v.as_table()) {
             for (k, v) in settings {
                 let Some(s) = find(k) else {
-                    c.problems.push(format!("{k}: unknown setting (ignored)"));
+                    c.problems.push(format!("{k}: unknown setting (kept in the file, not used)"));
+                    c.kept.insert(k.clone(), v.clone());
                     continue;
                 };
                 let value = match (s.kind, v) {
@@ -242,12 +279,14 @@ impl Config {
                     (Kind::Choice { .. }, toml::Value::String(x)) => Value::Choice(x.clone()),
                     (Kind::Path, toml::Value::String(x)) => Value::Path(x.clone()),
                     _ => {
-                        c.problems.push(format!("{k}: wrong type {v} (default kept)"));
+                        c.problems.push(format!("{k}: wrong type {v} (default used; the value is kept in the file)"));
+                        c.kept.insert(k.clone(), v.clone());
                         continue;
                     }
                 };
                 if let Err(e) = c.set(k, value) {
-                    c.problems.push(format!("{e} (default kept)"));
+                    c.problems.push(format!("{e} (default used; the value is kept in the file)"));
+                    c.kept.insert(k.clone(), v.clone());
                 }
             }
         }
@@ -263,12 +302,13 @@ impl Config {
     }
 
     pub fn to_toml(&self) -> String {
-        let mut doc = toml::Table::new();
+        let mut doc = self.kept_top.clone();
+        doc.insert("schema".into(), toml::Value::Integer(self.schema.max(SCHEMA)));
         doc.insert("profile".into(), toml::Value::String(self.profile.clone()));
         if self.stable_only {
             doc.insert("stable_only".into(), toml::Value::Boolean(true));
         }
-        let mut settings = toml::Table::new();
+        let mut settings = self.kept.clone();
         for (k, v) in &self.values {
             settings.insert(
                 (*k).into(),
@@ -346,7 +386,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.problems.len(), 5, "{:#?}", c.problems);
-        assert!(c.problems[0].contains("black screen") || c.problems.iter().any(|p| p.contains("black screen")));
+        assert!(c.problems.iter().any(|p| p.contains("black screen")));
         assert!(c.problems.iter().any(|p| p.contains("unknown setting")));
         // every refused key kept its default
         assert_eq!(c.int("title.fsr_quality"), 3);
@@ -361,9 +401,48 @@ mod tests {
     }
 
     #[test]
-    fn setting_a_default_stores_nothing() {
+    fn an_explicit_default_is_kept_so_a_new_default_never_moves_it() {
         let mut c = Config::parse("").unwrap();
         c.set("display.width", Value::Int(3840)).unwrap();
-        assert_eq!(c.changed().count(), 0);
+        assert_eq!(c.changed().count(), 0, "equal to the default: not marked changed");
+        assert_eq!(c.explicit().count(), 1, "but kept");
+        let back = Config::parse(&c.to_toml()).unwrap();
+        assert_eq!(back.explicit().collect::<Vec<_>>(), vec![("display.width", &Value::Int(3840))]);
+        c.reset("display.width");
+        assert_eq!(c.explicit().count(), 0, "reset follows the default again");
+    }
+
+    #[test]
+    fn unknown_wrong_and_refused_entries_survive_a_save_untouched() {
+        let text = r#"
+            schema = 1
+            launcher_window = { x = 10, y = 20 }
+            [settings]
+            "display.width" = 2560
+            "future.thing" = "on"
+            "display.vsync" = "yes"
+            "title.fsr_quality" = 4
+        "#;
+        let c = Config::parse(text).unwrap();
+        assert_eq!(c.int("display.width"), 2560);
+        assert_eq!(c.int("title.fsr_quality"), 3, "refused: the default is used");
+        assert_eq!(c.problems.len(), 3, "{:#?}", c.problems);
+        let saved = c.to_toml();
+        let doc: toml::Table = saved.parse().unwrap();
+        assert_eq!(doc["schema"].as_integer(), Some(SCHEMA));
+        assert_eq!(doc["launcher_window"]["y"].as_integer(), Some(20), "an unknown top-level key is kept");
+        let s = doc["settings"].as_table().unwrap();
+        assert_eq!(s["future.thing"].as_str(), Some("on"));
+        assert_eq!(s["display.vsync"].as_str(), Some("yes"), "a wrong type is kept as written");
+        assert_eq!(s["title.fsr_quality"].as_integer(), Some(4), "a refused value is kept as written");
+        // setting a kept key properly replaces the kept entry
+        let mut c2 = Config::parse(&saved).unwrap();
+        c2.set("display.vsync", Value::Bool(true)).unwrap();
+        let s2: toml::Table = c2.to_toml().parse().unwrap();
+        assert_eq!(s2["settings"]["display.vsync"].as_bool(), Some(true));
+        // a newer schema loads, and is never lowered on save
+        let newer = Config::parse("schema = 9").unwrap();
+        assert_eq!(newer.schema, 9);
+        assert!(newer.to_toml().contains("schema = 9"));
     }
 }
