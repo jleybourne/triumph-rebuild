@@ -51,10 +51,12 @@ Order and decisions are `plan.md`'s; overall progress is in [`progress.md`](prog
 | done | PE loader (`crates/loader`, lane `loader`, PR #1): headers, sections, relocations, imports by name/ordinal, delay-load, exports, TLS, `.pdata`; map at base, bind through a resolver | 4,523 / 4,523 System32 PE32+ images parsed, 0 errors; 200k random corruptions, no panic; dbghelp.dll mapped beside the Windows loader: 9,912 relocations, 0 wrong |
 | done | import census of the title (lane `loader`) | 18 images, 93 DLLs, 962 functions; the title's own DLLs supply 265; **GDK discovery list: 697 functions in 86 DLLs** (`agents/loader-imports.csv`); game folder hash unchanged |
 | todo | kernel: threads, events, waits, timers, TLS, module queries | title's startup path runs |
-| todo | files: console paths → game folder, write overlay, never modify the dump | title opens its data; game folder hash unchanged |
+| done | files (`crates/vfs`, lane `vfs`, PR #3): console paths → host, read-only package, write overlay, mods as ordered layers with conflicts | 18 tests; game folder hash unchanged (`v2_game_folder_unchanged`); 10,000-file open+read +3.3 µs over the OS floor |
+| todo | wire the drives (decided): `G:` = the game package, read-only; the title's storage drive gets its own root; **`T:` starts empty every run** (as on the console) | the title opens its data through `vfs` |
 | todo | GDK discovery loop: name every unimplemented call instead of faulting, **including every `GetProcAddress` miss** (no image imports `XGame*`/`XUser*` directly, so the title reaches them by name at run time) | a run lists what is missing; the list shrinks to zero |
 | todo | the title's own DLLs: Bink video, its FSR module, GDK HTTP | each loads or is replaced with a stated stub |
-| todo | input (controller + keyboard/mouse) and audio | title responds to input; audio plays without stalling the frame |
+| done | input (`crates/input`, lane `input`, PR #2): XInput pads + keyboard stand-in pad, menu isolation, the title's GameInput imports mapped | 16 tests |
+| todo | audio (from the import census: the title's audio DLLs) | audio plays without stalling the frame |
 
 ## Build 4 — shaders: all 25,694, wave32, offline
 
@@ -153,8 +155,8 @@ Design: [`docs/design/launcher.md`](docs/design/launcher.md). Its own bar in `pr
 | todo | L1 launcher shell (egui): tabs, Features generated from the registry, profiles (helper lane `launcher`) | writes a `rebuild.toml` that `config` validates with 0 problems |
 | todo | L2 setup and system check: GPU, driver, tiled tier, SM 6.6, DXC, VRAM, ReBAR (lane `launcher`) | each check has pass/fail and a fix line |
 | todo | L3 title settings applied to a copy of `settings.xml` in the write overlay (lane `launcher`) | the original's hash is unchanged |
-| todo | L4 mods tab: enable, order, conflicts (lane `launcher`); the overlay file system is Build 3 (lead) | conflicts listed; order respected |
-| todo | L5 in-game menu on the present path, input isolated (lead, after Build 5) | live options toggle; isolation test passes |
+| todo | L4 mods tab: enable, order, conflicts (lane `launcher`) using `crates/vfs::mods` (merged) | conflicts listed; order respected |
+| todo | L5 in-game menu on the present path, input isolated with `crates/input::menu` (lead, after Build 5). **Input is polled on its own thread** (a poll costs ~170 µs with focus); the present path reads the last state | live options toggle; isolation test passes; the present thread does no polling |
 
 ## Known traps, from the fork (jleybourne/Triumph) — each must be designed out, not rediscovered
 

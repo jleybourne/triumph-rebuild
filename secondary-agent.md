@@ -175,9 +175,9 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, after memory lowering and native f16 in the shader core (section 9 step 2 done)
-progress  34 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
-tests     61 green, 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 13)
+updated   2026-11-27, after merging lanes input (PR #2) and vfs (PR #3)
+progress  36 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
+tests     95 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 13, input 16, vfs 18)
 ```
 
 | build | state | where | proof |
@@ -187,7 +187,7 @@ tests     61 green, 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, 
 | 0 (c) title GPU time | ⏸️ needs a frame (Build 5) | — | — |
 | 1 tiles at console addresses | ✅ | `crates/uma/src/{lib,tiles,arena}.rs`, `gputest --tiled/--arena/--scale` | [runs/build1-tiles.md](runs/build1-tiles.md) |
 | 2 upload ring + labels | ✅ | `crates/uma/src/{ring,labels}.rs`, `gputest --ring/--labels` | [ring](runs/build2-ring.md) · [labels](runs/build2-labels.md) |
-| 3 loader + runtime | 🔄 loader ✅ (lane `loader`, PR #1 merged); runtime ⏳ | `crates/loader`, `imports` | `agents/loader.md`, `agents/loader-imports.csv` |
+| 3 loader + runtime | 🔄 loader ✅ (PR #1), files ✅ (`vfs`, PR #3), input ✅ (PR #2); kernel ⏳ | `crates/loader`, `imports` | `agents/loader.md`, `agents/loader-imports.csv` |
 | 4 shaders | 🔄 core: design, lane model, HLSL emission proven on the card; front end in lane `shader` | `crates/sir`, `sirtest`, [design](docs/design/shader-ir.md) | [runs/build4-sirtest.md](runs/build4-sirtest.md) |
 | 5 device, lists, present | ⏳ (translator core done in `crates/xlist`) | — | — |
 | 6 list translation | 🔄 core built | `crates/xlist` | Build 0 (b) |
@@ -247,6 +247,18 @@ If the owner hands you the whole job, you are the lead. Read `README.md`, `plan.
 - Whether to push the fork's local `dlss-hook` branch (commit `ee0b94a3`) so the docs can link to it.
 
 ## 10. The lead's answers to "For the lead" (newest first)
+
+**2026-11-27, to lanes `input` (PR #2) and `vfs` (PR #3), both merged:**
+
+- `input`, poll cost: agreed. Input is polled on a thread of its own, and the present path reads the last
+  `Polled` (L5 in `tasks.md`).
+- `input`, I3 read the CSV before PR #1 merged: fine. It is merged now; nothing to change.
+- `input`, F / H stick clicks: kept.
+- `vfs` 1, hash tests: agreed. Every "hash before and after" check reads `fs::metadata(path)` per file. Lane
+  `launcher`: apply this to U3.
+- `vfs` 2, drives: decided. `G:` is the game package, read-only. The title's storage drive is its own root.
+  **`T:` starts empty every run** (the console's behaviour, so no stale state between runs).
+- `vfs` 3: `tasks.md` Build 3 files now points at `crates/vfs`, closed by `v2_game_folder_unchanged`.
 
 **2026-11-27, to the coordinator's items 1-8** (`agents/secondary-agents-updates.md`, 13:05):
 

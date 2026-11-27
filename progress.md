@@ -1,9 +1,9 @@
 # Progress
 
 ```
-work toward 30 fps   [███████░░░░░░░░░░░░░]  34 %
+work toward 30 fps   [███████░░░░░░░░░░░░░]  36 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (fork reference: 25,694 translated, 7 pipelines refused)
-launcher track       [███░░░░░░░░░░░░░░░░░]  1 / 7 steps (C1 settings registry); does not count toward the fps %
+launcher track       [███░░░░░░░░░░░░░░░░░]  1 / 7 steps (C1 settings registry; the mods tab's file system is merged); does not count toward the fps %
 measured fps         none yet — the title has not rendered a frame on this code
 baseline to beat     7.6 fps · 131.3 ms · ~4,500 draws · 356 dropped   (the layer being replaced)
 target               30 fps · 33.3 ms · same draws · stated output resolution and upscaler mode
@@ -21,14 +21,14 @@ second row and is the number that counts.
 | 0 | three answers before more code | 10 | 70 % | 7.0 | (a) upload **done**; (b) translation **done**: 0.43 µs a draw; (c) blocked until the title renders (moved to Build 5) |
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
-| 3 | PE loader + console runtime | 15 | 30 % | 4.5 | PE loader, map-at-base and the title's import census done (lane `loader`, PR #1 merged); kernel, files and the discovery loop todo |
+| 3 | PE loader + console runtime | 15 | 45 % | 6.75 | PE loader + import census (PR #1), file system with overlay and mods (PR #3), input with menu isolation (PR #2) merged; kernel, wiring and the discovery loop todo |
 | 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 25 % | 3.75 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; decoder in lane `shader` |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 0 % | 0 | plan corrected: the upscale pass is found by bindings; lowering the internal resolution is its own task |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **34.05 ≈ 34 %** | |
+| | **total** | **100** | | **36.3 ≈ 36 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -81,6 +81,27 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Lanes `input` and `vfs` merged: the file system and input for Build 3
+
+```
+[███████░░░░░░░░░░░░░]  36 %   (was 34 %: +2.25 Build 3: files and input)
+shaders     0 / 25,694
+measured fps   none yet
+```
+
+- **Merged PR #2 (`input`):** XInput pads and the keyboard stand-in pad, menu isolation (neutral input while
+  the menu is open, neutral until all keys are up on close), and the title's GameInput imports mapped. 16 tests.
+- **Merged PR #3 (`vfs`):** console paths to host paths, a read-only game package, a write overlay, and mods as
+  ordered layers with conflict listing. 18 tests. The game folder's hash is unchanged by a write-heavy run;
+  10,000-file open+read costs +3.3 µs over the OS floor.
+- **Reviewed:** both stayed inside their lanes; no game paths, nothing vendored. Both `Cargo.toml` member
+  conflicts resolved.
+- **Decided from their notes:** input is polled on a thread of its own (~170 µs a poll with focus, too much for
+  the present thread). `T:` starts empty every run, as on the console. Storage gets its own drive root. Hash
+  checks read `fs::metadata` per file (an NTFS directory-entry time lag fooled the first test).
+- **95 tests** in the workspace (1 ignored), 0 warnings.
+- **Next:** Build 3's runtime: kernel objects (threads, events, waits, timers, TLS) and the drives wired through `vfs`.
 
 ### 2026-11-27 — Shader core: memory through the tiled windows and native half precision, exact on the card
 
