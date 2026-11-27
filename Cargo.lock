@@ -2128,6 +2128,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rebuild-devmenu"
+version = "0.1.0"
+
+[[package]]
 name = "rebuild-dstorage"
 version = "0.1.0"
 dependencies = [
