@@ -30,11 +30,23 @@ pub struct HostList {
     l2: Option<ID3D12GraphicsCommandList2>,
     l6: Option<ID3D12GraphicsCommandList6>,
     l7: Option<ID3D12GraphicsCommandList7>,
+    /// The submitting queue (an address) and its progress value after this list's last execution, for the lead's
+    /// submission: a host list may not run again before that execution is done (the console lets titles do it).
+    pub executed_on: std::sync::atomic::AtomicUsize,
+    pub executed_at: std::sync::atomic::AtomicU64,
 }
 
 impl HostList {
     fn new(list: ID3D12GraphicsCommandList) -> HostList {
-        HostList { l1: list.cast().ok(), l2: list.cast().ok(), l6: list.cast().ok(), l7: list.cast().ok(), list }
+        HostList {
+            l1: list.cast().ok(),
+            l2: list.cast().ok(),
+            l6: list.cast().ok(),
+            l7: list.cast().ok(),
+            list,
+            executed_on: std::sync::atomic::AtomicUsize::new(0),
+            executed_at: std::sync::atomic::AtomicU64::new(0),
+        }
     }
 }
 

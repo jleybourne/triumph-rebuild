@@ -109,7 +109,15 @@ fn device_report() {
         ),
         None => println!("dstorage  the title has not asked for DirectStorage"),
     }
-    let t = rebuild_runtime::device::traps();
+    {
+        use rebuild_runtime::submit::{FOREIGN, LISTS, REEXECUTED};
+        use std::sync::atomic::Ordering::Relaxed;
+        println!(
+            "submit    {} lists executed, {} not ours, {} re-executions waited for their earlier run",
+            LISTS.load(Relaxed), FOREIGN.load(Relaxed), REEXECUTED.load(Relaxed)
+        );
+    }
+    let t =rebuild_runtime::device::traps();
     println!("device    {} slots called that are not written yet (first call, ms after the device):", t.len());
     for (off, name, n, ms) in t {
         println!("  {off:#05x}  {name:<36} {n:>8}×  first at {ms:>9.3} ms");
