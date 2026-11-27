@@ -124,8 +124,8 @@ decision 4.
 | state | work | closes when |
 |---|---|---|
 | doing | D3D12.X device, lists, PSOs, root signatures from title state: device, queues, fences, allocators, lists, resources, root signatures built; query heaps, command signatures, compute pipelines (0x58/0x1f0, pool + library) built; the title loads content; **next: stream pipelines (0x2b0), graphics (0x50); on-demand translation for programs outside the library (the BVH builder's 80)** | creation path completes |
-| todo | console descriptor heaps (T#/V# slots shaders index), PC descriptors beside, dirty list (no scan) | a shader samples a texture made by title code |
-| todo | present / vsync / window | a non-black frame, captured to PNG |
+| doing | console descriptor heaps (T#/V# slots shaders index), PC descriptors beside, dirty list (no scan): heap buffers are raw SRVs, never CBVs (#37); index ranges apart next | a shader samples a texture made by title code |
+| doing | present / vsync / window: present, capture and a clean 60 s card run done (2026-11-28); frame-rate setting in PR | a non-black frame, captured to PNG |
 | todo | frame line: fps · ms · draws · dropped · upload MB · upload ms · translation ms · output res · upscaler/mode · vendor | one parseable line a second |
 | todo | Build 0 (c), moved here: the title's GPU time from per-list timestamp pairs, RT on and off | measured; replaces the ~45 ms everywhere it is quoted |
 

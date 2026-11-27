@@ -1,8 +1,8 @@
 # Progress
 
 ```
-overall   ████████████░░░░░░░░  61 %   work toward 30 fps, weighted by build step
-fps       WARP: up to 60 s and 1,650 frames (pacer 28.5 fps, black) · card runs paused · target 30 · baseline 7.6
+overall   █████████████░░░░░░░  63 %   work toward 30 fps, weighted by build step
+fps       card: 60 s, 1,005 frames, 18.6 fps, no GPU hang (loading screen still black) · target 30 · baseline 7.6
 updated   2026-11-28
 ```
 
@@ -13,7 +13,7 @@ and becomes the number that counts.
 
 | track | progress | | note |
 |---|---|--:|---|
-| **Build 5 · first frame** | `███████████░░░░░░░░░` | 58 % | WARP: debug layer clean but for one cause of the hangs (heap slot read as CBV holds an SRV; fix with #37) |
+| **Build 5 · first frame** | `██████████████░░░░░░` | 70 % | runs clean on the card; 2 of 3 loading-screen draws run; draw 1's shaders are outside the library (on-demand graphics next) |
 | shaders compiled (every class) | `██████████░░░░░░░░░░` | 12,981 / 25,694 | pixel 9,965 · vertex 1,672 · compute 1,344 · of them wave-wide 4,182 ([wave64](runs/build4-wave64.md)) · agnostic 8,799 / 9,128 ([v1](runs/build4-v1.md)) |
 | shaders counted | `████░░░░░░░░░░░░░░░░` | 5,195 / 25,694 | bit-exact vs the oracle on WARP ([exec](runs/build4-exec.md)) |
 | runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
@@ -33,7 +33,7 @@ and becomes the number that counts.
 | 2 | CPU-written memory ring; GPU→CPU | `████████████████████` | 100 % | 8 | closed |
 | 3 | PE loader + console runtime | `████████████████████` | 100 % | 15 | closed: the title's code runs |
 | 4 | shader recompiler RDNA2 → DXIL | `███████████████░░░░░` | 75 % | 15 | 9,415 compile, 5,195 bit-exact; wave64 built |
-| 5 | device, lists, descriptors, present | `███████████░░░░░░░░░` | 55 % | 12 | frames 1-2 presented; GPU safe mode next |
+| 5 | device, lists, descriptors, present | `██████████████░░░░░░` | 70 % | 12 | 60 s on the card, no hang; loading screen black (draw 1 missing) |
 | 6 | list translation | `██░░░░░░░░░░░░░░░░░░` | 10 % | 8 | translator core measured |
 | 7 | upscaler: DLSS + FSR | `██████░░░░░░░░░░░░░░` | 30 % | 10 | both standalone; wiring to the title open |
 | 8 | frame pacing | `░░░░░░░░░░░░░░░░░░░░` | 0 % | 6 | 30 fps on NVIDIA closes here |
@@ -50,7 +50,7 @@ and becomes the number that counts.
 | graphics and stream pipelines (0x50, 0x2b0) | `████████████████████` | done (PR #30): 14 created, 0 refused |
 | title start-up to its first submission | `████████████████████` | done: ExecuteCommandListsX and PresentX called at 1.44 s |
 | ExecuteCommandLists + PresentX | `████████████████████` | done (PR #32): submit, borderless window, flip swap chain, PNG capture |
-| a non-black frame, captured | `██████████░░░░░░░░░░` | frame 1 captured (black, 1920×1080); frame 2 crashes: the title draws with no program bound (`exe+0xb5a5f8`) |
+| a non-black frame, captured | `██████████████░░░░░░` | capture verified (a clear probe shows magenta); 2 of 3 loading-screen draws run; draw 1's VS/PS are not in shaders.rpf, on-demand graphics translation next |
 | frame line (fps, ms, draws, …) | `██████████████████░░` | written each second + summary.toml (PR #32); upload/xlate/upscale fields to come |
 | Build 0 (c): the title's GPU time | `░░░░░░░░░░░░░░░░░░░░` | needs a frame |
 
@@ -58,11 +58,9 @@ and becomes the number that counts.
 
 | lane | build | working on |
 |---|---|---|
-| `shaderexec` | 4 | our shaders against the oracle's, on the GPU: the "shaders counted" bar |
-| `shadercov` | 4 | the last 1,726 agnostic programs (7,402 → 9,128) |
-| `wave64` | 4 | wave-wide programs, the other ~16,500 |
-| `ffx` | 7 | the title's FidelityFX upscaler calls, onto our DLSS / FSR |
-| waiting | 6, 8 | list translation cost and pacing need real frames |
+| `ondemand-gfx` | 5 | graphics programs outside the library translated at creation (the loading screen's draw 1); descriptor index ranges kept apart |
+| `framerate` | 8 | frame-rate setting: title / capped (selectable) / unlimited, vsync honoured |
+| `launch` | C2 | the launcher starts the title with the user's settings |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -118,6 +116,23 @@ Older entries are never edited.
 
 > The three entries below (58, 59, 61 %) were missing; they are filled in afterwards from the commits that moved
 > the header (`6292f20`, `bafec7c`, `71c075d`). The points behind each step were not recorded.
+
+### 2026-11-28 — The GPU hangs fixed: 60 s on the card, no reset
+
+```
+[█████████████░░░░░░░]  63 %   (Build 5 55 % → 70 %)
+title       60 s on the RTX 4070 Ti: 1,005 frames, 18.6 fps, no hang, no driver reset; loading screen still black
+```
+
+- **Cause of the hangs:** console descriptors are untyped; the title read a heap slot holding a buffer SRV as a
+  CBV, so the card read a garbage address. Heap buffers are now never CBVs (translator raw loads; d3d12x writes
+  raw SRVs). Found with GPU-based validation on WARP (`REBUILD_D3D_GBV=1`).
+- **Merged:** #37 shadercov (12,981 / 25,694 compile, every class), #39 tooling, #40 ExecuteIndirect, #41 deferred
+  fixes, #42 black frames (title memory for the GPU, CPU rect lists), #43 rect lists on the GPU (geometry shader).
+- **Fixed on master:** re-execution of a list in flight waits; failed-Close lists never run; topology mismatches
+  dropped; UAVs of non-UAV resources are null views; textures start in the title's initial layout.
+- **Black because:** the loading screen's draw 1 uses shaders that are not in shaders.rpf; next: on-demand graphics.
+- Tests: 566 green.
 
 ### 2026-11-28 — Shader execution merged: 5,195 shaders bit-exact; frames 1-2 presented
 

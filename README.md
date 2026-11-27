@@ -4,7 +4,7 @@
 built around the right memory model from the first line, aiming at 30 frames a second.</b></p>
 
 <p align="center">
-  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-61%25-yellow?style=for-the-badge"></a>
+  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-63%25-yellow?style=for-the-badge"></a>
   <a href="progress.md"><img alt="frame" src="https://img.shields.io/badge/frame%202-presented-blue?style=for-the-badge"></a>
   <a href="tasks.md"><img alt="shaders" src="https://img.shields.io/badge/shaders-5%2C195%20%2F%2025%2C694-yellow?style=for-the-badge"></a>
   <a href="plan.md"><img alt="target" src="https://img.shields.io/badge/target-30%20fps-blue?style=for-the-badge"></a>
@@ -14,11 +14,11 @@ built around the right memory model from the first line, aiming at 30 frames a s
   <a href="https://www.rust-lang.org"><img alt="Rust" src="https://img.shields.io/badge/Rust-1.100-000000?logo=rust"></a>
   <a href="https://learn.microsoft.com/windows/win32/direct3d12/directx-12-programming-guide"><img alt="Direct3D 12" src="https://img.shields.io/badge/Direct3D-12-0078D4"></a>
   <a href="HANDOFF.md"><img alt="GPU" src="https://img.shields.io/badge/tested%20on-RTX%204070%20Ti-76B900?logo=nvidia"></a>
-  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-528%20green-brightgreen"></a>
+  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-566%20green-brightgreen"></a>
   <a href="LICENSE"><img alt="licence" src="https://img.shields.io/badge/licence-GPL--3.0--only-blue"></a>
 </p>
 
-<p align="center"><a href="progress.md"><b>Progress <code>████████████░░░░░░░░</code> 61 %</b></a><br>
+<p align="center"><a href="progress.md"><b>Progress <code>█████████████░░░░░░░</code> 63 %</b></a><br>
 <sub>work toward 30 fps, weighted by build step · Build 5 (first frame) <code>███████████░░░░░░░░░</code> 55 % · frames 1-2 presented</sub></p>
 
 <table align="center">
@@ -58,7 +58,7 @@ Measured on one machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB RAM, PCIe 3.0, Win
 | **Shaders** | 0 / 25,694; core proven on the card: IR → HLSL → DXC → GPU exact, wave64 on wave32 exact ([run](runs/build4-sirtest.md)) | 25,694, wave32, 0 refused |
 | **Launcher** | settings registry built (30 options, validated); desktop launcher in progress ([design](docs/design/launcher.md)) | launcher, mods, profiles, in-game menu |
 | **Upscaler** | ✅ DLSS runs standalone through Streamline on a synthetic scene; FSR next; wiring to the title in Build 7 | DLSS on NVIDIA, FSR on AMD |
-| **Tests** | 528 green, 12 ignored (`launcher` 59, `runtime` 53, `gdk` 46, `pipelines` 46, `shader` 42, `sir` 36, `d3d12x` 28, `uma` 28, `dstorage` 22, `xlist` 22, `vfs` 19, `audio` 18, `loader` 18, `input` 17, `config` 16, `xg` 15, `cardlock` 11, `upscale` 11, `winfiles` 11, `ffx` 9, `rebuild` 1) | |
+| **Tests** | 566 green, 12 ignored (`launcher` 59, `sir` 57, `runtime` 56, `pipelines` 53, `gdk` 46, `shader` 42, `d3d12x` 29, `uma` 28, `xlist` 28, `dstorage` 22, `vfs` 19, `audio` 18, `loader` 18, `input` 17, `config` 16, `xg` 15, `cardlock` 11, `upscale` 11, `winfiles` 11, `ffx` 9, `rebuild` 1) | |
 
 Every result is reported as **fps · ms · draws · dropped** together, with resolution and upscaler mode.
 A faster frame that draws less of the scene is not a win.
@@ -181,7 +181,7 @@ Full status with outcomes: **[tasks](tasks.md)** · **[progress](progress.md)**.
 Requirements: Windows 10/11 x64, a Direct3D 12 GPU with tiled resources tier 2 or higher, and Rust.
 
 ```powershell
-cargo test --release                                  # 528 tests, no game data needed (GPU tests use WARP or skip)
+cargo test --release                                  # 566 tests, no game data needed (GPU tests use WARP or skip)
 cargo run --release --bin gputest                     # the GPU writes, the CPU reads, no copy
 cargo run --release --bin gputest -- --bare           # control: never blame the machine
 cargo run --release --bin gputest -- --tiled          # Build 1: tiles, console addresses, sharing

@@ -315,10 +315,10 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27 (late), second lead session: Build 3 closed (the title reaches D3D12XboxCreateDevice in 1.4 s);
-          v0 shaders 2,834 / 2,881 compile; round 3 of the lanes running
-progress  59 % (progress.md) · shaders 0 / 25,694 counted (they count once the execution check matches the oracle)
-tests     515 green (12 ignored), 0 warnings: cargo test --release --no-fail-fast
+updated   2026-11-28 (morning): the GPU hangs fixed (heap buffers never CBVs, #37); 60 s on the card, 1,005 frames,
+          18.6 fps, no reset; loading screen black (draw 1's shaders are not in shaders.rpf)
+progress  63 % (progress.md) · shaders 12,981 / 25,694 compile, 5,195 counted
+tests     566 green (12 ignored): cargo test --release --no-fail-fast
 ```
 
 | build | state | where | proof |
