@@ -51,7 +51,7 @@ impl Bindings<'_> {
 }
 
 /// Which heap a loaded descriptor indexes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Heap {
     Resource,
     Sampler,
@@ -66,7 +66,51 @@ pub struct Desc {
     pub user_data: u8,
 }
 
+/// The host view a descriptor is read as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum View {
+    /// `ConstantBuffer<SirCb>`
+    Cbv,
+    /// `ByteAddressBuffer`
+    Raw,
+    /// `RWByteAddressBuffer`
+    RwRaw,
+    /// `Buffer<float4>`
+    Typed,
+    /// `RWBuffer<float4>`
+    RwTyped,
+    /// `Texture*<float4>` by the console's `dim` (0 1D, 1 2D, 2 3D, 3 cube, 4 1D array, 5 2D array)
+    Tex(u8),
+    /// `RWTexture*<float4>` by the console's `dim`
+    RwTex(u8),
+    /// `SamplerState`
+    Sampler,
+    /// `SamplerComparisonState`
+    SamplerCmp,
+}
+
+/// One descriptor read ([`super::Lifted::desc_uses`]): the table it comes from, its byte offset in that table
+/// when that is a constant (`None`: computed by the program), and the view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DescUse {
+    pub heap: Heap,
+    pub user_data: u8,
+    pub byte_off: Option<i32>,
+    pub view: View,
+    /// When the access also reads the descriptor's shadow-table entry (stride and record count): the bytes it
+    /// reads or writes per record (else 0).
+    pub shadow: u8,
+}
+
 impl Lifter<'_> {
+    /// Records that the descriptor whose heap index SGPR `s` holds is read as `view`.
+    fn use_desc(&mut self, s: u8, view: View, shadow: u8) {
+        if let Some(d) = self.f.descs.get(&s) {
+            let u = DescUse { heap: d.heap, user_data: d.user_data, byte_off: self.f.desc_off.get(&s).copied(), view, shadow };
+            self.out.desc_uses.push(u);
+        }
+    }
+
     /// `s_load_dwordx4/x8` of a descriptor from a table: the destination's first SGPR becomes the heap index.
     pub(super) fn smem(&mut self, name: &str, d: &Decoded) -> Option<()> {
         let bind = self.bind?;
@@ -126,6 +170,8 @@ impl Lifter<'_> {
             }
         };
         let stride = if heap == Heap::Sampler { 16 } else { 32 };
+        // the offset in the table is a constant when the base is the table's own user SGPR
+        let const_off = if reg.is_none() && p.root == RootType::Table { self.table_offset(base).map(|k| k.wrapping_add(off)) } else { None };
         self.out.sgprs.insert(base);
         if self.f.stale.contains(&base) {
             self.why = Some("a lane mask read as data".into());
@@ -138,6 +184,9 @@ impl Lifter<'_> {
         self.wrote(dst);
         let _ = writeln!(self.out.body, "    s{dst} = (uint)((int)s{base} + {byte_off}) / {stride}u;");
         self.f.descs.insert(dst, Desc { heap, dwords, user_data: p.user_data });
+        if let Some(o) = const_off {
+            self.f.desc_off.insert(dst, o);
+        }
         for k in 1..dwords {
             self.wrote(dst + k);
             self.f.desc_words.insert(dst + k);
@@ -165,6 +214,7 @@ impl Lifter<'_> {
         }
         let bind = self.bind?;
         let cbv = bind.used.iter().any(|u| u.user_data == desc.user_data && u.kind == ResourceType::Cbv);
+        self.use_desc(base, if cbv { View::Cbv } else { View::Raw }, 0);
         let dw = off as u32 / 4;
         let _ = writeln!(self.out.body, "    {{");
         // with a register offset the dword index is dynamic: c.d[i >> 2][i & 3]
@@ -227,6 +277,7 @@ impl Lifter<'_> {
         }
         let soff = self.usrc(d, "soffset")?;
         let (idxen, offen) = (d.get("idxen")? == 1, d.get("offen")? == 1);
+        self.use_desc(rsrc, if store { View::RwRaw } else { View::Raw }, if idxen { n as u8 * 4 } else { 0 });
         let vaddr = d.get("vaddr")? as u16;
         let mut addr = format!("{}u + {soff}", d.get("offset")?);
         // with idxen, vaddr is the index and vaddr + 1 the offset (when offen)
@@ -304,6 +355,7 @@ impl Lifter<'_> {
         }
         let (vaddr, vdata) = (d.get("vaddr")? as u16, d.get("vdata")? as u16);
         self.out.vgprs.insert(vaddr);
+        self.use_desc(rsrc, if store { View::RwTyped } else { View::Typed }, 0);
         let ch = ["x", "y", "z", "w"];
         if store {
             let vals: Vec<String> = (0..4u16)
@@ -513,9 +565,15 @@ impl Lifter<'_> {
                 // a gather returns four texels: all four channels are written
                 // a heap sampler is declared here; an immediate one is global
                 let decl = match s.strip_prefix("sir_smp") {
-                    Some(n) => format!(" SamplerState {s} = SamplerDescriptorHeap[s{n}];"),
+                    Some(n) => {
+                        if let Ok(k) = n.parse() {
+                            self.use_desc(k, View::Sampler, 0);
+                        }
+                        format!(" SamplerState {s} = SamplerDescriptorHeap[s{n}];")
+                    }
                     None => String::new(),
                 };
+                self.use_desc(rsrc, View::Tex(d.get("dim")? as u8), 0);
                 let _ = writeln!(
                     self.out.body,
                     "    {{ {ty}<float4> t = ResourceDescriptorHeap[s{rsrc}];{decl} float4 r = t.Gather{ch}({s}, {c});"
@@ -542,6 +600,7 @@ impl Lifter<'_> {
                     }
                 }).collect();
                 let guard = if self.f.narrowed { "if (ex) " } else { "" };
+                self.use_desc(rsrc, View::RwTex(d.get("dim")? as u8), 0);
                 let _ = writeln!(self.out.body, "    {{ {rw}<float4> t = ResourceDescriptorHeap[s{rsrc}]; {guard}t[{c}] = float4({}); }}", vals.join(", "));
                 return Some(());
             }
@@ -550,14 +609,21 @@ impl Lifter<'_> {
         let smp = match (result.find("sir_smp"), result.find("sir_cmp")) {
             (Some(i), _) => {
                 let n: String = result[i + 7..].chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(k) = n.parse() {
+                    self.use_desc(k, View::Sampler, 0);
+                }
                 format!(" SamplerState sir_smp{n} = SamplerDescriptorHeap[s{n}];")
             }
             (None, Some(i)) => {
                 let n: String = result[i + 7..].chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(k) = n.parse() {
+                    self.use_desc(k, View::SamplerCmp, 0);
+                }
                 format!(" SamplerComparisonState sir_cmp{n} = SamplerDescriptorHeap[s{n}];")
             }
             _ => String::new(),
         };
+        self.use_desc(rsrc, View::Tex(d.get("dim")? as u8), 0);
         let _ = writeln!(self.out.body, "    {{ {ty}<float4> t = ResourceDescriptorHeap[s{rsrc}];{smp} float4 r = {result};");
         let mut k = 0u16;
         for c in 0..4u8 {
