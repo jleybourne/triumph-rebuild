@@ -1,110 +1,94 @@
-# Plan
+# Plan — a speed-first rewrite, targeting 30+ fps in the baseline build
 
-The path from an empty tree to a title running at a steady frame rate, in milestones that each end in
-something measurable. Nothing here is a promise of a number; each milestone states what it must prove.
+The target is not "a layer that works". It is **30+ fps in the baseline build**, measured in-world, and
+then more. Everything below is chosen for that number and nothing else. Where the two layers this learns
+from made a choice that costs frame time, we take the opposite choice.
 
-## Ground rules
+Code is ours, in Rust, written from their design as the reference. No copying — not out of caution about
+the licence, but because copying their structure would copy their ceilings, and the point is to be faster
+than both.
 
-- **Measure before promoting.** A mechanism is "in" only when a run beats the previous one at the same
-  draw count, reported as `fps · ms · draws · dropped`.
-- **One change per measurement.** Batches cannot be attributed.
-- **Proof before prose.** Every milestone below names the artefact that proves it — a test, a capture, or
-  a run — not a document.
-
-## M0 — The architecture, proven on hardware  *(in progress)*
-
-The question this answers: *can this machine's GPU write into memory the CPU reads, with no copy?*
+## The frame we are building toward
 
 ```
-[x] address space bookkeeping: windows, 64 KiB pages, sharing by address, lifetime by user count (8 tests)
-[ ] GPU proof: a compute shader writes into a custom-heap (WRITE_BACK, L0) buffer the CPU has mapped
-[ ] tiled proof: a reserved 4 GiB buffer whose 64 KiB tiles map onto video memory, written by the GPU
+baseline target     30 fps in-world  (33.3 ms)
+stretch             60 displayed     (45+ fps native, then frame generation)
 ```
 
-Exit: `apps/gputest` reports the value the shader wrote, read straight from the CPU mapping, and a tiled
-window accepts a placement and a write.
+The layer this replaces sits at 131.3 ms / 7.6 fps and spends **85 ms of that on copies and copy-back
+that exist only to fake shared memory**, plus **243 ms of list translation on the submitting thread** —
+which is why the title waits ~68 ms in its own present call.
 
-## M1 — A title's memory, not ours
+## The five decisions that produce the number
 
-Answer: *does the address space behave like the console's when a real title commits and places?*
+### 1. One memory. No mirror. Ever.
 
-```
-[ ] reservations become windows; commits become tiles
-[ ] write-watch on every committed page, chunks on an async ring behind a fence
-[ ] 64-byte chunk uploads, hashed against what was last sent
-[ ] placement at console addresses, sharing pages by address
-[ ] bounded arenas for what cannot be tiled (unaligned, D32S8, MSAA), released after last user
-```
-
-Exit: a synthetic title that commits 2 GB, writes patterns from the CPU, and reads back from shaders is
-byte-exact, with zero copies for GPU-owned ranges and chunk uploads for CPU-written ones.
-
-## M2 — Something loads and runs
-
-Answer: *can we execute a console binary far enough to see it complain intelligently?*
+The title's addresses *are* GPU-visible addresses: 4 GiB sparse windows over the aperture, backed by
+64 KiB card pages mapped as the title commits. Nothing is copied in or back, because nothing is ever in
+two places.
 
 ```
-[ ] PE loader: relocations, imports by name and ordinal, delay-load, TLS callbacks, exception tables
-[ ] kernel surface: threads, events, waits, timers, TLS, module queries
-[ ] file system: console paths to the game folder, write overlay that never touches it
-[ ] logging that survives a crash, with a backtrace
+removes    copies 31-48 ms · copy-back 48-54 ms · guard faults 13-69 ms · the 68 ms present wait
+proven     apps/rebuild/gputest — GPU writes, CPU reads the same bytes, no staging, no readback
 ```
 
-Exit: the title starts, loads its DLLs, opens its data and reaches its own code, with every missing call
-named rather than crashing.
+### 2. CPU writes are chunks on a ring, never inline
 
-## M3 — Shaders
+Write-watch notices what the CPU touched; only changed 64-byte chunks are sent, on an async upload queue
+the title's queue waits on by fence. The submitting thread never copies. Chunking is also correctness:
+the rest of a page may hold values the GPU wrote.
 
-Answer: *can we translate the title's programs?*
+### 3. Descriptors live where the shaders read them
+
+Console slots are real memory in the title's address space, in the layout its shaders compute against;
+PC descriptors sit beside them. Updates keep a **dirty list** — the old layer scans **203,127 slots a
+frame to mirror 12,027 records**.
+
+### 4. Command lists: recorded, translated in parallel, then cached
+
+Each list is written down as data and translated on N worker threads. Beyond that, **identical lists are
+cached and replayed** — most frames repeat list shapes, and neither reference layer exploits it. That is
+where the 243 ms goes, and the cache is our addition.
+
+### 5. Nothing compiles during a frame
+
+Shaders: RDNA2 → DXIL offline, verified by census. Pipelines: built into a library keyed by hash at
+start. Zero runtime compiles, no container parsing mid-frame (measured 4× worse per draw when done at
+runtime).
+
+## Order of work — each step ends in a number
+
+| # | build | done when |
+|---|---|---|
+| 0 | address space + GPU/CPU shared memory proof | GPU writes into CPU-mapped memory, no copy — **DONE** |
+| 1 | sparse windows + tiled placement at console addresses | a shader reads and writes memory the CPU wrote, through tiles, no copy-back |
+| 2 | write-watch + 64-byte chunk upload on a ring | CPU bytes reach the GPU with the submit thread blocked for ~0 |
+| 3 | PE loader + console runtime (threads, events, files, overlay FS) | the title's own code runs to its first render call |
+| 4 | shader recompiler RDNA2 → DXIL + census | every program: translated, or refused with a reason |
+| 5 | D3D12.X device, lists, descriptor heaps, present | a non-black frame from the title |
+| 6 | list cache + parallel translation | translation measurably off the critical path |
+| 7 | the title's own FSR running natively | internal resolution drops, picture correct |
+| 8 | frame pacing: submit-ahead, fences, no stalls | frame time ≈ the card's own work |
+
+Steps 3-5 are large but mechanical, and there are two working implementations to read while writing them.
+Steps 1, 2, 6 and 7 are the ones that decide whether a frame can ever be 33 ms.
+
+## What we do not build
+
+- No mirror, no host copies, no copy-back path — not even as a fallback, because a fallback becomes the
+  path that ships.
+- No guard-page write detection; write-watch only.
+- No runtime pipeline compilation.
+- No per-frame descriptor scan.
+- No compatibility switches borrowed from the reference layers; those flags exist to work around
+  ceilings we are not inheriting.
+
+## Acceptance, measured identically for every step
 
 ```
-[ ] RDNA2 decoding: VALU/SALU, LDS, scratch, images, samplers, control flow
-[ ] wave64 -> wave32 rules, including the reductions that cannot reconverge
-[ ] DXIL emission, validated by the platform compiler
-[ ] a census: every program in the title's shader pack decoded, translated, or refused with a reason
+report    fps · ms · draws · dropped · copies · copy-back · translation ms
+baseline  131.3 ms / 7.6 fps at ~4,500 draws
+target    33.3 ms / 30 fps at the same draw count, FSR doing the upscaling
 ```
 
-Exit: a census with refusal reasons, not a percentage. The sibling layers reach ~100 %; that is the bar.
-
-## M4 — A frame
-
-Answer: *does the title's own renderer produce a picture through our translation?*
-
-```
-[ ] D3D12.X device, lists, PIPs, root signatures from the title's own state
-[ ] descriptor heaps: console slots that shaders index, PC descriptors beside them
-[ ] present, vsync, window and display plumbing
-[ ] a screenshot of the title's own first frame
-```
-
-Exit: a capture of a rendered frame that is not black.
-
-## M5 — Performance
-
-Answer: *where does a frame actually go, and what do we remove?*
-
-```
-[ ] a frame line that reports: preparing, copies, copy-back, GPU busy, list calls, dropped, draws
-[ ] per-pass card timing via timestamp queries
-[ ] the upscaler route: the title's own FSR running natively, or a documented refusal
-[ ] the arithmetic check: does the frame approach the card's own work?
-```
-
-Exit: a measured frame with the mirror gone, and a stated ceiling with the arithmetic behind it.
-
-## What is deliberately out of scope
-
-- **Instruction-level emulation.** The title is x86-64; it runs natively.
-- **Copying either sibling layer's source.** Design is read; code is written here.
-- **Multi-title support.** One title, one path, measured. Generality is a later problem.
-
-## The honest expectation
-
-```
-memory model (M0-M1)      removes the 85 ms of copies and the 68 ms present wait
-shader + frame (M2-M4)    what makes a picture exist at all
-upscaler (M5)             the only thing that halves the title's own 45 ms of card work
-```
-
-The first gives roughly 10-12 fps. The last is what makes 30 possible. Any plan that claims 30 from
-memory work alone is skipping the 45 ms the title spends drawing.
+A step is done when its number is on that line, not when its code compiles.
