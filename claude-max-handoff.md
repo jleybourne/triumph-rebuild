@@ -151,3 +151,9 @@ The owner's rules, in their own words:
   user space). The title's device request, logged: riid 5405c344-d457-444e-b4dd-2366e45aee39 (ID3D12Device11),
   params [00020004, 0, 00100000, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 00000020]. Next: the static device object
   (0x58 bytes, byte +0x18 = 1), slots per docs/research/d3d12x-device.md section 6, every other slot a trap.
+- S7 merged (#21): v0 interface diffs vs the oracle = 1 (translator: void main for PS with no outputs) + the fp16
+  component bug, both sent to lane shader-cf (it owns crates/sir for now). Oracle: 4 swapped files fixed in
+  D:ictory-dataebuild-oracle (backup in oracle-swapped-backup); `apps/rebuild/src/bin/oracle.rs` must settle
+  same-timestamp cache entries like `oraclediff --ties` before it is run again; agents/shader-oracle.csv sizes of
+  those 4 rows to swap (agents/shader.md item 3). Build 5 rule from S7 item 5: the runtime mirrors every buffer
+  descriptor the title writes as a RAW view too (a translated program may read any slot as ByteAddressBuffer).
