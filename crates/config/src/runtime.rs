@@ -49,6 +49,7 @@ pub const RUNTIME_KEYS: &[(&str, &str)] = &[
     ("diagnostics.frame_log_path", "REBUILD_FRAME_LOG"),
     ("diagnostics.d3d12_debug", "REBUILD_D3D_DEBUG"),
     ("diagnostics.warp", "REBUILD_WARP"),
+    ("debug.offline_online_sandbox", "REBUILD_OFFLINE_SANDBOX"),
     ("limits.ram_mb", "REBUILD_LIMIT_RAM_MB"),
     ("limits.vram_mb", "REBUILD_LIMIT_VRAM_MB"),
     ("limits.cpu_cores", "REBUILD_LIMIT_CPU_CORES"),
@@ -123,6 +124,7 @@ impl Config {
         }
         put("diagnostics.d3d12_debug", "REBUILD_D3D_DEBUG", flag("diagnostics.d3d12_debug"), ex("diagnostics.d3d12_debug"));
         put("diagnostics.warp", "REBUILD_WARP", flag("diagnostics.warp"), ex("diagnostics.warp"));
+        put("debug.offline_online_sandbox", "REBUILD_OFFLINE_SANDBOX", flag("debug.offline_online_sandbox"), ex("debug.offline_online_sandbox"));
         for (key, var) in [
             ("limits.ram_mb", "REBUILD_LIMIT_RAM_MB"),
             ("limits.vram_mb", "REBUILD_LIMIT_VRAM_MB"),

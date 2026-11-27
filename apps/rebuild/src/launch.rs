@@ -38,6 +38,9 @@ fn report(started: Instant) {
             println!("          {x:?}");
         }
     }
+    if let Some(line) = rebuild_runtime::sandbox::blocked_report() {
+        println!("{line}");
+    }
     let g = rebuild_runtime::gdk_discovery();
     if !g.is_empty() {
         println!("gdk runtime discovery: {}", g.len());
@@ -353,6 +356,9 @@ pub fn run(o: Options) -> ! {
     if !dir.is_dir() {
         fail(1, &format!("the game folder {} is not a folder that exists", dir.display()));
     }
+    // debug: the offline online-mode sandbox. A loud line when it is on, so no run is mistaken for a real
+    // online session; the runtime layer blocks every non-loopback connection while it is.
+    rebuild_runtime::sandbox::announce();
     let cache = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("triumph-rebuild").join("images");
 
     let title = match load_title(&dir, &cache) {

@@ -34,6 +34,7 @@ pub mod known;
 pub mod object;
 pub mod profile;
 pub mod runtime;
+pub mod sandbox;
 pub mod table;
 pub mod taskqueue;
 pub mod xasync;
