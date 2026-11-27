@@ -202,6 +202,30 @@ unsafe extern "system" fn console_pipeline<const SLOT: usize>(_this: *mut c_void
     E_NOTIMPL
 }
 
+/// The debug layer's errors and warnings, printed as they happen (the first 60).
+fn debug_messages(host: &ID3D12Device) {
+    use windows::Win32::Graphics::Direct3D12::{ID3D12InfoQueue1, D3D12_MESSAGE_CALLBACK_FLAG_NONE, D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_ID, D3D12_MESSAGE_SEVERITY};
+    unsafe extern "system" fn on_message(_cat: D3D12_MESSAGE_CATEGORY, sev: D3D12_MESSAGE_SEVERITY, id: D3D12_MESSAGE_ID, text: windows::core::PCSTR, _ctx: *mut c_void) {
+        static N: AtomicU32 = AtomicU32::new(0);
+        // corruption 0, error 1, warning 2
+        if (sev.0 <= 2 || std::env::var_os("REBUILD_D3D_DEBUG_ALL").is_some()) && N.fetch_add(1, Ordering::Relaxed) < 400 {
+            let t = unsafe { text.to_string() }.unwrap_or_default();
+            eprintln!("d3ddebug  [{}] #{}: {t}", ["corruption", "error", "warning", "info", "message"].get(sev.0 as usize).unwrap_or(&"?"), id.0);
+        }
+    }
+    match host.cast::<ID3D12InfoQueue1>() {
+        Ok(q) => {
+            let mut cookie = 0u32;
+            let r = unsafe { q.RegisterMessageCallback(Some(on_message), D3D12_MESSAGE_CALLBACK_FLAG_NONE, std::ptr::null_mut(), &mut cookie) };
+            if r.is_err() {
+                eprintln!("d3ddebug  no message callback: {r:?}");
+            }
+            std::mem::forget(q);
+        }
+        Err(e) => eprintln!("d3ddebug  no ID3D12InfoQueue1: {e}"),
+    }
+}
+
 /// `module+offset` for a code address (the title's images are loaded by the Windows loader, so they are modules).
 pub(crate) fn module_offset(addr: usize) -> String {
     use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT};
@@ -511,12 +535,26 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
     if DEVICE.get().is_none() {
         // Streamline (DLSS behind the title's FidelityFX calls) must start before the device exists
         rebuild_ffx::backends::prepare_dlss();
+        // REBUILD_D3D_DEBUG: the D3D12 debug layer, its errors and warnings printed as they happen
+        let debug = std::env::var_os("REBUILD_D3D_DEBUG").is_some();
+        if debug {
+            let mut d: Option<windows::Win32::Graphics::Direct3D12::ID3D12Debug> = None;
+            if unsafe { windows::Win32::Graphics::Direct3D12::D3D12GetDebugInterface(&mut d) }.is_ok() {
+                if let Some(d) = d {
+                    unsafe { d.EnableDebugLayer() };
+                    eprintln!("d3ddebug  the D3D12 debug layer is on");
+                }
+            }
+        }
         let mut host: Option<ID3D12Device> = None;
         if let Err(e) = unsafe { D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_1, &mut host) } {
             eprintln!("device: the host D3D12 device failed: {e}");
             return e.code().0;
         }
         let Some(host) = host else { return 0x8000_4005u32 as i32 };
+        if debug {
+            debug_messages(&host);
+        }
         // resources, heaps and views behind the device; memory is a host stand-in until the tiles join (Build 1)
         let memory = match rebuild_d3d12x::HostMemory::new(&host, 1 << 30) {
             Ok(m) => m,
