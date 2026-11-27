@@ -71,6 +71,18 @@ Mods     folders under mods/, enable/disable, drag to reorder, conflicts (two mo
 Profiles named sets of settings; export/import as .toml
 ```
 
+### Redesign (owner, 2026-11-27): top bar, dark and light, session diagnostics
+
+The owner approved **Direction B: a top bar** (mockups: https://claude.ai/artifact/C4JarmJgfw9jAdFdGnJZLY, page
+"Direction B"), in **dark and light** themes (a theme switch; default dark). Every part of the launcher lives in it:
+Play, Profiles, Settings, Runs & test matrix, Mods, Diagnostics, and the Running view while the title plays. The
+screens' content follows the Direction A mockups (same canvas) under the top bar.
+
+**Session diagnostics (owner):** every play session gets its own folder (frame line log, run summary with the
+profile and limits in force, crash reports, captures), kept for `diagnostics.retention_days` days (default 14; 0 =
+keep forever). The launcher creates the folder, passes it to the layer as `REBUILD_SESSION_DIR`, lists sessions on
+Runs and Diagnostics, and deletes folders past the retention when it starts. The layer and `runtitle` write into it.
+
 ## Mods
 
 A mod is a folder under `mods/<name>/` whose files replace title files by path, through Build 3's overlay
@@ -99,3 +111,4 @@ contested file. Script or code mods are out of scope.
 | L3 | title settings: apply `title.*` to a copy of `settings.xml` in the write overlay (lane `launcher`) | the original file's hash is unchanged |
 | L4 | mods tab (lane `launcher`); the overlay file system itself is Build 3 (lead) | conflicts listed; order respected |
 | L5 | in-game menu (lead, after Build 5) | toggles live options; input isolation test |
+| L6 | redesign: top bar, dark/light themes, all sections, Runs & test matrix, session diagnostics with retention (lane `launcher`) | every mockup screen exists in both themes; sessions past the retention are deleted at start; idle cost still 0 |
