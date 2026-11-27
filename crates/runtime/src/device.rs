@@ -565,6 +565,11 @@ mod tests {
 
     #[test]
     fn the_object_calls_through_its_table_and_untouched_slots_trap() {
+        // a device on the card: never while the lead is running or timing the title
+        if std::path::Path::new(r"D:\Developer\triumph-rebuild\agents\MEASURING").exists() {
+            eprintln!("skipped: agents\\MEASURING is present");
+            return;
+        }
         let mut out: *mut c_void = std::ptr::null_mut();
         // ID3D12Device11
         let iid: [u8; 16] = [0x44, 0xc3, 0x05, 0x54, 0x57, 0xd4, 0x4e, 0x44, 0xb4, 0xdd, 0x23, 0x66, 0xe4, 0x5a, 0xee, 0x39];
