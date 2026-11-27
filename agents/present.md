@@ -38,17 +38,50 @@ runtime formats it, the launcher's own test parses it (`frameline::tests::the_la
 
 ## Measured
 
-See "Numbers" below (from `present_card_lists_run_in_order_and_the_frame_reaches_a_png`, `--nocapture`).
+From `present_card_lists_run_in_order_and_the_frame_reaches_a_png` (`--nocapture`), quiet machine, 2026-11-27:
+
+| what | cost on the title's thread | of which the driver's |
+|:--|--:|--:|
+| `ExecuteCommandLists`, 1 list, 1 segment | 20.9-28.7 µs a call | 19.4-28.3 µs (the same host list sent straight to the host queue) |
+| `PresentX` (copy path, 120 frames paced at 16 ms, all shown) | 357-445 µs a call | 247-304 µs inside DXGI `Present` |
+| a submit whose wait goes to the bridge | 0.16-0.78 ms (the first includes starting the waiter thread) | |
+
+So submission adds about 0.5 µs to the driver's own cost. PresentX was 520 µs before its lists were cached (per
+present: allocator reset 72 µs, recording 78 µs, our `ExecuteCommandLists` 139 µs, DXGI 334 µs); with one list
+recorded per (slot, swap-chain buffer, source) and re-executed, what is left beside DXGI is mostly the driver's
+`ExecuteCommandLists` of that list. Moving the present to a thread of ours would take it off the title's thread;
+it needs the title's next submission to wait for our copy, so it is left for Build 8.
+
+Full suite after merging master (#30, #31): `cargo test --release --no-fail-fast`: 473 passed, 0 failed, 12
+ignored, 0 warnings.
 
 ## Tests
 
-- `present_card::present_card_lists_run_in_order_and_the_frame_reaches_a_png` (GPU; skipped while `agents\MEASURING`
-  exists or with no device): through the device's slots, d3d12x resources and views, xlist lists: clear a render
-  target, copy it into a back buffer, execute (0x50), present (0x100), capture, decode the PNG: every pixel the clear
+- `present_card::present_card_lists_run_in_order_and_the_frame_reaches_a_png` (GPU, `#[ignore]`: by hand,
+  `cargo test -p rebuild-runtime --release -- --ignored --test-threads=1 --nocapture present_card`; checks
+  `agents\MEASURING` and takes `CardLock` (`agents\CARD`, create-new) right before its device, skips otherwise):
+  through the device's slots, d3d12x resources and views, xlist lists: clear a render target, copy it into a back buffer, execute (0x50), present (0x100), capture, decode the PNG: every pixel the clear
   colour. Then a list on queue 1 cut by a memory wait whose label a list on queue 2 writes 100 ms later: the
   submit returns at once (bridged), the copy after the wait shows queue 2's green. Then the costs.
 - `submit::tests` (fence-wait values, refused/met/bridged placement), `present::tests` (format families, pixel
   conversion), `framelog::tests` (the line, read back; per-frame deltas; grouping).
+
+## GPU safety (the lead's rules of 2026-11-27)
+
+- The card test checks `MEASURING`, then takes `rebuild_pipelines::d3d::CardLock`, immediately before making its
+  device; it is `#[ignore]` and run with `--test-threads=1`.
+- Every fence wait in the test is bounded at 5 s (an event, never a null-event or `INFINITE` wait); so is the
+  runtime's capture wait.
+- **Can a failing test leave work on the GPU?** No queue is left waiting: a guard (`Drop`, so also on a panic)
+  calls `present::shutdown()`, which first signals every bridged wait's fence (so a queue stalled on a memory
+  wait runs on), then waits at most 5 s for the present queue, then releases the swap chain and destroys the
+  window; the card lock is dropped after that. What the guard cannot do is cancel work already on the GPU: if a
+  failure leaves lists in flight, they finish on their own (the test's lists are a few clears and copies of
+  64x48 textures, microseconds of GPU time). A process killed outright (no unwinding) skips the guard; the host
+  queues and swap chain then go with the process.
+- Runs on the card: 2026-11-27 21:21-21:23 and later, one at a time; none during the resets at 21:18-21:20.
+  The 21:17 build ran while `MEASURING` existed (compile only, no device); my mistake, since then every build
+  and run checks first.
 
 ## For the lead
 
@@ -64,8 +97,8 @@ See "Numbers" below (from `present_card_lists_run_in_order_and_the_frame_reaches
    at once, e.g. parallel tests, could make two host devices and mix their objects).
 5. `runtitle.rs`: `write_summary` includes `framelog::summary_keys(false)` in place of the fixed
    `measured_from = "title_start"`.
-6. `pipeline.rs` has two `non_snake_case` warnings (`CreateComputePipelineState`, `...X`) on master already; not
-   touched here (lane `streampso` is in that file).
+6. `device.rs`'s own `the_object_calls_through_its_table_and_untouched_slots_trap` makes a device on the card
+   without checking `MEASURING` or taking `CardLock` (not changed here).
 7. The window takes the primary display (borderless, not exclusive fullscreen). Closing it writes `summary.toml`
    and ends the process.
 

@@ -32,35 +32,6 @@ fn measuring() -> bool {
     m
 }
 
-/// The card's exclusive lock (`agents\CARD`, made create-new; removed on drop, pass or fail). `None`: another run
-/// holds the card, skip.
-struct Card(std::path::PathBuf);
-impl Card {
-    fn take() -> Option<Card> {
-        let path = std::path::PathBuf::from(r"D:\Developer\triumph-rebuild\agents\CARD");
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut f) => {
-                use std::io::Write;
-                let _ = writeln!(f, "present lane: present_card test, pid {}", std::process::id());
-                Some(Card(path))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                println!("skipped: agents\\CARD is held by another run");
-                None
-            }
-            // no lead checkout on this machine: nothing to share the card with
-            Err(_) => Some(Card(std::path::PathBuf::new())),
-        }
-    }
-}
-impl Drop for Card {
-    fn drop(&mut self) {
-        if !self.0.as_os_str().is_empty() {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-}
-
 fn method<F: Copy>(obj: Raw, offset: usize) -> F {
     assert_eq!(std::mem::size_of::<F>(), std::mem::size_of::<usize>());
     unsafe {
@@ -223,7 +194,13 @@ fn present_card_lists_run_in_order_and_the_frame_reaches_a_png() {
     if measuring() {
         return;
     }
-    let Some(_card) = Card::take() else { return };
+    let _card = match rebuild_pipelines::d3d::CardLock::take() {
+        Ok(c) => c,
+        Err(why) => {
+            println!("skipped: {why}");
+            return;
+        }
+    };
     if measuring() {
         return;
     }
