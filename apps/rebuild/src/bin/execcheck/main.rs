@@ -32,7 +32,6 @@ use std::sync::Mutex;
 
 use rebuild_shader::census;
 use rebuild_shader::features::{self, Findings, WaveClass};
-use rebuild_shader::gfx10;
 use rebuild_shader::native::{HwStage, RootParam, StageIo, UsedResource};
 use rebuild_shader::signature::{self, Element};
 use rebuild_sir::lift::res::{DescUse, Heap, View};
@@ -52,13 +51,7 @@ fn flag(name: &str) -> bool {
 }
 
 pub fn dxc() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("REBUILD_DXC") {
-        return Some(p.into());
-    }
-    let root = PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\bin");
-    let mut v: Vec<_> = std::fs::read_dir(root).ok()?.filter_map(|e| e.ok().map(|e| e.path().join("x64").join("dxc.exe"))).filter(|p| p.exists()).collect();
-    v.sort();
-    v.pop()
+    rebuild_pipelines::translate::dxc_path()
 }
 
 /// Parallel translation and DXC: logical processors − 4, at most 12, so the desktop stays responsive.
@@ -141,55 +134,21 @@ fn prepare(walk: &census::Walk, stages: &[&'static str], out: &Path, only: Optio
 }
 
 fn translate(p: &census::Program, kind: &'static str, dxc: &Path, out: &Path) -> Result<Prog, String> {
-    use rebuild_sir::lift;
-    let bind = lift::Bindings { hw: p.native.stage, layout: &p.native.layout, used: &p.native.used };
-    let insts = gfx10::decode(&p.native.patched_code()).map_err(|_| "not translated: patched code does not decode".to_string())?;
-    let sig = |b: &[u8]| if kind == "cs" { Ok(Vec::new()) } else { signature::parse(b) };
-    let (Ok(isg1), Ok(osg1)) = (sig(&p.isg1), sig(&p.osg1)) else {
-        return Err("not translated: signature unreadable".into());
-    };
-    let wave64 = p.native.wave64;
-    let mut threads = [1, 1, 1];
-    let (l, src) = match &p.native.io {
-        StageIo::Ps { inputs, input_addr, .. } => {
-            let stage = || lift::PsStage { inputs, input_addr: *input_addr };
-            let l = lift::lift_program(&insts, lift::Stage::Ps(stage()), Some(bind), wave64);
-            let r = lift::ps_program(&l, &stage(), Some(&bind), &isg1, &osg1);
-            (l, r)
-        }
-        StageIo::Vs { inputs, outputs } => {
-            let stage = || lift::VsStage { inputs, outputs };
-            let l = lift::lift_program(&insts, lift::Stage::Vs(stage()), Some(bind), wave64);
-            let r = lift::vs_program(&l, &stage(), Some(&bind), &isg1, &osg1);
-            (l, r)
-        }
-        StageIo::Cs(io) => {
-            threads = io.threads;
-            let l = lift::lift_program(&insts, lift::Stage::Cs(*io), Some(bind), wave64);
-            let r = lift::cs_program(&l, io, Some(&bind));
-            (l, r)
-        }
-        _ => unreachable!(),
-    };
-    let src = src.map_err(|e| format!("not translated: {}", e.split(" row ").next().unwrap_or(&e)))?;
+    use rebuild_pipelines::translate as tr;
+    let h = tr::lift_hlsl(&p.native, &p.isg1, &p.osg1, true).map_err(|r| format!("not translated: {}", r.reason.split(" row ").next().unwrap_or(&r.reason)))?;
     let hl = out.join(format!("{}.{kind}.hlsl", p.hash));
     let obj = out.join(format!("{}.{kind}.dxil", p.hash));
-    let same = std::fs::read_to_string(&hl).is_ok_and(|old| old == src) && obj.exists();
+    let same = std::fs::read_to_string(&hl).is_ok_and(|old| old == h.src) && obj.exists();
     if !same {
-        std::fs::write(&hl, &src).map_err(|e| e.to_string())?;
+        std::fs::write(&hl, &h.src).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(&obj);
-        let r = std::process::Command::new(dxc)
-            .args(["-T", &format!("{kind}_6_6"), "-E", "main", "-O3", "-enable-16bit-types", "-Fo"])
-            .arg(&obj)
-            .arg(&hl)
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !r.status.success() {
-            return Err("not compiled: dxc error".into());
-        }
+        tr::compile_file(dxc, h.stage, &hl, &obj).map_err(|_| "not compiled: dxc error".to_string())?;
     }
     let dxil = std::fs::read(&obj).map_err(|e| e.to_string())?;
-    let compare = l.immediate_compare.iter().filter(|k| **k < 32).fold(0u32, |m, k| m | 1 << k);
+    let threads = match &p.native.io {
+        StageIo::Cs(io) => io.threads,
+        _ => [1, 1, 1],
+    };
     // the container's own signatures (what the oracle's pipeline links by)
     let c = rebuild_shader::Container::parse(&dxil).map_err(|e| e.to_string())?;
     let csig = |f| c.part(f).map(|x| signature::parse(x.data).unwrap_or_default()).unwrap_or_default();
@@ -200,10 +159,10 @@ fn translate(p: &census::Program, kind: &'static str, dxc: &Path, out: &Path) ->
         stage: kind,
         single: true,
         dxil,
-        src,
-        uses: l.desc_uses.clone(),
-        immediate: l.immediate_samplers.clone(),
-        compare,
+        src: h.src,
+        uses: h.uses,
+        immediate: h.samplers.words,
+        compare: h.samplers.compare,
         layout: p.native.layout.clone(),
         used: p.native.used.clone(),
         threads,
@@ -225,44 +184,37 @@ pub struct Oracle {
 fn oracle(dir: &Path, hash: &str) -> Result<Oracle, String> {
     let dxil = std::fs::read(dir.join(format!("{hash}.dxil"))).map_err(|_| "no oracle".to_string())?;
     let b = std::fs::read(dir.join(format!("{hash}.vsh"))).map_err(|_| "no oracle entry".to_string())?;
-    let mut at = 4usize;
-    let mut word = || -> Result<u32, String> {
-        let v = b.get(at..at + 4).ok_or("oracle entry truncated")?;
-        at += 4;
-        Ok(u32::from_le_bytes(v.try_into().unwrap()))
-    };
     if b.get(..4) != Some(b"VSH1") {
         return Err("oracle entry is no VSH1".into());
     }
-    let _stage = word()?;
-    let n = word()? as usize;
-    // skip the DXIL (the same bytes as <hash>.dxil)
-    for _ in 0..n / 4 {
-        word()?;
-    }
-    for _ in 0..word()? * 4 {
-        word()?;
-    }
-    for _ in 0..word()? * 4 {
-        word()?;
-    }
+    let word = |at: &mut usize| -> Result<u32, String> {
+        let v = b.get(*at..*at + 4).ok_or("oracle entry truncated")?;
+        *at += 4;
+        Ok(u32::from_le_bytes(v.try_into().unwrap()))
+    };
+    let mut at = 4usize;
+    let _stage = word(&mut at)?;
+    // the DXIL (the same bytes as <hash>.dxil; its length need not be a multiple of 4)
+    at += word(&mut at)? as usize;
+    // user data (4 words each), console sampler words (4 each)
+    at += 16 * word(&mut at)? as usize;
+    at += 16 * word(&mut at)? as usize;
     let mut statics = Vec::new();
-    for _ in 0..word()? {
+    for _ in 0..word(&mut at)? {
         let mut s = [0u32; 10];
         for v in &mut s {
-            *v = word()?;
+            *v = word(&mut at)?;
         }
         statics.push(s);
     }
-    drop(word);
+    // root CBVs, SRVs, UAVs (byte lists), then root-indexed views
     let mut root_views = 0;
     for _ in 0..3 {
-        let n = u32::from_le_bytes(b.get(at..at + 4).ok_or("oracle entry truncated")?.try_into().unwrap()) as usize;
+        let n = word(&mut at)? as usize;
         root_views += n;
-        at += 4 + n;
+        at += n;
     }
-    let n = u32::from_le_bytes(b.get(at..at + 4).ok_or("oracle entry truncated")?.try_into().unwrap()) as usize;
-    root_views += n;
+    root_views += word(&mut at)? as usize;
     Ok(Oracle { dxil, statics, root_views })
 }
 
@@ -287,24 +239,16 @@ fn lead_agents() -> PathBuf {
     PathBuf::from(std::env::var("REBUILD_LEAD_DIR").unwrap_or_else(|_| r"D:\Developer\triumph-rebuild".into())).join("agents")
 }
 
-/// What this lane writes into `agents\CARD`, so only its own lock is ever removed.
-const CARD_OWNER: &str = "shaderexec";
-
-/// The real card's exclusive lock (`agents\CARD`, created new): waits while another lane holds it or the lead is
-/// measuring. Released by [`card_release`], also after a worker dies.
-fn card_take() {
-    let lock = lead_agents().join("CARD");
+/// The real card's exclusive lock (`rebuild_pipelines::d3d::CardLock`, `agents\CARD` created new): waits while
+/// another lane holds it or the lead is measuring. Dropped when the worker is done.
+fn card_take() -> rebuild_pipelines::d3d::CardLock {
     let mut said = false;
     loop {
-        measuring_wait();
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
-            Ok(mut f) => {
-                let _ = f.write_all(CARD_OWNER.as_bytes());
-                return;
-            }
-            Err(_) => {
+        match rebuild_pipelines::d3d::CardLock::take() {
+            Ok(l) => return l,
+            Err(e) => {
                 if !said {
-                    eprintln!("execcheck: {} exists (another lane has the card), waiting", lock.display());
+                    eprintln!("execcheck: waiting for the card: {e}");
                     said = true;
                 }
                 std::thread::sleep(std::time::Duration::from_secs(5));
@@ -313,9 +257,10 @@ fn card_take() {
     }
 }
 
-fn card_release() {
-    let lock = lead_agents().join("CARD");
-    if std::fs::read_to_string(&lock).is_ok_and(|s| s.trim() == CARD_OWNER) {
+/// A worker that died holding the card leaves its lock behind (no drop ran): removed when it names that worker.
+fn card_release_dead(pid: u32) {
+    let lock = Path::new(rebuild_pipelines::d3d::AGENTS).join("CARD");
+    if std::fs::read_to_string(&lock).is_ok_and(|s| s.trim().ends_with(&format!("pid {pid}"))) {
         let _ = std::fs::remove_file(&lock);
     }
 }
@@ -372,9 +317,7 @@ fn main() {
             .collect();
         let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&csv).expect("csv");
         eprintln!("execcheck: running on {}", if flag("--card") { "the card (smoke set)" } else { "WARP" });
-        if flag("--card") {
-            card_take();
-        }
+        let card = flag("--card").then(card_take);
         let mut g = gpu::Gpu::new(flag("--card"), flag("--debug")).unwrap_or_else(|e| {
             eprintln!("execcheck: {e}");
             std::process::exit(2);
@@ -405,17 +348,13 @@ fn main() {
             writeln!(f, "{}", row.csv()).unwrap();
             f.flush().unwrap();
             if g.lost() {
-                if flag("--card") {
-                    card_release();
-                }
+                drop(card);
                 std::process::exit(3);
             }
         }
         let _ = std::fs::remove_file(out.join("current"));
         drop(g);
-        if flag("--card") {
-            card_release();
-        }
+        drop(card);
         return;
     }
 
@@ -438,10 +377,9 @@ fn main() {
     let mut passthrough: Vec<String> = std::env::args().skip(1).filter(|a| a != "--resume").collect();
     passthrough.push("--worker".into());
     for _attempt in 0..1000 {
-        let st = std::process::Command::new(&exe).args(&passthrough).status().expect("worker");
-        if flag("--card") {
-            card_release(); // the worker's lock, even when it died holding it
-        }
+        let mut child = std::process::Command::new(&exe).args(&passthrough).spawn().expect("worker");
+        let st = child.wait().expect("worker");
+        card_release_dead(child.id());
         if st.success() {
             break;
         }

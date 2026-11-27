@@ -18,8 +18,12 @@ Status: **in progress** (2026-11-27).
 3. **Parallel DXC and translation are capped at logical processors − 4, at most 12** (16 here: 12).
 4. **The card lock** (lead, 21:40): before any run on the real card, `agents\MEASURING` must be absent and the lane
    takes `agents\CARD` with create-new semantics (another lane holding it: wait and retry), and deletes it when done,
-   even on failure. Built into `execcheck --card`: the worker takes the lock (the file holds `shaderexec`); the worker
-   and the supervisor release it, the supervisor also after a worker dies, and only a lock this lane wrote is removed.
+   even on failure. Built into `execcheck --card` through master's `rebuild_pipelines::d3d::CardLock` (#31): the
+   worker waits for it and drops it when done; when a worker dies holding it, the supervisor removes the lock only
+   if it names that worker's pid.
+6. After #31: WARP through `rebuild_pipelines::d3d::Gpu::warp()`, translation through
+   `rebuild_pipelines::translate::lift_hlsl` and `compile_file` (its DXC semaphore, `MAX_DXC = 4`). `Hlsl` gained
+   `uses` (the lifter's descriptor reads) for the harness.
 5. Lanes `shadercov` and `wave64` also work in `crates/sir`: this lane keeps to execution-mismatch fixes, small
    commits, rebased on `origin/master` often.
 

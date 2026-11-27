@@ -71,6 +71,9 @@ pub struct Hlsl {
     pub samplers: Samplers,
     /// The highest user-data dword the program reads (heap bases excluded), if any.
     pub top_dword: Option<u32>,
+    /// Every descriptor read and its view (`rebuild_sir::lift::Lifted::desc_uses`): what `execcheck` builds a
+    /// heap from.
+    pub uses: Vec<rebuild_sir::lift::res::DescUse>,
 }
 
 /// Why a program was not assembled; `body` is the lifted text so far (for `REBUILD_TRANSLATE_DUMP`).
@@ -123,7 +126,7 @@ pub fn lift_hlsl(p: &NativeProgram, isg1: &[u8], osg1: &[u8], v1: bool) -> Resul
     let src = result.map_err(|reason| Refused { reason, body: l.body.clone() })?;
     let top_dword = l.live_in.iter().filter(|s| !bind.is_heap_base(**s)).filter_map(|s| bind.user_dword(*s)).max().map(u32::from);
     let compare = l.immediate_compare.iter().filter(|k| **k < 32).fold(0u32, |m, k| m | 1 << k);
-    Ok(Hlsl { stage, src, samplers: Samplers { words: l.immediate_samplers, compare, top_dword: None }, top_dword })
+    Ok(Hlsl { stage, src, samplers: Samplers { words: l.immediate_samplers, compare, top_dword: None }, top_dword, uses: l.desc_uses })
 }
 
 /// DXC processes this process runs at once, at most (the owner's rule: the machine stays responsive).

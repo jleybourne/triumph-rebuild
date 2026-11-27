@@ -76,23 +76,15 @@ impl Gpu {
     /// `card`: the real GPU (the smoke set only); otherwise WARP, where a program that loops cannot hang the
     /// display driver. `debug`: the D3D12 debug layer, whose messages name refusals.
     pub fn new(card: bool, debug: bool) -> Result<Gpu, String> {
-        use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
-        use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory2, IDXGIAdapter, IDXGIFactory4, DXGI_CREATE_FACTORY_FLAGS};
         unsafe {
-            if debug {
+            // the debug layer goes on before the device exists (the pipelines crate's WARP device takes none)
+            if debug && !card {
                 let mut d: Option<ID3D12Debug> = None;
                 D3D12GetDebugInterface(&mut d).map_err(|e| format!("debug layer: {e}"))?;
                 d.ok_or("debug layer")?.EnableDebugLayer();
             }
-            let mut device: Option<ID3D12Device> = None;
-            if card {
-                D3D12CreateDevice(None::<&windows::core::IUnknown>, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(|e| format!("device: {e}"))?;
-            } else {
-                let f: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).map_err(|e| format!("dxgi: {e}"))?;
-                let warp: IDXGIAdapter = f.EnumWarpAdapter().map_err(|e| format!("warp: {e}"))?;
-                D3D12CreateDevice(&warp, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(|e| format!("warp device: {e}"))?;
-            }
-            let device = device.ok_or("no device")?;
+            let base = if card { rebuild_pipelines::d3d::Gpu::new(debug)? } else { rebuild_pipelines::d3d::Gpu::warp()? };
+            let device = base.device.clone();
             let info = if debug { device.cast::<ID3D12InfoQueue>().ok() } else { None };
             if let Some(i) = &info {
                 let _ = i.SetMuteDebugOutput(true);

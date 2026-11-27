@@ -76,16 +76,7 @@ pub fn compile_vs(src: &str, out: &Path, hash: &str) -> Result<Vec<u8>, String> 
     }
     std::fs::write(&hl, src).map_err(|e| e.to_string())?;
     let dxc = super::dxc().ok_or("no dxc")?;
-    let r = std::process::Command::new(dxc)
-        .args(["-T", "vs_6_6", "-E", "main", "-O3", "-enable-16bit-types", "-Fo"])
-        .arg(&obj)
-        .arg(&hl)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !r.status.success() {
-        let e = String::from_utf8_lossy(&r.stderr);
-        return Err(e.lines().find(|l| l.contains("error")).unwrap_or("dxc failed").to_string());
-    }
+    rebuild_pipelines::translate::compile_file(&dxc, rebuild_pipelines::Stage::Vs, &hl, &obj)?;
     std::fs::read(&obj).map_err(|e| e.to_string())
 }
 

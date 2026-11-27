@@ -74,7 +74,7 @@ pub fn plan(p: &Prog) -> Result<Plan, String> {
     let (mut nres, mut nsmp) = (0u32, 0u32);
     for prm in &p.layout {
         if prm.user_data >= 16 {
-            return Err(format!("user data dword {} past 16", prm.user_data));
+            continue; // past the root constants: a read of it is refused by the translator
         }
         if table_base.contains_key(&prm.user_data) {
             continue; // another range of the same table
