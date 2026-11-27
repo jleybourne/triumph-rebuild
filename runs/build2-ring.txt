@@ -1,0 +1,6 @@
+title     2 regions in 2 windows (256 + 64 MiB), 115 MiB rewritten a frame, 30 % of chunks changing; 60 frames, 4 diff workers
+submit    flush() + GPU wait queued: median 32.5 µs, worst 72.5 µs — the submit thread never copies
+upload    31240 pages · 341775 runs · 34.2 MB a flush | watch 3.22 · diff 9.25 · gather 6.01 · record 0.73 ms | flush -> signalled 19.37 ms median, 23.57 worst
+title cpu 31.1 ms of writes a frame (the title's own work); pacing wait 0.01 ms median, 0.02 worst
+PROVEN    after 60 frames both regions read back through the tiles byte for byte; no copy on the submit thread
+exit=0

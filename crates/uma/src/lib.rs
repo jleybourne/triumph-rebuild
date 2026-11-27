@@ -27,6 +27,9 @@ pub mod arena;
 #[cfg(windows)]
 pub mod tileproof;
 
+#[cfg(windows)]
+pub mod ring;
+
 pub const PAGE: usize = 64 << 10;
 pub const WINDOW: usize = 4 << 30;
 

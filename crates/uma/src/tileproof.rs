@@ -458,3 +458,101 @@ pub fn prove_scale(gb: usize) -> Result<Vec<String>, String> {
     check(&mut lines, bad == 0, format!("{count} placements written by a shader and read back ({rw_ms:.0} ms): 0 wrong, no device removal"))?;
     Ok(lines)
 }
+
+/// Build 2 on the card: the title writes every frame on this thread; this thread (marked as the
+/// submit thread, so copying title memory on it panics) only calls `flush()` and makes the GPU wait.
+pub fn prove_ring(frames: usize, workers: usize) -> Result<Vec<String>, String> {
+    use crate::ring::{Ring, Watched};
+    use crate::upload::{title_ranges, title_writes, Change, Rng};
+    use std::sync::Arc;
+
+    let mut lines = Vec::new();
+    let mut gpu = Gpu::new()?;
+    let mut uma = Uma::new(2, 1 << 30);
+    let mut tiles = Tiles::new(&gpu.device, &gpu.queue, 2)?;
+    let sizes = [(0u64, 256usize << 20, 100usize << 20), (WINDOW as u64 + (64 << 20), 64 << 20, 15 << 20)];
+    let mut regions = Vec::new();
+    let mut ranges = Vec::new();
+    for (k, &(console, len, written)) in sizes.iter().enumerate() {
+        let (_, mapped) = uma.place(console, len).map_err(|e| format!("{e:?}"))?;
+        tiles.map(&mapped)?;
+        regions.push(Arc::new(Watched::alloc(console, len)?));
+        ranges.push(title_ranges(len, written, 0x5EED + k as u64));
+    }
+    gpu.wait()?;
+    let windows: Vec<u64> = tiles.windows.iter().map(|w| unsafe { w.GetGPUVirtualAddress() }).collect();
+    let mut ring = Ring::new(&gpu.device, windows, regions.clone(), workers)?;
+    crate::chunks::mark_submit_thread();
+
+    let direct_fence: ID3D12Fence = unsafe { gpu.device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }.map_err(err("fence"))?;
+    let change = Change::Chunks(0.3);
+    let mut rng = Rng(7);
+    let (mut blocked, mut title, mut pace) = (Vec::new(), Vec::new(), Vec::new());
+    let mut last = 0;
+    for f in 1..=frames as u64 {
+        // one frame in flight: wait for the GPU to have started frame f-2's work
+        let t = Instant::now();
+        if f > 2 {
+            unsafe { direct_fence.SetEventOnCompletion(f - 2, HANDLE::default()) }.map_err(err("pace"))?;
+        }
+        pace.push(t.elapsed().as_secs_f64() * 1000.0);
+
+        let t = Instant::now();
+        for (r, rs) in regions.iter().zip(&ranges) {
+            unsafe { title_writes(r.base, rs, change, f, &mut rng) };
+        }
+        title.push(t.elapsed().as_secs_f64() * 1000.0);
+
+        let t = Instant::now();
+        let v = ring.flush();
+        unsafe {
+            gpu.queue.Wait(&ring.fence, v).map_err(err("queue wait"))?;
+            gpu.queue.Signal(&direct_fence, f).map_err(err("signal"))?;
+        }
+        blocked.push(t.elapsed().as_secs_f64() * 1_000_000.0);
+        last = v;
+    }
+    ring.wait(last)?;
+    gpu.wait()?;
+    let stats: Vec<_> = ring.finished().into_iter().collect::<Result<Vec<_>, _>>()?;
+
+    // every byte of both regions, read back through the tiles
+    for (r, &(console, len, _)) in regions.iter().zip(&sizes) {
+        let (res, off) = tiles.locate(console);
+        let got = gpu.read(&[(res, off, len as u64)])?;
+        let want = unsafe { std::slice::from_raw_parts(r.base as *const u8, len) };
+        if let Some(i) = got.chunks(64).zip(want.chunks(64)).position(|(a, b)| a != b) {
+            return Err(format!("region at {console:#x}: first wrong chunk at +{:#x}", i * 64));
+        }
+    }
+
+    let med = |mut v: Vec<f64>| {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        (v[v.len() / 2], v[v.len() - 1])
+    };
+    let warm = &stats[3.min(stats.len())..];
+    let col = |f: fn(&crate::ring::FlushStats) -> f64| med(warm.iter().map(f).collect());
+    lines.push(format!(
+        "title     2 regions in 2 windows (256 + 64 MiB), {} MiB rewritten a frame, 30 % of chunks changing; {frames} frames, {workers} diff workers",
+        (100 + 15)
+    ));
+    let (b50, bmax) = med(blocked[3..].to_vec());
+    let (t50, _) = med(title[3..].to_vec());
+    let (p50, pmax) = med(pace[3..].to_vec());
+    lines.push(format!("submit    flush() + GPU wait queued: median {b50:.1} µs, worst {bmax:.1} µs — the submit thread never copies"));
+    lines.push(format!(
+        "upload    {:.0} pages · {:.0} runs · {:.1} MB a flush | watch {:.2} · diff {:.2} · gather {:.2} · record {:.2} ms | flush -> signalled {:.2} ms median, {:.2} worst",
+        col(|s| s.pages as f64).0,
+        col(|s| s.runs as f64).0,
+        col(|s| s.bytes as f64).0 / 1e6,
+        col(|s| s.watch_ms).0,
+        col(|s| s.diff_ms).0,
+        col(|s| s.gather_ms).0,
+        col(|s| s.record_ms).0,
+        col(|s| s.latency_ms).0,
+        col(|s| s.latency_ms).1
+    ));
+    lines.push(format!("title cpu {t50:.1} ms of writes a frame (the title's own work); pacing wait {p50:.2} ms median, {pmax:.2} worst"));
+    check(&mut lines, true, format!("after {frames} frames both regions read back through the tiles byte for byte; no copy on the submit thread"))?;
+    Ok(lines)
+}

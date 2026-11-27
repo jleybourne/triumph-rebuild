@@ -1,7 +1,7 @@
 # Progress
 
 ```
-work toward 30 fps   [████░░░░░░░░░░░░░░░░]  19 %
+work toward 30 fps   [█████░░░░░░░░░░░░░░░]  24 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (fork reference: 25,694 translated, 7 pipelines refused)
 measured fps         none yet — the title has not rendered a frame on this code
 baseline to beat     7.6 fps · 131.3 ms · ~4,500 draws · 356 dropped   (the layer being replaced)
@@ -19,7 +19,7 @@ second row and is the number that counts.
 |---|---|---:|---:|---:|---|
 | 0 | three answers before more code | 10 | 70 % | 7.0 | (a) upload **done**; (b) translation **done**: 0.43 µs a draw; (c) blocked until the title renders (moved to Build 5) |
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
-| 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 20 % | 1.6 | 64 B diff and gather written and tested (7 tests); method chosen by measurement; ring, fence and pool todo |
+| 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 80 % | 6.4 | ring built and proven: submit thread 32 µs, upload 19 ms at the title's shape, verified; GPU→CPU labels todo |
 | 3 | PE loader + console runtime | 15 | 0 % | 0 | — |
 | 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 0 % | 0 | decided: our own core (lane state as data, direct addressing, uniformity, native ops); decode front end may be vendored with credit |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
@@ -27,7 +27,7 @@ second row and is the number that counts.
 | 7 | upscaler: DLSS + FSR | 10 | 0 % | 0 | plan corrected: the upscale pass is found by bindings; lowering the internal resolution is its own task |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **19.4 ≈ 19 %** | |
+| | **total** | **100** | | **24.2 ≈ 24 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -50,11 +50,15 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
   at one address see each other's writes. Only stencil formats need the arena. 10 GiB committed at random
   addresses with 0 wrong. The upload has no measurable tile penalty.
 
+- **Build 2 — the upload ring** ([`runs/build2-ring.md`](runs/build2-ring.md)): the submit thread calls `flush()` and
+  queues a GPU wait in 32 µs. The coordinator and 4 workers send 34 MB in 342k runs in 19.4 ms. Both regions
+  verified byte for byte after 60 frames.
+
 ## Not done
 
 - Build 0 (c): the title's real GPU time, with RT on and off. Blocked: it needs the title rendering, so it moved to Build 5.
 - Minimum spec in `plan.md` (owner decision, needed before Build 7).
-- Everything from Build 2 onward: see [`tasks.md`](tasks.md).
+- Build 2's GPU→CPU labels, then everything from Build 3 onward: see [`tasks.md`](tasks.md).
 
 ## Open problems that could move the target
 
@@ -70,6 +74,30 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Build 2: the upload ring; helper-agent plan; README links
+
+```
+[█████░░░░░░░░░░░░░░░]  24 %   (was 19 %: +4.8 Build 2 ring)
+shaders     0 / 25,694
+measured fps   none yet
+```
+
+- **Built** `crates/uma/src/ring.rs`: write-watched regions, a coordinator thread, a persistent diff pool,
+  3 staging slots, and one scatter dispatch per window on an async compute queue behind a fence.
+  `flush()` returns at once.
+- **Proven** with `gputest --ring`, 60 frames at the title's real shape (34 MB, 342k runs a flush): the submit
+  thread is blocked 32 µs median, 72 µs worst. The upload lands in 19.4 ms. Both regions match byte for
+  byte. [`runs/build2-ring.md`](runs/build2-ring.md)
+- **Guard:** the submit thread is marked, and copying title memory on it panics in every build (tested).
+- **Learned:** the first touch of a never-used page sets its write-watch bit, even a read. Harmless.
+- **Fixed the README links:** every badge now links somewhere; the fork's `ROADBLOCK.md` is linked; the
+  unpushed fork commit is labelled as local; `runs/README.md` index added; LICENSE (GPL-3.0) added. All
+  links checked 200 on GitHub. (That fix was pushed without its own entry; it is recorded here.)
+- **Added** `secondary-agent.md`: a temporary plan for helper agents. Lanes `loader` (Build 3 first half)
+  and `shader` (the Build 4 census and decoder), each in its own worktree, branch and crate. A measurement
+  lock (`agents/MEASURING`) keeps their builds off the lead's timed runs.
+- **Next:** Build 2's GPU→CPU labels.
 
 ### 2026-11-27 — Decisions: our own shader core; plan decisions 3 and 5 corrected
 

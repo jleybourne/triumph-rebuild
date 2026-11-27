@@ -32,16 +32,16 @@ Order and decisions are `plan.md`'s; overall progress is in [`progress.md`](prog
 | done | straddle refusals (window, arena) | unit tests: window straddle, arena partial overlap |
 | done | upload destination = the tiled windows | `uploadbench --tiled`: no measurable penalty (clock-state noise dominates) |
 
-## Build 2 — CPU-written memory on an async ring; the GPU→CPU region
+## Build 2 — CPU-written memory on an async ring; the GPU→CPU region  — [`runs/build2-ring.md`](runs/build2-ring.md)
 
 | state | work | closes when |
 |---|---|---|
-| doing | 64-byte chunk diff and gather (`crates/uma/src/chunks.rs`, 7 tests) | measured in Build 0 (a); method chosen from its table |
-| todo | write-watch on the title's CPU-written regions, reset per frame | dirty-page count matches a known write pattern |
-| todo | upload path chosen by Build 0 (a): hash diff + compute scatter on workers, a frame ahead (copy-per-run collapses: 146 ms to record 440k copies) | at the title's real shape (~226k ranges, ~31 MB): ≤ 30 ms worker wall, off the submit thread |
-| todo | async queue + fence; the title's queue waits on it; persistent worker pool (no per-frame thread spawn) | submit thread blocked ~0 ms while the upload lands |
-| todo | never copy inline: a run asserts the submit thread does no `memcpy` of title memory | assertion in a test build |
-| todo | GPU→CPU region: fence labels, queries, bottom-of-pipe writes the title polls | title-polled labels advance; no hang after frame 2 |
+| done | 64-byte chunk diff and gather (`crates/uma/src/chunks.rs`) | measured in Build 0 (a); hash + scatter chosen |
+| done | write-watch on the title's CPU-written regions, reset per flush (`ring::Watched`) | unit test: exactly the pages written; first touch of a fresh page counts (recorded) |
+| done | upload path: hash diff + compute scatter, one dispatch per window, on a persistent pool | 34 MB / 342k runs a flush lands in 19.4 ms, verified byte for byte after 60 frames |
+| done | async compute queue + fence; the title's queue waits on it; 3 staging slots | submit thread blocked 32 µs median, 72 µs worst |
+| done | never copy inline: the submit thread is marked, and a copy of title memory on it panics | unit test, kept in every build |
+| todo | GPU→CPU region: fence labels, queries, bottom-of-pipe writes the title polls; signalled when the title's Signal says (fork trap: a frame late) | label latency measured; labels advance exactly, in order |
 
 ## Build 3 — loader and runtime
 
