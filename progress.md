@@ -22,14 +22,14 @@ second row and is the number that counts.
 | 0 | three answers before more code | 10 | 70 % | 7.0 | (a) upload **done**; (b) translation **done**: 0.43 µs a draw; (c) blocked until the title renders (moved to Build 5) |
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
-| 3 | PE loader + console runtime | 15 | 65 % | 9.75 | loader (PR #1), files (PR #3), input (PR #2) merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides built (32 / 73 ours); files, audio, DirectStorage in lanes |
+| 3 | PE loader + console runtime | 15 | 70 % | 10.5 | loader (PR #1), files (PR #3), input (PR #2) merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides built (32 / 73 ours); files, audio, DirectStorage in lanes |
 | 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 25 % | 3.75 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; decoder in lane `shader` |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 20 % | 2.0 | DLSS standalone through Streamline on a synthetic scene (PR #4); FSR waits for the SDK; wiring to the title's pass todo |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **41.3 ≈ 41 %** | |
+| | **total** | **100** | | **42.05 ≈ 42 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -82,6 +82,24 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Build 3: the title's images mapped and bound — 97.5 % of its imports
+
+```
+[████████░░░░░░░░░░░░]  42 %   (was 41 %: +0.75 Build 3, the title mapped)
+runtime     32 / 73 of our functions built
+shaders     0 / 25,694
+measured fps   none yet
+```
+
+- **Built** `maptitle`: every image in the title's folder parsed, placed, registered as a title module and
+  mapped, with relocations applied and imports bound (title DLLs first, then our runtime, then the host).
+  No title code runs; the game folder is only read.
+- **Measured:** 17 images, 8,257 relocations, **1,876 of 1,924 imports bound (97.5 %)**. The 48 missing are
+  exactly the work already assigned: files 21, audio 19, `d3d12_xs` 5, `xg_xs` 2, DirectStorage 1.
+  [`runs/build3-maptitle.md`](runs/build3-maptitle.md)
+- **Next:** Build 5's D3D12.X device (`d3d12_xs`, the 5 functions that are mine). Then run the title's startup
+  (TLS callbacks, DLL entry points, the exe entry on its own thread) to its first render call.
 
 ### 2026-11-27 — Build 3: module, memory and process overrides; discovery is live (32 / 73 ours built)
 

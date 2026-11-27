@@ -246,8 +246,8 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, after module, memory and process overrides (runtime 32 / 73; discovery logging live)
-progress  41 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
+updated   2026-11-27, after mapping the title: 97.5 % of its imports bind
+progress  42 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
 tests     120 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 13, input 16, vfs 18, runtime 14, upscale 11)
 ```
 
@@ -306,6 +306,7 @@ If the owner hands you the whole job, you are the lead. Read `README.md`, `plan.
 | 3 | merge lane `shader` (S1-S4), then GFX10 → `sir`: CFG, SSA, structurize; agnostic programs first | census column "emitted"; the shader bar in `progress.md` starts moving |
 | 4 | oracle diff harness against the fork's translations, per hash | programs count toward 25,694 only when they match |
 | 5 | ✅ lanes `loader`, `vfs`, `input` merged; ✅ runtime census (89.5 % host). Build 3's second half, now 73 functions: kernel (threads, events, waits, timers, TLS), files with a write overlay, the GDK discovery loop from `agents/loader-imports.csv` **plus every `GetProcAddress` miss** | the title's startup path runs to its first render call |
+| 5b | ✅ the title's images map and bind: 97.5 % (`maptitle`). Next: D3D12.X device creation (`d3d12_xs`, 5), then run the title's startup to its first render call | the startup path reaches a render call |
 | 6 | Build 5: D3D12.X device, lists via `crates/xlist`, descriptor heaps with a dirty list, present, **the frame line**; then Build 0 (c) (per-list timestamps, RT on and off) and direct read vs ring per resource | a non-black frame; the first measured fps |
 | 7 | Build 7: find the title's upscale pass by bindings; lower the internal resolution through tiles; DLSS (Streamline) and FSR (FidelityFX SDK) | correct picture at a lower internal resolution |
 | 8 | Build 8 pacing → **30 fps on NVIDIA**; Build 9 AMD testers | the frame line |

@@ -10,7 +10,7 @@ Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives w
 
 | lane | build | branch | worktree | state | last reported |
 |:--|:--|:--|:--|:--|:--|
-| **loader** | Build 3, first half (L1–L4) | `agent/loader` | `D:\Developer\triumph-rebuild-loader` | ✅ **merged** by the lead ([#1](https://github.com/jleybourne/triumph-rebuild/pull/1), master 7cc1230) | lane finished |
+| **loader** | Build 3a (L1–L4), then L5 | `agent/loader` | `D:\Developer\triumph-rebuild-loader` | ✅ L1–L4 **merged** (#1); 🔄 L5 (GetProcAddress names) started 13:27, new PR to come | — |
 | **shader** | Build 4 front end (S1–S5) | `agent/shader` | `D:\Developer\triumph-rebuild-shader` | 🔄 S1–S4 committed on its branch (1 commit, "25,694 programs"), working on S5; no PR yet | 13:02 (S1–S4 commit: 25,694 programs, 43.95M instructions) |
 | **launcher** | Triumph Launcher (U1–U5, plus library and per-game settings) | `agent/launcher` | `D:\Developer\triumph-rebuild-launcher` | 🔄 2 commits: library, per-game store, theme pass 1 (31 tests); pass 2 in progress | 13:20 |
 | **vfs** | overlay file system (V1–V4) | `agent/vfs` | `D:\Developer\triumph-rebuild-vfs` | ✅ **merged** by the lead | [#3](https://github.com/jleybourne/triumph-rebuild/pull/3) (2 commits) |
@@ -18,6 +18,8 @@ Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives w
 | **input** | controller and keyboard (I1–I3) | `agent/input` | `D:\Developer\triumph-rebuild-input` | ✅ **merged** by the lead | [#2](https://github.com/jleybourne/triumph-rebuild/pull/2) (2 commits) |
 | **audio** | console audio hardware (A1–A4) | `agent/audio` | `D:\Developer\triumph-rebuild-audio` | 🔄 started 13:25 | — |
 | **dstorage** | DirectStorage (D1–D4) | `agent/dstorage` | `D:\Developer\triumph-rebuild-dstorage` | 🔄 started 13:25 | — |
+| **files** | the 15 file overrides (F1–F3) | `agent/files` | `D:\Developer\triumph-rebuild-files` | 🔄 started 13:27 | — |
+| **xg** | console texture layout (X1–X4) | `agent/xg` | `D:\Developer\triumph-rebuild-xg` | 🔄 started 13:27 | — |
 
 No lane merges; each opens a PR to `master` titled `agent/<lane>: <what closed>`.
 
@@ -96,6 +98,7 @@ From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f)
 
 | time | event |
 |:--|:--|
+| 13:27 | Lead added lanes files, xg and loader L5 (master 5a26027). Started **files** and **xg**; the loader agent resumed for **L5** (fast-forward of agent/loader, new PR). |
 | 13:22 | Lead merged PR #4 (upscale, DLSS). Upscale FSR branch started with the SDK files on disk. Launcher committed the library and per-game store (31 tests). Audio and dstorage set up, no commits yet. |
 | 13:30 | Owner approved the FidelityFX download in chat: **only the needed files** (~58 MB at tag v2.4.0: loader and upscaler DLLs, FSR 3.1 and API headers, licence) to `D:/tools/fidelityfx/v2.4.0`, outside git. The upscale lane fetches them, records SHA-256s, and reads the licence before any code (it stops if the licence is not GPL-3.0-compatible). |
 | 13:25 | Read the lead's answers (section 10). Upscale told the FidelityFX download is approved (pinned version, `D:\tools\fidelityfx\<version>`, SHA-256). Launcher told U5 uses a fake child, `fs::metadata` for hash checks, rebase, and use `rebuild_vfs::ModSet`. New lanes **audio** and **dstorage** started. The lead is mid-merge of PR #4 in its tree; the coordinator touched nothing there but this file. |

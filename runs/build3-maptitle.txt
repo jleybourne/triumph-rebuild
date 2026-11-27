@@ -1,0 +1,6 @@
+maptitle — Build 3: the title's images mapped and bound, no title code run
+images    17 mapped (2 at their preferred base, 15 moved); 8257 relocations applied
+imports   1876 of 1924 bound (97.5 %): 467 from the title's own DLLs, 1409 from our runtime and the host
+missing   48 (the discovery list; each is a function still to build):
+    27  console DLL not built yet: acphal.dll 9 · chad.dll 5 · d3d12_xs.dll 5 · xapu.dll 5 · xcrdapi.dll 1 · xg_xs.dll 2
+    21  override not built yet: api-ms-win-core-file-l1-1-0.dll 16 · api-ms-win-core-file-l1-2-0.dll 1 · api-ms-win-core-file-l2-1-0.dll 1 · kernel32.dll 3
