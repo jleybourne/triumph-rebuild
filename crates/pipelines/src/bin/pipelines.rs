@@ -663,7 +663,7 @@ fn run_ondemand(args: &[String]) {
     let threads = val("--threads").unwrap_or_else(|| default_threads(cpu_core_limit()));
     let rpf = std::env::var("REBUILD_SHADERS").unwrap_or_else(|_| {
         eprintln!("pipelines: set REBUILD_SHADERS to a copy of shaders.rpf (never the game folder)");
-        std::process::exit(2);
+        rebuild_cardlock::exit(2); // the card lock goes too
     });
     let t = Instant::now();
     let data = std::fs::read(&rpf).expect("read the shaders.rpf copy");

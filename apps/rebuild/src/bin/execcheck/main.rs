@@ -281,12 +281,10 @@ fn card_take() -> rebuild_pipelines::d3d::CardLock {
     }
 }
 
-/// A worker that died holding the card leaves its lock behind (no drop ran): removed when it names that worker.
+/// A worker that died holding the card leaves its lock behind (no drop ran): removed when it names that worker
+/// (a later `take` would also find it stale; this frees it at once).
 fn card_release_dead(pid: u32) {
-    let lock = Path::new(rebuild_pipelines::d3d::AGENTS).join("CARD");
-    if std::fs::read_to_string(&lock).is_ok_and(|s| s.trim().ends_with(&format!("pid {pid}"))) {
-        let _ = std::fs::remove_file(&lock);
-    }
+    rebuild_cardlock::CardLock::release_dead(&rebuild_cardlock::agents_dir(), pid);
 }
 
 fn measuring_wait() {
@@ -370,7 +368,7 @@ fn main() {
                         // and runs the program again without it
                         eprintln!("execcheck: device lost on {}: {}", std::fs::read_to_string(out.join("current")).unwrap_or_default(), r.detail);
                         drop(card);
-                        std::process::exit(3);
+                        rebuild_cardlock::exit(3);
                     }
                     r
                 }
