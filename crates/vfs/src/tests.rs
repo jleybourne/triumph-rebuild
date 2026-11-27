@@ -159,6 +159,26 @@ fn v1_overlay_inside_the_base_is_refused() {
     assert!(matches!(r, Err(Error::Unsafe(_))), "a letter mounted twice");
 }
 
+#[test]
+fn v1_a_refused_overlay_creates_nothing() {
+    let w = World::new("v1nocreate");
+    let before: Vec<_> = fs::read_dir(&w.base).unwrap().map(|e| e.unwrap().file_name()).collect();
+    // nested, not yet existing, letters in another case than on disk: still found inside the base
+    let base = if cfg!(windows) { w.base.to_string_lossy().to_uppercase() } else { w.base.to_string_lossy().into_owned() };
+    let inside = PathBuf::from(base).join("deep").join("overlay");
+    let r = VfsBuilder::new(&inside).writable('T').package('G', &w.base, &ModSet::default()).build();
+    assert!(matches!(r, Err(Error::Unsafe(_))));
+    let after: Vec<_> = fs::read_dir(&w.base).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(before, after, "no folder made in the base");
+    // a base inside the drive's overlay folder is refused too
+    let held = w.scratch.0.join("root").join("G").join("x");
+    fs::create_dir_all(&held).unwrap();
+    let r = VfsBuilder::new(w.scratch.0.join("root")).package('G', &held, &ModSet::default()).build();
+    assert!(matches!(r, Err(Error::Unsafe(_))));
+    // and a separate overlay still builds
+    assert!(VfsBuilder::new(w.scratch.0.join("o")).package('G', &w.base, &ModSet::default()).build().is_ok());
+}
+
 // ---- V2 ----------------------------------------------------------------------------------------
 
 #[test]

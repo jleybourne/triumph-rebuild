@@ -397,7 +397,7 @@ pub fn on_create_device(f: fn(&[u64; 4])) {
 }
 
 /// The first render call: `(adapter = null, params, riid, out)` (docs/research/d3d12x-device.md section 1).
-/// Build 5 makes the D3D12.X device here; until then it reports what the title asked for and fails.
+/// Logs what the title asked for, then makes the D3D12.X device (`crate::device::create`).
 pub extern "system" fn D3D12XboxCreateDevice(a: u64, b: u64, c: u64, d: u64) -> i32 {
     eprintln!("first render call reached: D3D12XboxCreateDevice({a:#x}, {b:#x}, {c:#x}, {d:#x})");
     // the interface id and the creation parameters, once: the fork never decoded past the version word

@@ -6,3 +6,6 @@ version.workspace = true
 
 [dependencies]
 toml = "0.8"
+
+[dev-dependencies]
+rebuild-upscale = { path = "../upscale" }

@@ -32,7 +32,7 @@ Read, in this order:
 ```
 README.md                         what it is, what's proven, what isn't
 progress.md                       done / not done, % by build step, open problems
-plan.md                           the six decisions, work order (Builds 0-9), what we refuse to build
+plan.md                           the nine decisions, work order (Builds 0-9), what we refuse to build
 tasks.md                          every task with the number that closes it; known traps from the fork
 runs/build0a-upload.md            Build 0 (a): the upload benchmark and its verdict
 thoughts.md                       the original reasoning (written before plan.md's corrections)
@@ -60,7 +60,7 @@ uploads at real volume, (b) per-draw translation cost against 7.4 µs, (c) the t
 ## What is actually proven (on the machine above)
 
 ```
-$ cargo test --release -p rebuild-uma      15 tests green
+$ cargo test --release -p rebuild-uma      24 tests green
 $ cargo run --bin gputest                  RESULT the GPU wrote into memory the CPU reads, with no copy
 $ cargo run --bin gputest -- --bare        RESULT a bare dispatch completes: the device is healthy
 $ cargo run --release --bin uploadbench    Build 0 (a), 40 configurations, 40 verified byte-exact

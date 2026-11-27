@@ -1,4 +1,4 @@
-//! The 16 module overrides: the title's modules are mapped by our loader, not the host's, so module
+//! The 12 module overrides: the title's modules are mapped by our loader, not the host's, so module
 //! lookups go through this registry first. Console DLLs we implement get pseudo-handles; host DLLs
 //! stay the host's. **Every miss is a discovery entry**: the GDK functions the title reaches by name
 //! (`XGame*`, `XUser*`, …) are found here at run time, not in its import table.

@@ -18,6 +18,10 @@ L5  run-time lookups       closed   76 names (high 42 · medium 3 · low 31) in 
                                     the fork saw the title look up through GetProcAddress: 6 / 6 found, all high
 ```
 
+Since the lane closed, the lead added `src/prepare.rs`: a patched copy of a title image that the Windows loader
+maps (relocation, static TLS, unwind tables) but does not run; the runtime binds its imports and calls its TLS
+callbacks and entry point itself. `runtitle` uses it; the copies go to `%LOCALAPPDATA%\triumph-rebuild\images`.
+
 ## Built
 
 - `pe.rs`: headers, sections, base relocations (all types recorded; ABSOLUTE padding skipped), imports by

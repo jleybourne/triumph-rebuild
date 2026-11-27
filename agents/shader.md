@@ -253,7 +253,10 @@ COLOR0 · `9c817639bbab62ec` TEXCOORD0 · `b0714c4f6cb83da2` SV_VertexID · `b26
 `71a02e6cb47638bb` · `77c88e56d8b57813` · `90b97fa5a34be3e5` · `aefe055414bc8826` · `b96714b90feacf4b` ·
 `d07c1a13a1d87699` · `d20027fbc6dea111` · `e94c932a45ce8441`. Kind table: `df939974040ca239`.
 
-### (c) Translator bugs (`crates/sir`, the lead's)
+### (c) Translator bugs (`crates/sir`, the lead's) — both fixed in PR #26
+
+Both were fixed by lane shader-cf in PR #26 (`459430f`): `void main` for a pixel shader with no outputs (v0
+interface diffs 0), and the fp16 component mapping (InputReads 62 → 0). Kept below as found.
 
 1. **`68954fce6cd4d34e` (ps), SigOut: an output the console does not have.** The console program writes only
    through `image_store` and ends with `exp null` (target 9, `en=0`, `vm done`); its container's `OSG1` is empty,
@@ -286,7 +289,7 @@ with the 4 fixed files as separate copies).
 
 ## Next
 
-- S7 closed: every v0 interface diff is classified (below). Left: the two translator bugs for the lead.
+- S7 closed: every v0 interface diff is classified (below). The two translator bugs it found were fixed in PR #26.
 - The lead's: GFX10 → `sir`. The field model gives every operand by name (`Decoded::get`, `enc::src`).
 
 ## For the lead
@@ -301,9 +304,10 @@ with the 4 fixed files as separate copies).
    Copy `D:\victory-data\s7\oracle-fix\{2d539d4d776445e4,fbf743aed16d2bcd,2b9c4c58786e197b,727b2ac8d96d14ab}.{dxil,vsh}`
    over `D:\victory-data\rebuild-oracle`, and in `agents/shader-oracle.csv` swap the sizes of those rows:
    `fbf743aed16d2bcd` 2367/2411, `2d539d4d776445e4` 3147/3207, `727b2ac8d96d14ab` 6457/6534,
-   `2b9c4c58786e197b` 3067/3111. `apps/rebuild/src/bin/oracle.rs` (outside this task's files) should settle
+   `2b9c4c58786e197b` 3067/3111. (Done: the files were installed, `aa89013`, and the CSV rows swapped.)
+   `apps/rebuild/src/bin/oracle.rs` (outside this task's files) should settle
    same-tick groups the way `oraclediff --ties` does before it is run again.
-4. **S7, translator:** `68954fce6cd4d34e` declares a dummy `SV_Target0` (`crates/sir/src/lift/io.rs:450-452`);
+4. **S7, translator (fixed in PR #26):** `68954fce6cd4d34e` declares a dummy `SV_Target0` (`crates/sir/src/lift/io.rs:450-452`);
    and `interp16` maps packed fp16 attributes to the wrong components in all 62 v0 programs that use it
    (section S7 (c), with the mapping and the evidence).
 5. **S7, a question:** `df939974040ca239` (and the 6,915 oracle programs with the fork's kind table) loads

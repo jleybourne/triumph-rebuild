@@ -211,8 +211,8 @@ pub mod host {
         }
     }
 
-    /// The binding resolver for the loader: overrides → ours (not built yet: reported missing),
-    /// host functions → the host, console-only → missing (the discovery list).
+    /// The binding resolver for the loader: overrides → ours (an override with none built → the host's),
+    /// console functions we serve → ours, host functions → the host, the rest → missing (the discovery list).
     pub struct HostResolver {
         pub host: Host,
         pub missing: Vec<(String, String, super::Tier)>,

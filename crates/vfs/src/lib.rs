@@ -195,6 +195,49 @@ pub fn default_overlay_root() -> PathBuf {
     }
 }
 
+/// Where `p` is or would be once created: its deepest existing ancestor canonicalized, the rest appended.
+fn resolve(p: &Path) -> io::Result<PathBuf> {
+    let abs = if p.is_absolute() { p.to_path_buf() } else { std::env::current_dir()?.join(p) };
+    let mut rest = Vec::new();
+    let mut at = abs.as_path();
+    loop {
+        match fs::canonicalize(at) {
+            Ok(mut real) => {
+                for c in rest.iter().rev() {
+                    real.push(c);
+                }
+                return Ok(real);
+            }
+            Err(e) => match (at.parent(), at.file_name()) {
+                (Some(parent), Some(name)) => {
+                    rest.push(name.to_os_string());
+                    at = parent;
+                }
+                _ => return Err(e),
+            },
+        }
+    }
+}
+
+/// Whether one path holds the other (component-wise; letter case ignored on Windows, as the file system does).
+fn overlaps(a: &Path, b: &Path) -> bool {
+    let key = |p: &Path| -> Vec<String> {
+        p.components()
+            .filter(|c| !matches!(c, std::path::Component::CurDir))
+            .map(|c| {
+                let s = c.as_os_str().to_string_lossy().into_owned();
+                if cfg!(windows) {
+                    s.to_lowercase()
+                } else {
+                    s
+                }
+            })
+            .collect()
+    };
+    let (a, b) = (key(a), key(b));
+    a.starts_with(&b) || b.starts_with(&a)
+}
+
 pub struct VfsBuilder {
     overlay_root: PathBuf,
     drives: Vec<(char, Option<(PathBuf, ModSet)>)>,
@@ -217,27 +260,28 @@ impl VfsBuilder {
         self
     }
 
+    /// Every drive is checked before anything is created: an overlay that would sit inside the base or a mod
+    /// (or hold one) is refused without making a folder there.
     pub fn build(self) -> Result<Vfs> {
-        let mut drives = Vec::new();
+        let mut planned: Vec<(char, PathBuf, Vec<(Layer, PathBuf)>)> = Vec::new();
         for (letter, base) in self.drives {
             if !letter.is_ascii_alphabetic() {
                 return Err(Error::NoDrive(letter));
             }
-            if drives.iter().any(|d: &Drive| d.letter == letter) {
+            if planned.iter().any(|d| d.0 == letter) {
                 return Err(Error::Unsafe(format!("drive {letter}: mounted twice")));
             }
             let dir = self.overlay_root.join(letter.to_string());
-            fs::create_dir_all(&dir)?;
-            let overlay_real = fs::canonicalize(&dir)?;
             let mut lower = Vec::new();
             if let Some((base, mods)) = base {
                 let mut roots: Vec<(Layer, PathBuf)> =
                     mods.enabled().map(|m| (Layer::Mod(m.name.clone()), m.root.clone())).collect();
                 roots.reverse();
                 roots.push((Layer::Base, base));
+                let overlay_real = resolve(&dir)?;
                 for (layer, root) in roots {
                     let real = fs::canonicalize(&root)?;
-                    if overlay_real.starts_with(&real) || real.starts_with(&overlay_real) {
+                    if overlaps(&overlay_real, &real) {
                         return Err(Error::Unsafe(format!(
                             "overlay {} and {:?} layer {} overlap",
                             dir.display(),
@@ -245,9 +289,20 @@ impl VfsBuilder {
                             root.display()
                         )));
                     }
-                    lower.push((layer, ReadLayer::new(real)));
+                    lower.push((layer, real));
                 }
             }
+            planned.push((letter, dir, lower));
+        }
+        let mut drives = Vec::new();
+        for (letter, dir, lower) in planned {
+            fs::create_dir_all(&dir)?;
+            // again on the real folder (a link on the way could lead elsewhere than the plan)
+            let overlay_real = fs::canonicalize(&dir)?;
+            if let Some((layer, real)) = lower.iter().find(|(_, real)| overlaps(&overlay_real, real)) {
+                return Err(Error::Unsafe(format!("overlay {} and {:?} layer {} overlap", dir.display(), layer, real.display())));
+            }
+            let lower = lower.into_iter().map(|(layer, real)| (layer, ReadLayer::new(real))).collect();
             drives.push(Drive { letter, lower, overlay: RwLock::new(Overlay::open(&dir)?) });
         }
         Ok(Vfs {

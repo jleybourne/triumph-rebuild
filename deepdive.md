@@ -1786,7 +1786,55 @@ Data files in `agents/`:
 
 ## 11. Inconsistencies: docs vs code
 
-Found while writing this document. None is fixed here.
+Found while writing this document. None was fixed when it was written.
+
+**Status (2026-11-28, lane `tooling`, branch `agent/tooling`).** Each item below is now marked **fixed** (with
+the commit), **doc-corrected** (the code was right, or the comment was the wrong part; the docs now say what the
+code does) or **deferred** (with the reason). Items in `crates/sir`, `crates/d3d12x`, `crates/xlist`,
+`crates/runtime/src/present*.rs` and `crates/pipelines` are deferred: other lanes are working there.
+
+| # | status | where / why |
+|--:|:--|:--|
+| 1 | deferred | `crates/xlist`, `crates/pipelines`, `crates/sir` (lane `rootseam`, PR #35, works on this seam) |
+| 2 | deferred | `crates/sir` / `crates/pipelines` |
+| 3 | deferred | `crates/sir` (`lift.rs`) |
+| 4 | fixed before this pass | the resolver binds the host's function when an override is listed but none is built (`runtime/src/lib.rs`, `HostResolver::resolve`) |
+| 5 | **fixed** `dfb5943` | `vfs::build()` checks every drive first (the overlay's would-be path, letter case ignored on Windows) and creates folders only after; test `v1_a_refused_overlay_creates_nothing` |
+| 6 | deferred | `crates/uma` (outside this lane's crates; the ring is not used by the title run yet) |
+| 7 | deferred | `apps/rebuild/src/sampler.rs` and `crash.rs`: a change to what runs while a thread is suspended needs a title run to verify, and this lane runs no title |
+| 8 | deferred | `crates/d3d12x` |
+| 9 | deferred | `crates/runtime/src/fence.rs` (runtime work in flight; outside this lane's crates) |
+| 10 | **fixed** `dfb5943` (in part) | `rebuild.exe` reads and checks `--config`, reports the settings and exits 3 ("does not run the title yet") instead of passing silently; running the title from it is C2 |
+| 11 | **fixed** `dfb5943` (in part) | the launcher's `title_source` uses `game.title_settings` before `REBUILD_TITLE_SETTINGS` (test `the_title_settings_setting_comes_before_the_variable`); the other keys wait for C2 (the layer reading `rebuild.toml`) and `runtime/src/drives.rs` |
+| 12 | **fixed** `dfb5943` | `Config::upscaler_mode()` / `upscaler_mode_name` give the upscaler's spelling (`dlaa` → `native-aa`); test checks every choice against `rebuild_upscale::Mode::parse` |
+| 13 | doc-corrected `dfb5943` | a comment at the push says nothing reads it until C2; the session records the id |
+| 14 | deferred | `crates/input` and C2 |
+| 15 | doc-corrected `dfb5943` | a comment above the three entries says the fallback is the layer's once C2 lands; only `upscaletest` reads the variables |
+| 16 | doc-corrected `dfb5943` | README table, "Running it" and badge, `secondary-agent.md` §8: 515 green, 12 ignored |
+| 17 | doc-corrected `dfb5943` | README: 30 options; `tasks.md` and `agents/launcher.md` say 18 was the count then |
+| 18 | doc-corrected `dfb5943` | entries for 58, 59 and 61 % added from the commits that moved the header |
+| 19 | doc-corrected `dfb5943` | the README tree lists every crate and both apps |
+| 20 | doc-corrected `dfb5943` | the write-ups note the raw outputs' 1,791 and 926; runs index: oraclediff row 0 / 0 / 0, rows for v1, exec, wave64 |
+| 21 | doc-corrected `dfb5943` | the paths are restored (also tab-mangled paths in `agents/secondary-agents-updates.md` and the handoff) |
+| 22 | doc-corrected `dfb5943` | `HANDOFF.md` 24 uma tests; "nine decisions" in `plan.md`, README, `HANDOFF.md`, `secondary-agent.md`; `runs/build1-tiles.md` is a dated record (21 then) |
+| 23 | doc-corrected `dfb5943` | 27 slots in `docs/design/d3d12x-resources.md` and `agents/resources.md`; 0x258 served in the CSV |
+| 24 | doc-corrected `dfb5943` (in part) | the four rows' sizes swapped in `agents/shader-oracle.csv`; `oracle.rs` settling same-tick ties is deferred (the shader lane's tool; verifying it needs the oracle data) |
+| 25 | doc-corrected `dfb5943` | `agents/audio.md`, `agents/dstorage.md` (22 tests; the decoder is installed when tables exist), `agents/launcher.md` |
+| 26 | doc-corrected `dfb5943` | `runtitle.rs` header: the run goes on to the deadline |
+| 27 | doc-corrected `dfb5943` | `crash.rs` header: real unwind, DbgHelp at the first crash, skipped inside the heap |
+| 28 | doc-corrected `dfb5943` | `watch.rs` header: the chain from the post-write RIP; the 120 s arming window |
+| 29 | doc-corrected `dfb5943` (in part) | `lib.rs`, `exports.rs`, `modules.rs`, `frame.rs`, `xmem.rs` comments; `present.rs:845` deferred (`present*.rs`) |
+| 30 | doc-corrected `dfb5943` | `docs/design/shader-ir.md`: no SSA of ours, irreducible refused, status and order of work after v1 |
+| 31 | deferred | `crates/sir` (`lift.rs`, `gfx10/mod.rs`) |
+| 32 | doc-corrected `dfb5943` | `agents/shader.md`: both bugs marked fixed in PR #26 |
+| 33 | doc-corrected `dfb5943` | `agents/vfs.md` (`T:` emptied by the runtime), `agents/loader.md` (`prepare.rs`), `agents/files.md` |
+| 34 | doc-corrected `dfb5943` | round 5 and `resources` (#29) in `agents/secondary-agents-updates.md`; `agents/shaderexec.md` is on `master` now |
+| 35 | doc-corrected `dfb5943` (in part) | `agents/pipelines.md` names `ondemand`; `pool.rs`, `translate.rs` (`crates/pipelines`) and `xlist` tests deferred |
+| 36 | **fixed** `f3108d3` (in part) | the card lock folder follows `REBUILD_LEAD_DIR` (`rebuild_cardlock::agents_dir`); the `D:\victory-data` defaults are in `crates/pipelines` (deferred) |
+
+Also fixed in `f3108d3`: a stale `agents\CARD` no longer blocks card jobs. The lock (`crates/cardlock`, re-exported as
+`rebuild_pipelines::d3d::CardLock`) names its owner's pid and start time; a lock whose owner has ended is taken
+over; `rebuild_cardlock::exit` and, under `panic = "abort"`, a panic hook release it before the process ends.
 
 ### 11.1 Behaviour worth the lead's attention
 

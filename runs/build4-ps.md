@@ -52,7 +52,8 @@ ops; the primitive mask SGPR reads 0 (the host interpolates); `s_brev_b32` and `
 constant tracking. **1,782 of 1,798 (99.1 %).** Left: cube maps (6) and ten single forms.
 
 **Update, same day: buffer loads.** Untyped and indexed buffer loads (the latter through the descriptor shadow
-table, plan decision 9). **1,790 of 1,798 (99.6 %).**
+table, plan decision 9). **1,790 of 1,798 (99.6 %).** The raw output beside this write-up ([build4-ps.txt](build4-ps.txt)), from a later
+re-run, reads **1,791**, the number the runs index and the oracle comparison use.
 
 **Not yet proven correct:** these compile, but a program counts toward the 25,694 only when the execution
 check matches the oracle's output (tasks.md, Build 4). Next: resource tracing (descriptor loads from root

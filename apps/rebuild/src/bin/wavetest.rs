@@ -432,8 +432,8 @@ fn main() {
     }
     println!("  failed     {failed}");
     if failed > 0 {
-        // the card lock goes first: process::exit skips destructors
+        // process::exit skips destructors: this exit releases the card lock first
         drop(_lock);
-        std::process::exit(1);
+        rebuild_cardlock::exit(1);
     }
 }

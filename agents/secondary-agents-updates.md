@@ -4,22 +4,35 @@ Written and kept current by the session that started the helper agents, for the 
 Not committed by the helpers: this file sits only in the lead's tree, so commit or delete it as you like.
 Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives with its pull request.
 
-**Last updated:** 2026-11-27 (round 3 started by the lead)
+**Last updated:** 2026-11-28 (round 5, from the merge log; the lead's live notes are in `claude-max-handoff.md`)
 
 ## Lanes
+
+### Round 5 (from 2026-11-27 night, started by the lead)
+
+| lane | job | state |
+|:--|:--|:--|
+| **streampso** | 0x50 / 0x2b0 graphics (stream) pipelines; `agents/streampso.md` | ✅ merged (#30) |
+| **ondemand** | on-demand translation of programs missing from the library; `agents/ondemand.md` | ✅ merged (#31) |
+| **present** | queue Execute, PresentX, PNG capture, frame line and summary; `agents/present.md` | ✅ merged (#32) |
+| **ffx** | the title's FidelityFX calls onto our DLSS / FSR (`crates/ffx`); `agents/ffx.md` | ✅ merged (#33) |
+| **rootseam** | the library root signature vs the title's root arguments; `agents/rootseam.md` | ✅ merged (#35) |
+| **wave64** | wave-wide programs; `agents/wave64.md` | ✅ merged (#36) |
+| **shaderexec** | execution check against the oracle; `agents/shaderexec.md` | ✅ merged (#38) |
+| **shadercov** | the last agnostic programs (7,402 → 9,128) | see `progress.md` (helper lanes) |
 
 ### Round 3 (from 2026-11-27, started by the lead)
 
 | lane | job | branch | worktree | state |
 |:--|:--|:--|:--|:--|
-| **gdk** | G5: the two interfaces the title asks for at start (from runs/build3-reached.txt) | `agent/gdk-2` | `D:\Developer	riumph-rebuild-gdk` | ✅ merged (#20) |
-| **dstorage** | D5: our BCPack decoder and decode cache (plan decision 8) | `agent/dstorage-bcpack` | `D:\Developer	riumph-rebuild-dstorage` | ✅ merged (#24) |
-| **device-research** | Build 5 input: D3D12.X device slots, inline object layouts, startup call sequence (docs only) | `agent/device-research` | `D:\Developer	riumph-rebuild-device` | ✅ merged (#19) |
-| **shader** | S7: classify the last v0 interface diffs against the oracle (tool fixes only; translator bugs reported) | `agent/shader-s7` | `D:\Developer	riumph-rebuild-shader` | ✅ merged (#21) |
-| **shader-cf** | v1: structurize reducible control flow in `crates/sir` (handed over by the lead during Build 5) | `agent/shader-cf` | `D:\Developer	riumph-rebuild-cf` | ✅ merged (#26) |
-| **pipelines** | root signatures and the hash-keyed pipeline library (`crates/pipelines`) | `agent/pipelines` | `D:\Developer	riumph-rebuild-pipelines` | ✅ merged (#22) |
-| **cmdlist** | Build 5/6: the D3D12.X command list and allocator objects (`crates/xlist`), interface for the lead's device | `agent/cmdlist` | `D:\Developer	riumph-rebuild-cmdlist` | ✅ merged (#25) |
-| **profiles** | built-in test profiles (hardware tiers + stress) in `crates/config` and the launcher; a matrix writer (owner request) | `agent/profiles` | `D:\Developer	riumph-rebuild-profiles` | ✅ merged (#23) |
+| **gdk** | G5: the two interfaces the title asks for at start (from runs/build3-reached.txt) | `agent/gdk-2` | `D:\Developer\triumph-rebuild-gdk` | ✅ merged (#20) |
+| **dstorage** | D5: our BCPack decoder and decode cache (plan decision 8) | `agent/dstorage-bcpack` | `D:\Developer\triumph-rebuild-dstorage` | ✅ merged (#24) |
+| **device-research** | Build 5 input: D3D12.X device slots, inline object layouts, startup call sequence (docs only) | `agent/device-research` | `D:\Developer\triumph-rebuild-device` | ✅ merged (#19) |
+| **shader** | S7: classify the last v0 interface diffs against the oracle (tool fixes only; translator bugs reported) | `agent/shader-s7` | `D:\Developer\triumph-rebuild-shader` | ✅ merged (#21) |
+| **shader-cf** | v1: structurize reducible control flow in `crates/sir` (handed over by the lead during Build 5) | `agent/shader-cf` | `D:\Developer\triumph-rebuild-cf` | ✅ merged (#26) |
+| **pipelines** | root signatures and the hash-keyed pipeline library (`crates/pipelines`) | `agent/pipelines` | `D:\Developer\triumph-rebuild-pipelines` | ✅ merged (#22) |
+| **cmdlist** | Build 5/6: the D3D12.X command list and allocator objects (`crates/xlist`), interface for the lead's device | `agent/cmdlist` | `D:\Developer\triumph-rebuild-cmdlist` | ✅ merged (#25) |
+| **profiles** | built-in test profiles (hardware tiers + stress) in `crates/config` and the launcher; a matrix writer (owner request) | `agent/profiles` | `D:\Developer\triumph-rebuild-profiles` | ✅ merged (#23) |
 
 
 ### Round 2 (from 2026-11-27 14:15)
@@ -39,7 +52,7 @@ Stopped, per round 2: loader, vfs, input, upscale, xg (no new work). **dstorage 
 | lane | job | branch | worktree | state |
 |:--|:--|:--|:--|:--|
 | **launcher** | L6: top-bar redesign (owner), dark/light, all sections, session diagnostics with retention | `agent/launcher-l6` | `D:\Developer\triumph-rebuild-launcher` | ✅ merged (#28) |
-| **resources** | Build 5: resources, descriptor heaps, views, shadow table, raw buffer mirrors (`crates/d3d12x`) | `agent/resources` | `D:\Developer\triumph-rebuild-resources` | running |
+| **resources** | Build 5: resources, descriptor heaps, views, shadow table, raw buffer mirrors (`crates/d3d12x`) | `agent/resources` | `D:\Developer\triumph-rebuild-resources` | ✅ merged (#29) |
 | **pipelines** | async PSO creation, ID3D12PipelineLibrary cache, prewarm | `agent/pipelines-2` | `D:\Developer\triumph-rebuild-pipelines` | ✅ merged (#27) |
 
 ### Round 1 (all merged by the lead: PRs #1–#13)

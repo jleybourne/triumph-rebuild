@@ -54,7 +54,7 @@ offset,slot,name,pc_equivalent,args_after_this,returns,title_calls,first_set,for
 0x240,72,console addition (unknown),none,-,-,not seen,trap,unwritten
 0x248,73,CreateCommandListX (fork's name),console,"*desc{type, flags, nodemask, barrier batch}, allocator, pipeline, iid, *out",HRESULT,yes,yes,list.rs:531 ListDesc / create_list_x
 0x250,74,RegisterPagePool (fork's name),console,"address (64 KiB aligned), page count, *handle out",HRESULT,yes,yes,resource.rs:2453
-0x258,75,UnregisterPagePool (fork's name),console,handle,HRESULT,yes,later,resource.rs unregister_page_pool
+0x258,75,UnregisterPagePool (fork's name),console,handle,HRESULT,yes,yes,resource.rs unregister_page_pool
 0x260,76,CreateCommittedResourceX (fork's name),console,PC CreateCommittedResource + DCC options,HRESULT,the AMD upscaler's (Series S),later,device.rs FUNCTIONS f[76]
 0x268,77,console addition (unknown),none,-,-,not seen,trap,unwritten
 0x270,78,SetFrameIntervalX (fork's name),console,"output, interval us (0 = 1/60 s), period, flags",HRESULT,"yes: 33.333 ms, before pipelines and again right before the first Present (timing-run L59, L222)",yes,frame.rs:45 set_interval

@@ -11,8 +11,8 @@ root `Cargo.toml`. No game folder, no title runs; GPU only for the unit-level te
   SetName, GetDevice, Map, Unmap, GetDesc, GetGPUVirtualAddress, GetHeapProperties), heap 8, descriptor heap 10.
   Every other slot traps: count, first-call time, `Events::first_trap` once, `E_NOTIMPL` only for `HRESULT`
   methods, 0 for value and pointer slots. `traps()` lists what was called.
-- **Device slots served (24)**, as `Resources` methods and as `thunks::device_slots()`: 0x70, 0x78, 0x88, 0x90,
-  0x98, 0xa0, 0xa8, 0xb0, 0xb8, 0xc0, 0xc8, 0xd0, 0xd8, 0xe0, 0xe8, 0x130, 0x1e8, 0x230, 0x238, 0x250, 0x258, 0x360,
+- **Device slots served (27)**, as `Resources` methods and as `thunks::device_slots()`: 0x70, 0x78, 0x80, 0x88, 0x90,
+  0x98, 0xa0, 0xa8, 0xb0, 0xb8, 0xc0, 0xc8, 0xd0, 0xd8, 0xe0, 0xe8, 0x130, 0x138, 0x148, 0x1e8, 0x230, 0x238, 0x250, 0x258, 0x360,
   0x3f8 (the back buffers), 0x428. Not served (trap in the lead's table): 0xf0, 0x260.
 - **Memory** by the lead's `Memory` trait (console address = GPU address; committed memory from it; buffer views
   from its ranges); `HostMemory`, an upload-heap stand-in; footprints from lane `xg`.

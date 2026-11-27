@@ -52,7 +52,7 @@ cannot test  AMD — FSR 4, AMD drivers, AMD memory/tiling behaviour, AMD device
 
 Everything that can be proven on NVIDIA is proven there first. AMD is closed by tester runs (Build 9), **deferred by the owner (2026-11-27)**: the work proceeds NVIDIA-first, and the FSR backend stays built and tested standalone.
 
-## The six decisions
+## The nine decisions
 
 ### 1. GPU-owned memory lives in VRAM; CPU-written memory is uploaded as dirty chunks
 

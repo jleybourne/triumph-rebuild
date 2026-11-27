@@ -232,7 +232,7 @@ pub mod host {
         ok
     }
 
-    /// The pages written since the last call, as offsets, for a graphics region (what the ring reads).
+    /// How many pages were written since the last call, for a graphics region (what the ring reads).
     pub fn written_pages(r: &Region) -> usize {
         let mut addrs = vec![std::ptr::null_mut(); (r.size / 4096) as usize];
         let mut count = addrs.len();

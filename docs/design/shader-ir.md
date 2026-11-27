@@ -1,6 +1,6 @@
 # Design — the shader core (plan decision 4)
 
-Status: **designed 2026-11-27. The IR, the classifier, the lane model and HLSL emission are built, and proven on the card (`sirtest`, 300 runs exact).**
+Status: **designed 2026-11-27. Built: the IR, the classifier, the lane model, HLSL emission (proven on the card, `sirtest`, 300 runs exact), the v0 lifter (straight-line programs) and v1 (structurized control flow, PR #26: 7,402 / 9,128 agnostic programs compile, [`runs/build4-v1.md`](../../runs/build4-v1.md)).**
 Inputs: the fork's census and its cost analysis (`docs/research/native-60-gpu.md` and `docs/per-lane.md` on
 `jleybourne/Triumph`), and this repository's Builds 1-2.
 
@@ -9,9 +9,9 @@ Inputs: the fork's census and its cost analysis (`docs/research/native-60-gpu.md
 ```
 decode        GFX10 instructions (lane `shader`, S3: byte-exact against the whole corpus)
    ↓
-CFG + SSA     basic blocks from branches; SGPRs and VGPRs to SSA values
+CFG           basic blocks from branches; registers stay HLSL variables (no SSA here: DXC builds it)
    ↓
-structurize   reducible, structured control flow (if/loop/break); irreducible → node splitting
+structurize   reducible, structured control flow (if/loop/break); an irreducible graph is refused
    ↓
 classify      what the program needs from the wave (below): most programs need nothing
    ↓
@@ -164,7 +164,8 @@ agnostic: 1,798 PS, 951 VS, 132 CS. 1,813 of them use 16-bit work, 17 use LDS, n
 
 1. ✅ `crates/sir`: IR types, uniformity analysis, the wave-size classifier, and the lane-doubling model
    with its interpreter tests (100k random programs, bit-exact).
-2. Structurizer and SSA from decoded GFX10 (needs lane `shader` S3).
+2. ✅ The lifter from decoded GFX10: v0 (one block), then v1 (structurized control flow, PR #26). No SSA of our
+   own (DXC builds it); irreducible graphs are refused, not node-split.
 3. ✅ HLSL emission and DXC compilation, both modes, proven on the card ([`runs/build4-sirtest.md`](../../runs/build4-sirtest.md)).
    Then census progress once decoded programs arrive.
 4. Lane doubling emission, then the graphics fallback, by census weight.

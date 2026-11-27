@@ -116,6 +116,39 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
 
+> The three entries below (58, 59, 61 %) were missing; they are filled in afterwards from the commits that moved
+> the header (`6292f20`, `bafec7c`, `71c075d`). The points behind each step were not recorded.
+
+### 2026-11-28 — Shader execution merged: 5,195 shaders bit-exact; frames 1-2 presented
+
+```
+[████████████░░░░░░░░]  61 %   (from commit 71c075d)
+title       frames 1 and 2 presented through our layer; card runs paused for a GPU safe mode
+```
+
+- **Merged:** lane `shaderexec`: 5,195 shaders counted bit-exact against the oracle on WARP
+  ([exec](runs/build4-exec.md)).
+
+### 2026-11-27 — Build 5: frame 1 presented and captured (Present merged, #32)
+
+```
+[████████████░░░░░░░░]  59 %   (Build 5 40 % → 50 %; from commit bafec7c)
+title       frame 1 presented through our layer and captured (black, as the title draws it)
+```
+
+- **Merged:** present (#32).
+- **Fixed:** watchpoint reports no longer call DbgHelp (a hit inside the host heap corrupted it).
+
+### 2026-11-27 — Build 5: stream pipelines merged (#30); the title calls Execute and Present
+
+```
+[████████████░░░░░░░░]  58 %   (Build 5 35 % → 40 %; from commit 6292f20)
+title       stream pipelines: 14 created, 0 refused; the title calls Execute and Present
+```
+
+- **Merged:** stream pipelines (#30).
+- **Diagnostics:** `runtitle` dumps every thread at a timeout.
+
 ### 2026-11-27 (night, later) — Build 5: compute pipelines, query heaps, command signatures; the title loads content
 
 ```

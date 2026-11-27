@@ -54,6 +54,15 @@ pub fn edits(config: &Config) -> Result<Vec<(&'static str, String)>, String> {
         .collect()
 }
 
+/// The explicit `settings.xml`: the `game.title_settings` setting when set, else `REBUILD_TITLE_SETTINGS`.
+pub fn explicit_source(config: &rebuild_config::Config, env: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let set = config.get("game.title_settings").to_string();
+    if !set.trim().is_empty() {
+        return Some(PathBuf::from(set.trim()));
+    }
+    env.filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
 /// Find the title's `settings.xml`: the explicit path if it is a file, else a search of the game folder.
 pub fn find_source(explicit: Option<&Path>, game_dir: &Path) -> Option<PathBuf> {
     if let Some(p) = explicit {
@@ -138,6 +147,17 @@ mod tests {
         assert_eq!(out.len(), SAMPLE.len());
         assert!(edit_xml(SAMPLE, &[("missing", "1".into())]).is_err());
         assert!(edit_xml("<a><b value=\"1\"/><b value=\"2\"/></a>", &[("b", "3".into())]).is_err());
+    }
+
+    #[test]
+    fn the_title_settings_setting_comes_before_the_variable() {
+        let mut c = Config::parse("").unwrap();
+        let env = || Some(std::ffi::OsString::from(r"C:\env\settings.xml"));
+        assert_eq!(explicit_source(&c, env()), Some(PathBuf::from(r"C:\env\settings.xml")));
+        assert_eq!(explicit_source(&c, None), None);
+        assert_eq!(explicit_source(&c, Some("".into())), None);
+        c.set("game.title_settings", Value::Path(r"C:\set\settings.xml".into())).unwrap();
+        assert_eq!(explicit_source(&c, env()), Some(PathBuf::from(r"C:\set\settings.xml")));
     }
 
     /// U3 closes here: the original's hash is unchanged, the copy carries the value.

@@ -2081,6 +2081,8 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 name = "rebuild"
 version = "0.1.0"
 dependencies = [
+ "rebuild-cardlock",
+ "rebuild-config",
  "rebuild-d3d12x",
  "rebuild-dstorage",
  "rebuild-loader",
@@ -2104,9 +2106,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rebuild-cardlock"
+version = "0.1.0"
+
+[[package]]
 name = "rebuild-config"
 version = "0.1.0"
 dependencies = [
+ "rebuild-upscale",
  "toml 0.8.23",
 ]
 
@@ -2178,6 +2185,7 @@ dependencies = [
 name = "rebuild-pipelines"
 version = "0.1.0"
 dependencies = [
+ "rebuild-cardlock",
  "rebuild-shader",
  "rebuild-sir",
  "rebuild-xlist",

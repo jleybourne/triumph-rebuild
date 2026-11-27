@@ -738,7 +738,7 @@ impl App {
     }
 
     fn title_source(&self) -> Option<PathBuf> {
-        let explicit = std::env::var_os("REBUILD_TITLE_SETTINGS").map(PathBuf::from);
+        let explicit = title::explicit_source(&self.store.model.config, std::env::var_os("REBUILD_TITLE_SETTINGS"));
         title::find_source(explicit.as_deref(), &self.game_dir())
     }
 
@@ -747,7 +747,7 @@ impl App {
     fn write_title_copy(&mut self) -> bool {
         let game = self.game_dir();
         let (ok, note) = match self.title_source() {
-            None => (false, "No settings.xml found: title settings not applied (set REBUILD_TITLE_SETTINGS).".to_string()),
+            None => (false, "No settings.xml found: title settings not applied (set Title settings file, or REBUILD_TITLE_SETTINGS).".to_string()),
             Some(src) => {
                 let before = rebuild_launcher::hash_file(&src).ok();
                 match title::write_copy(&src, Some(&game), &self.home.overlay_dir(), &self.store.model.config) {
@@ -791,6 +791,7 @@ impl App {
                 if let Some(p) = &self.plan {
                     env.push(("REBUILD_RUN_SECONDS".into(), p.run_seconds.to_string()));
                     env.push(("REBUILD_MEASURE_FROM".into(), p.measure_from.key().into()));
+                    // for the layer's summary once it reads its settings (C2); nothing reads it yet (the session records the id)
                     env.push(("REBUILD_MATRIX_ID".into(), p.id.clone()));
                 }
                 b.name.to_string()

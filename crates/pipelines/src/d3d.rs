@@ -116,38 +116,9 @@ pub struct Gpu {
     pub adapter: String,
 }
 
-/// The lanes' exclusive hold on the card (`agents\CARD`, created new; removed on drop, so also on a panic). Taken
-/// only while `agents\MEASURING` is absent.
-pub struct CardLock(std::path::PathBuf);
-
-/// The agents folder of the lead's tree, where `MEASURING` and `CARD` live.
-pub const AGENTS: &str = r"D:\Developer\triumph-rebuild\agents";
-
-impl CardLock {
-    /// The lock, or why not (the measurement lock is present, or another lane holds the card).
-    pub fn take() -> Result<CardLock, String> {
-        let dir = std::path::Path::new(AGENTS);
-        if dir.join("MEASURING").exists() {
-            return Err("the measurement lock is present".into());
-        }
-        let p = dir.join("CARD");
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
-            Ok(mut f) => {
-                use std::io::Write;
-                let _ = writeln!(f, "rebuild-pipelines pid {}", std::process::id());
-                Ok(CardLock(p))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err("another lane holds the card (agents\\CARD)".into()),
-            Err(e) => Err(format!("{}: {e}", p.display())),
-        }
-    }
-}
-
-impl Drop for CardLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
+/// The lanes' exclusive hold on the card (`agents\CARD`, naming its owner's pid; a lock whose owner has ended is
+/// taken over). Taken only while `agents\MEASURING` is absent. See `rebuild-cardlock`.
+pub use rebuild_cardlock::{CardLock, AGENTS};
 
 impl Gpu {
     /// `debug`: the D3D12 debug layer, whose messages give refusal reasons (slower; not for timing).
