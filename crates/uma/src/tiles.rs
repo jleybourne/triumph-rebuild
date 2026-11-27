@@ -74,6 +74,12 @@ fn runs(pages: &[Backed]) -> Vec<Run> {
 
 impl Tiles {
     pub fn new(device: &ID3D12Device, queue: &ID3D12CommandQueue, windows: usize) -> Result<Tiles, String> {
+        Self::new_sized(device, queue, windows, WINDOW as u64)
+    }
+
+    /// Windows of `bytes` each instead of 4 GiB, for a device that cannot reserve that much (WARP, in `sirtest
+    /// --warp`). Addresses are still `window << 32 | offset`; only offsets below `bytes` may be mapped.
+    pub fn new_sized(device: &ID3D12Device, queue: &ID3D12CommandQueue, windows: usize, bytes: u64) -> Result<Tiles, String> {
         unsafe {
             let mut o = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
             device
@@ -87,7 +93,7 @@ impl Tiles {
             for _ in 0..windows {
                 let mut r: Option<ID3D12Resource> = None;
                 device
-                    .CreateReservedResource(&buffer_desc(WINDOW as u64), D3D12_RESOURCE_STATE_COMMON, None, &mut r)
+                    .CreateReservedResource(&buffer_desc(bytes), D3D12_RESOURCE_STATE_COMMON, None, &mut r)
                     .map_err(err("reserved window"))?;
                 ws.push(r.ok_or("reserved window: none")?);
             }

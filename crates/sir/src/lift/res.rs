@@ -157,8 +157,7 @@ impl Lifter<'_> {
             _ => return None,
         };
         let Some(desc) = self.f.descs.get(&base).copied() else {
-            self.why = Some("descriptor not traced".into());
-            return None;
+            return self.window_load(n, base, dst, off, reg);
         };
         if desc.heap != Heap::Resource || off < 0 {
             return None;
@@ -194,6 +193,37 @@ impl Lifter<'_> {
         Some(())
     }
 
+    /// `s_buffer_load_dword*` through a descriptor the code built in SGPRs from a 64-bit address (a root
+    /// descriptor's user data, say): the base address is the V#'s first 48 bits, so the load is window
+    /// addressing (`docs/design/shader-ir.md`, "Memory"): `ResourceDescriptorHeap[WINDOW_HEAP_BASE + (address >>
+    /// 32)]` at the 32-bit offset. The window index is an SGPR, so it is wave-uniform. The descriptor's record
+    /// count is not applied: a read past the buffer reads what the window holds there (0 when unmapped).
+    fn window_load(&mut self, n: u8, base: u8, dst: u8, off: i32, reg: Option<String>) -> Option<()> {
+        let (Some(lo), Some(hi)) = (self.src(u32::from(base), None), self.src(u32::from(base) + 1, None)) else {
+            self.why = Some("descriptor not traced".into());
+            return None;
+        };
+        self.out.notes.insert("s_buffer_load through a code-built descriptor: window addressing, no record clamp");
+        let at = match &reg {
+            Some(r) => format!("{lo} + {r} + {off}u"),
+            None => format!("{lo} + {off}u"),
+        };
+        let _ = writeln!(
+            self.out.body,
+            "    {{ RWByteAddressBuffer w = ResourceDescriptorHeap[{}u + ({hi} & {}u)]; uint a = ({at}) & ~3u;",
+            super::WINDOW_HEAP_BASE,
+            super::WINDOW_COUNT - 1
+        );
+        for k in 0..n {
+            let s = dst + k;
+            self.out.sgprs.insert(s);
+            self.wrote(s);
+            let _ = writeln!(self.out.body, "      s{s} = w.Load(a + {}u);", 4 * u32::from(k));
+        }
+        self.out.body.push_str("    }\n");
+        Some(())
+    }
+
     /// Untyped buffer loads (`buffer_load_dword`, `x2`, `x3`, `x4`) through a heap descriptor, as
     /// `ByteAddressBuffer` loads at `vaddr (offen) + offset + soffset`. Out of range reads 0 on both. The
     /// indexed form (`idxen`: index times the descriptor's stride) is refused until the stride is known.
@@ -218,8 +248,7 @@ impl Lifter<'_> {
         }
         let rsrc = (d.get("srsrc")? * 4) as u8;
         let Some(res) = self.f.descs.get(&rsrc).copied() else {
-            self.why = Some("descriptor not traced".into());
-            return None;
+            return self.window_mubuf(d, rsrc, n, store);
         };
         if res.heap != Heap::Resource {
             self.why = Some("not a resource descriptor".into());
@@ -271,10 +300,87 @@ impl Lifter<'_> {
         Some(())
     }
 
+    /// Untyped `buffer_load_dword*` / `buffer_store_dword*` through a V# the code holds as data (built from an
+    /// address, or loaded from memory): window addressing at `base + soffset + index * stride + offset`, with
+    /// the V#'s stride (word 1, bits 16-29) and record count (word 2). Range checks follow GFX10's
+    /// `OOB_SELECT` (word 3, bits 28-29): 0 index and offset (structured), 1 index only, 2 the byte offset
+    /// (raw), 3 none; a lane out of range reads 0 and writes nothing. Folded when word 3 is a known constant.
+    /// `add_tid_enable` and swizzled buffers are refused when word 3 is known to set them.
+    fn window_mubuf(&mut self, d: &Decoded, rsrc: u8, n: u16, store: bool) -> Option<()> {
+        let words: Option<Vec<String>> = (0..4u32).map(|k| self.src(u32::from(rsrc) + k, None)).collect();
+        let Some(w) = words else {
+            self.why = Some("descriptor not traced".into());
+            return None;
+        };
+        let w3 = self.f.consts.get(&(rsrc + 3)).copied();
+        if w3.is_some_and(|x| x >> 23 & 1 == 1) {
+            self.why = Some("add_tid_enable".into());
+            return None;
+        }
+        let soff = self.usrc(d, "soffset")?;
+        let (idxen, offen) = (d.get("idxen")? == 1, d.get("offen")? == 1);
+        let vaddr = d.get("vaddr")? as u16;
+        let idx = if idxen {
+            self.out.vgprs.insert(vaddr);
+            format!("v{vaddr}")
+        } else {
+            "0u".into()
+        };
+        let voff = if offen {
+            let v = vaddr + u16::from(idxen);
+            self.out.vgprs.insert(v);
+            format!("v{v} + {}u", d.get("offset")?)
+        } else {
+            format!("{}u", d.get("offset")?)
+        };
+        self.out.notes.insert("buffer access through a V# held as data: window addressing");
+        let mut b = String::new();
+        let _ = write!(
+            b,
+            "    {{ RWByteAddressBuffer w = ResourceDescriptorHeap[{}u + ({} & {}u)]; uint sir_st = ({} >> 16) & 0x3fffu, sir_nr = {}, sir_i = {idx}, sir_o = {voff}; uint a = ({} + {soff} + sir_i * sir_st + sir_o) & ~3u;",
+            super::WINDOW_HEAP_BASE,
+            w[1],
+            super::WINDOW_COUNT - 1,
+            w[1],
+            w[2],
+            w[0]
+        );
+        // whether dword k of the access is in range
+        let inside = |k: u16| -> String {
+            let raw = format!("sir_o + {}u < sir_nr", 4 * k);
+            let structured = format!("(sir_i < sir_nr && sir_o + {}u < sir_st)", 4 * k);
+            match w3.map(|x| x >> 28 & 3) {
+                Some(0) => structured,
+                Some(1) => "sir_i < sir_nr".into(),
+                Some(2) => raw,
+                Some(_) => "true".into(),
+                None => format!("(sir_ob == 3u || (sir_ob == 2u ? {raw} : (sir_ob == 1u ? sir_i < sir_nr : {structured})))"),
+            }
+        };
+        if w3.is_none() {
+            let _ = write!(b, " uint sir_ob = ({} >> 28) & 3u;", w[3]);
+        }
+        self.out.body.push_str(&b);
+        self.out.body.push('\n');
+        let vdata = d.get("vdata")? as u16;
+        let guard = if self.f.narrowed { "ex && " } else { "" };
+        for k in 0..n {
+            self.out.vgprs.insert(vdata + k);
+            let i = inside(k);
+            if store {
+                let _ = writeln!(self.out.body, "      if ({guard}{i}) w.Store(a + {}u, v{});", 4 * k, vdata + k);
+            } else {
+                self.vwrite_raw(vdata + k, format!("{i} ? w.Load(a + {}u) : 0u", 4 * k));
+            }
+        }
+        self.out.body.push_str("    }\n");
+        Some(())
+    }
+
     /// Typed buffer loads and stores (`buffer_load_format_x`-`xyzw`, `buffer_store_format_*`): the element format
     /// is the console descriptor's, and the runtime builds the host's typed view from that descriptor, so the
     /// shader indexes `Buffer<float4>` / `RWBuffer<float4>` by element and the view converts. The indexed form
-    /// with no byte offset only; others are refused with the reason.
+    /// with no byte offset, and element 0 (no index, no offset); others are refused with the reason.
     pub(super) fn mubuf_typed(&mut self, name: &str, d: &Decoded) -> Option<()> {
         let store = name.starts_with("buffer_store_");
         let n = match name.rsplit('_').next()? {
@@ -285,7 +391,9 @@ impl Lifter<'_> {
             _ => return None,
         };
         let soff_zero = matches!(enc::src(d.get("soffset")?), Src::Inline(128) | Src::Null);
-        if d.get("idxen")? != 1 || d.get("offen")? == 1 || d.get("offset")? != 0 || !soff_zero {
+        // the element is the index (idxen), or element 0 with no index and no offset at all
+        let idxen = d.get("idxen")? == 1;
+        if d.get("offen")? == 1 || d.get("offset")? != 0 || !soff_zero {
             self.why = Some("typed access by byte offset".into());
             return None;
         }
@@ -303,7 +411,12 @@ impl Lifter<'_> {
             return None;
         }
         let (vaddr, vdata) = (d.get("vaddr")? as u16, d.get("vdata")? as u16);
-        self.out.vgprs.insert(vaddr);
+        let el = if idxen {
+            self.out.vgprs.insert(vaddr);
+            format!("v{vaddr}")
+        } else {
+            "0u".to_string()
+        };
         let ch = ["x", "y", "z", "w"];
         if store {
             let vals: Vec<String> = (0..4u16)
@@ -321,12 +434,12 @@ impl Lifter<'_> {
             let merge: Vec<String> = (0..n).map(|k| format!("o.{} = {};", ch[k as usize], vals[k as usize])).collect();
             let _ = writeln!(
                 self.out.body,
-                "    {{ RWBuffer<float4> b = ResourceDescriptorHeap[s{rsrc}]; {guard}{{ float4 o = b[v{vaddr}]; {} b[v{vaddr}] = o; }} }}",
+                "    {{ RWBuffer<float4> b = ResourceDescriptorHeap[s{rsrc}]; {guard}{{ float4 o = b[{el}]; {} b[{el}] = o; }} }}",
                 merge.join(" ")
             );
             return Some(());
         }
-        let _ = writeln!(self.out.body, "    {{ Buffer<float4> b = ResourceDescriptorHeap[s{rsrc}]; float4 r = b[v{vaddr}];");
+        let _ = writeln!(self.out.body, "    {{ Buffer<float4> b = ResourceDescriptorHeap[s{rsrc}]; float4 r = b[{el}];");
         for k in 0..n {
             self.vwrite_raw(vdata + k, format!("asuint(r.{})", ch[k as usize]));
         }
@@ -529,6 +642,14 @@ impl Lifter<'_> {
                 self.out.body.push_str("    }\n");
                 return Some(());
             }
+            n if n.starts_with("image_atomic_") => {
+                if cube {
+                    self.why = Some("cube atomic".into());
+                    return None;
+                }
+                let c = icoord(self, false).replace("int", "uint");
+                return self.image_atomic(n, d, rw, rsrc, &c);
+            }
             "image_load" => format!("t.Load({})", icoord(self, !ty.starts_with("RW") && ncoord < 4)),
             "image_store" => {
                 let c = icoord(self, false).replace("int", "uint");
@@ -569,6 +690,83 @@ impl Lifter<'_> {
             }
         }
         self.out.body.push_str("    }\n");
+        Some(())
+    }
+}
+
+impl Lifter<'_> {
+    /// `image_atomic_*` as `Interlocked*` on `RW<dim><uint>`, or on `<uint64_t>` for the 64-bit forms (dmask 3,
+    /// cmpswap 0xf; the runtime gives an atomic image an `R32_UINT` / `R32G32_UINT` view; signed min/max
+    /// compare as `int` on the same bits). `glc` returns the texel's value before the operation into `vdata`
+    /// (and `vdata + 1`). `cmpswap` takes (new value, compare) from `vdata`. Only active lanes take part.
+    /// Wrapping `inc`/`dec` and the float forms are refused.
+    fn image_atomic(&mut self, name: &str, d: &Decoded, rw: &str, rsrc: u8, c: &str) -> Option<()> {
+        let op = name.strip_prefix("image_atomic_")?;
+        let f = match op {
+            "add" | "sub" => "InterlockedAdd",
+            "smin" | "umin" => "InterlockedMin",
+            "smax" | "umax" => "InterlockedMax",
+            "and" => "InterlockedAnd",
+            "or" => "InterlockedOr",
+            "xor" => "InterlockedXor",
+            "swap" => "InterlockedExchange",
+            "cmpswap" => "InterlockedCompareExchange",
+            _ => {
+                self.why = Some(format!("image atomic {op}"));
+                return None;
+            }
+        };
+        let (dmask, glc) = (d.get("dmask")?, d.get("glc")? == 1);
+        // one dword, or two (dmask 3; cmpswap 0xf): 64-bit atomics on a `uint64_t` texel (SM 6.6)
+        let wide = match (dmask, op == "cmpswap") {
+            (1, false) | (3, true) => false,
+            (3, false) | (15, true) => true,
+            _ => {
+                self.why = Some(format!("image atomic dmask {dmask}"));
+                return None;
+            }
+        };
+        let vdata = d.get("vdata")? as u16;
+        let signed = matches!(op, "smin" | "smax");
+        let ty = match (wide, signed) {
+            (false, false) => "uint",
+            (false, true) => "int",
+            (true, false) => "uint64_t",
+            (true, true) => "int64_t",
+        };
+        let n = if wide { 2 } else { 1 };
+        let val = |l: &mut Self, v: u16| -> String {
+            for k in 0..n {
+                l.out.vgprs.insert(v + k);
+            }
+            if wide {
+                format!("({ty})(((uint64_t)v{} << 32) | (uint64_t)v{v})", v + 1)
+            } else if signed {
+                format!("(int)v{v}")
+            } else {
+                format!("v{v}")
+            }
+        };
+        let src = match op {
+            "sub" => format!("({ty})0 - {}", val(self, vdata)),
+            "cmpswap" => {
+                let (new, cmp) = (val(self, vdata), val(self, vdata + n));
+                format!("{cmp}, {new}")
+            }
+            _ => val(self, vdata),
+        };
+        let guard = if self.f.narrowed { "if (ex) " } else { "" };
+        let ret = match (glc, wide) {
+            (false, _) => String::new(),
+            (true, false) => format!(" v{vdata} = (uint)o;"),
+            (true, true) => format!(" v{vdata} = (uint)o; v{} = (uint)((uint64_t)o >> 32);", vdata + 1),
+        };
+        // an exchange must name the original; the others only when it is returned
+        let orig = if glc || matches!(op, "swap" | "cmpswap") { ", o" } else { "" };
+        let _ = writeln!(
+            self.out.body,
+            "    {{ {rw}<{ty}> t = ResourceDescriptorHeap[s{rsrc}]; {guard}{{ {ty} o; {f}(t[{c}], {src}{orig});{ret} }} }}"
+        );
         Some(())
     }
 }

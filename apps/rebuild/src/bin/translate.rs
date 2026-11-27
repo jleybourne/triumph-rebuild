@@ -14,6 +14,9 @@
 //! sampler k is read by a comparison).
 //! `v1` does the same for every agnostic VS, PS and CS, straight-line or not, through the control-flow
 //! translator (`rebuild_sir::lift::lift_program`), and reports each stage split into one block and several.
+//! Every refused program and its reason goes to `<out>/refused.<stage>.txt`. `REBUILD_TRANSLATE_LIFT_ONLY=1`
+//! stops after the lift and assembly (no DXC), for quick coverage counts. `REBUILD_TRANSLATE_HASHES=<file>`
+//! takes only the programs whose hash starts a line of the file (a `refused.<stage>.txt`, say).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -194,6 +197,14 @@ fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
     let single = [AtomicUsize::new(0), AtomicUsize::new(0)];
     let multi = [AtomicUsize::new(0), AtomicUsize::new(0)];
     let failures: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+    // every refused program with its full first reason: `<out>/refused.<stage>.txt`
+    let refused: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    // REBUILD_TRANSLATE_LIFT_ONLY=1: lift and assemble only (no files, no DXC); "compiled" counts lifted programs
+    let lift_only = std::env::var_os("REBUILD_TRANSLATE_LIFT_ONLY").is_some();
+    // REBUILD_TRANSLATE_HASHES=<file>: only the programs whose hash is the first word of a line of the file
+    let only: Option<BTreeSet<String>> = std::env::var("REBUILD_TRANSLATE_HASHES").ok().map(|f| {
+        std::fs::read_to_string(f).expect("hash list").lines().filter_map(|l| l.split_whitespace().next().map(String::from)).collect()
+    });
     std::thread::scope(|s| {
         for _ in 0..8 {
             s.spawn(|| {
@@ -207,7 +218,7 @@ fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
                         StageIo::Vs { .. } => vs && p.native.stage == rebuild_shader::native::HwStage::Vs,
                         _ => false,
                     };
-                    if !io_ok {
+                    if !io_ok || only.as_ref().is_some_and(|o| !o.contains(&p.hash)) {
                         continue;
                     }
                     let row = features::analyse(&p.native, &mut f);
@@ -237,6 +248,7 @@ fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
                                     let _ = std::fs::write(out.join(format!("{}.fail.txt", p.hash)), txt);
                                 }
                             }
+                            refused.lock().unwrap().push(format!("{} {kind} {e}", p.hash));
                             let key = if e.starts_with("untranslated") {
                                 e
                             } else if e.contains("which is no user data") {
@@ -248,6 +260,11 @@ fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
                             continue;
                         }
                     };
+                    if lift_only {
+                        compiled.fetch_add(1, Ordering::Relaxed);
+                        split[1].fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
                     let ext = kind;
                     let hl = out.join(format!("{}.{ext}.hlsl", p.hash));
                     let obj = out.join(format!("{}.{ext}.dxil", p.hash));
@@ -269,6 +286,11 @@ fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
             });
         }
     });
+    let mut refused = refused.into_inner().unwrap();
+    refused.extend(failures.lock().unwrap().iter().map(|(h, e)| format!("{h} {kind} dxc: {e}")));
+    refused.sort();
+    let _ = std::fs::write(out.join(format!("refused.{kind}.txt")), refused.join("
+"));
     let (n, ok) = (total.load(Ordering::Relaxed), compiled.load(Ordering::Relaxed));
     if v1 {
         println!("translate v1 {kind} — every agnostic program, control flow structured, compiled by DXC ({kind}_6_6, -O3)");

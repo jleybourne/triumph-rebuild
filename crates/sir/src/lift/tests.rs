@@ -109,11 +109,12 @@ fn compares_are_per_lane_masks_and_cmpx_predicates_later_writes() {
 
 #[test]
 fn what_is_not_built_yet_is_named_not_guessed() {
-    let p = program(&[vop1("v_mov_b32", 1, V + 0), vec![0xE000_0000 | op(Encoding::Mubuf, "buffer_load_dword") << 18, 0]]);
+    // (a buffer load from s[0:3] is no example any more: user data is a V# held as data, read through its window)
+    let p = program(&[vop1("v_mov_b32", 1, V + 0), vop1("v_movrels_b32", 2, V + 0)]);
     let l = lift(&p);
     assert_eq!(l.unsupported.len(), 1);
-    assert_eq!(l.unsupported[0].1, "buffer_load_dword (descriptor not traced)");
-    assert!(l.body.contains("// not translated: buffer_load_dword"));
+    assert_eq!(l.unsupported[0].1, "v_movrels_b32");
+    assert!(l.body.contains("// not translated: v_movrels_b32"));
 }
 
 fn dxc() -> Option<PathBuf> {
@@ -197,3 +198,6 @@ fn compile_cs(dxc: &std::path::Path, l: &Lifted, name: &str) {
 
 #[path = "tests_cfg.rs"]
 mod cfg_tests;
+
+#[path = "tests_cov.rs"]
+mod cov_tests;

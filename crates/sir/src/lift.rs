@@ -55,6 +55,14 @@ pub struct Lifted {
 /// console descriptor (stride, number of records, 0, 0), for what the host view does not carry.
 pub const SHADOW_SPACE: u32 = 101;
 
+/// Window addressing (`docs/design/shader-ir.md`, "Memory"): the console's 4 GiB window `k` (addresses
+/// `k << 32 ..`) is a raw buffer view at host view-heap index `WINDOW_HEAP_BASE + k`, for `k <
+/// WINDOW_COUNT` (47-bit addresses). The range is the top of a 1,000,000-view heap (the host limit on tiers
+/// 1-2); the runtime keeps it for window views (a null view where no window is mapped).
+pub const WINDOW_HEAP_BASE: u32 = 1_000_000 - WINDOW_COUNT;
+/// Windows the heap range holds: every 4 GiB window of a 47-bit address space.
+pub const WINDOW_COUNT: u32 = 1 << 15;
+
 /// The register space of immediate samplers (static samplers in the host root signature).
 pub const IMMEDIATE_SAMPLER_SPACE: u32 = 100;
 
@@ -101,6 +109,24 @@ uint sir_f2u(float x) { return isnan(x) ? 0 : (x >= 4294967295.0f ? 0xffffffff :
 struct SirCb { uint4 d[4096]; };
 uint sir_bfe_u(uint v, uint off, uint w) { off &= 31; w &= 31; return w == 0 ? 0 : (v >> off) & ((1u << w) - 1); }
 int sir_bfe_i(int v, uint off, uint w) { off &= 31; w &= 31; return w == 0 ? 0 : (v << (32 - off - w)) >> (32 - w); }
+// the dword at byte address a (any alignment) from the aligned dwords lo and hi that hold it
+uint sir_unaligned(uint lo, uint hi, uint a) { uint sh = (a & 3u) * 8u; return sh == 0u ? lo : (lo >> sh) | (hi << (32u - sh)); }
+// a V#'s dst_sel: 0 zero, 1 one, 4-7 channel x-w
+uint sir_dst_sel(uint4 c, uint sel, uint one) { return sel >= 4u ? c[sel - 4u] : (sel == 1u ? one : 0u); }
+// v_perm_b32: each result byte picks a byte of {src0, src1} (0-7), a sign fill (8-11: bit 15, 31, 47, 63), 0 (12)
+// or 0xff (13 and up)
+uint sir_perm(uint a, uint b, uint sel) {
+    uint r = 0;
+    for (uint i = 0; i < 4; i++) {
+        uint s = (sel >> (8 * i)) & 0xff, x;
+        if (s < 4) { x = (b >> (8 * s)) & 0xff; }
+        else if (s < 8) { x = (a >> (8 * (s - 4))) & 0xff; }
+        else if (s < 12) { uint w = s < 10 ? b : a; x = ((w >> ((s & 1) != 0 ? 31 : 15)) & 1) != 0 ? 0xff : 0; }
+        else { x = s == 12 ? 0 : 0xff; }
+        r |= x << (8 * i);
+    }
+    return r;
+}
 "#;
 
 /// The float value of an inline constant code 240..248.
@@ -129,6 +155,8 @@ fn inline_bits(code: u16) -> String {
 }
 
 pub mod cfg;
+pub mod check;
+pub mod fmt;
 pub mod io;
 pub mod res;
 pub use io::{cs_program, ps_program, vs_program, PsStage, Stage, VsStage};
@@ -191,6 +219,12 @@ struct Lifter<'a> {
     scc_live: bool,
     /// inside a DPP instruction: src0 reads `sir_dpp`; VALU writes also need `sir_dv` when set
     dpp: Option<bool>,
+    /// the current instruction keeps only bits 16 and up of its first operand (a shift right or field
+    /// extract from bit 16): a descriptor's word 1 may be read as its stride
+    hi16: bool,
+    /// inside an SDWA instruction: the operands are `sir_a` / `sir_b` (selected and extended), and the op's
+    /// result goes to `sir_r` (merged into the destination's selected bits afterwards)
+    sdwa: bool,
 }
 
 /// What an operand reads, as a `uint` expression; `None` if not translated yet.
@@ -199,7 +233,23 @@ impl Lifter<'_> {
         Some(match enc::src(code) {
             Src::Sgpr(n) => {
                 if self.f.descs.contains_key(&n) || self.f.desc_words.contains(&n) {
-                    return None; // a descriptor word read as data
+                    // a buffer descriptor's stride (word 1, bits 16-29) and record count (word 2) are in the shadow
+                    // table; word 1 only when the instruction keeps no bit below 16 (the address is not there)
+                    if let Some((b, k)) = self.desc_word_of(n) {
+                        if self.f.descs.get(&b).is_some_and(|d| d.heap == res::Heap::Resource) && (k == 2 || (k == 1 && self.hi16)) {
+                            self.out.uses_shadow = true;
+                            self.out.sgprs.insert(b);
+                            return Some(if k == 2 {
+                                format!("sir_shadow.Load(s{b} * 16u + 4u)")
+                            } else {
+                                format!("(sir_shadow.Load(s{b} * 16u) << 16)")
+                            });
+                        }
+                    }
+                    // a descriptor word read as data
+                    let w = self.desc_word_of(n).map_or("?".to_string(), |(_, k)| k.to_string());
+                    self.why.get_or_insert(format!("descriptor word {w} read as data"));
+                    return None;
                 }
                 if self.f.stale.contains(&n) {
                     self.why = Some("a lane mask read as data".into());
@@ -226,8 +276,24 @@ impl Lifter<'_> {
         })
     }
 
+    /// The loaded descriptor SGPR `n` belongs to: (its first SGPR, the word's index).
+    fn desc_word_of(&self, n: u8) -> Option<(u8, u8)> {
+        self.f.descs.iter().filter(|(b, d)| **b <= n && n < **b + d.dwords).map(|(b, _)| (*b, n - *b)).next()
+    }
+
     /// A float operand, with VOP3 abs/neg for operand `i`.
     fn fsrc(&mut self, d: &Decoded, field: &str, i: u32) -> Option<String> {
+        if self.sdwa && (field == "src0" || field == "vsrc1") {
+            let (x, k) = if field == "src0" { ("sir_a", "src0") } else { ("sir_b", "src1") };
+            let mut e = format!("asfloat({x})");
+            if d.get(&format!("{k}_abs")) == Some(1) {
+                e = format!("abs({e})");
+            }
+            if d.get(&format!("{k}_neg")) == Some(1) {
+                e = format!("(-{e})");
+            }
+            return Some(e);
+        }
         if self.dpp.is_some() && field == "src0" {
             let mut e = "asfloat(sir_dpp)".to_string();
             if d.get("src0_abs") == Some(1) {
@@ -357,6 +423,72 @@ impl Lifter<'_> {
         r
     }
 
+    /// SDWA (VOP1, VOP2, VOPC with a sub-dword word): each operand is a byte, a word or the dword of its
+    /// register, zero- or sign-extended (`sext`); the op runs on those as on whole registers; a VOP1/VOP2
+    /// result goes into the destination's selected byte or word, the other bits zeroed, sign-extended, or kept
+    /// (`dst_unused`). `s0`/`s1` say an operand is an SGPR or a constant rather than a VGPR.
+    fn sdwa(&mut self, name: &str, d: &Decoded, w: &[u32]) -> Option<()> {
+        let (layout, _) = d.extra.as_ref()?;
+        let field = |f: &str| layout.fields.iter().position(|x| x.name == f).map(|i| w[i]);
+        let operand = |l: &mut Self, code: u32, scalar: bool, sel: u32, sext: bool| -> Option<String> {
+            let x = l.src(if scalar { code } else { 256 + code }, None)?;
+            Some(match (sel, sext) {
+                (0..=3, false) => format!("(({x} >> {}u) & 0xffu)", 8 * sel),
+                (0..=3, true) => format!("(uint)(((int){x} << {}) >> 24)", 24 - 8 * sel),
+                (4 | 5, false) => format!("(({x} >> {}u) & 0xffffu)", 16 * (sel - 4)),
+                (4 | 5, true) => format!("(uint)(((int){x} << {}) >> 16)", 16 - 16 * (sel - 4)),
+                (6, _) => x,
+                _ => return None,
+            })
+        };
+        let a = operand(self, field("src0")?, field("s0")? == 1, field("src0_sel")?, field("src0_sext")? == 1)?;
+        let b = if d.encoding == Encoding::Vop1 {
+            "0u".to_string()
+        } else {
+            operand(self, d.get("vsrc1")?, field("s1")? == 1, field("src1_sel")?, field("src1_sext")? == 1)?
+        };
+        self.line(format!("{{ uint sir_a = {a}, sir_b = {b}, sir_r = 0u;"));
+        self.sdwa = true;
+        let r = self.valu(name, d);
+        self.sdwa = false;
+        if r.is_none() {
+            self.line("}".into());
+            return None;
+        }
+        if d.encoding != Encoding::Vopc && name != "v_nop" {
+            let v = d.get("vdst")? as u16;
+            let (sel, unused) = (field("dst_sel")?, field("dst_unused")?);
+            let e = match sel {
+                6 => "sir_r".to_string(),
+                0..=5 => {
+                    let (bits, off) = if sel < 4 { (8u32, 8 * sel) } else { (16u32, 16 * (sel - 4)) };
+                    let m = ((1u64 << bits) - 1) as u32;
+                    let f = format!("((sir_r & {m}u) << {off}u)");
+                    match unused {
+                        0 => f,
+                        // the bits above the field copy its top bit; those below are 0
+                        1 => {
+                            let above = !(((1u64 << (bits + off)) - 1) as u32);
+                            format!("({f} | (((sir_r >> {}u) & 1u) != 0u ? {above}u : 0u))", bits - 1)
+                        }
+                        2 => format!("((v{v} & {}u) | {f})", !(m << off)),
+                        _ => {
+                            self.line("}".into());
+                            return None;
+                        }
+                    }
+                }
+                _ => {
+                    self.line("}".into());
+                    return None;
+                }
+            };
+            self.vwrite_raw(v, e);
+        }
+        self.line("}".into());
+        Some(())
+    }
+
     /// LDS as `groupshared uint sir_lds[]`, by dword: reads and writes of 1, 2 or 4 dwords, the two-address
     /// forms (offsets in dwords, or 64 dwords with `st64`), and `ds_add_u32`. Only active lanes write.
     fn lds(&mut self, name: &str, d: &Decoded) -> Option<()> {
@@ -417,6 +549,14 @@ impl Lifter<'_> {
     }
 
     fn usrc(&mut self, d: &Decoded, field: &str) -> Option<String> {
+        if self.sdwa && (field == "src0" || field == "vsrc1") {
+            let k = if field == "src0" { "src0" } else { "src1" };
+            if d.get(&format!("{k}_abs")) == Some(1) || d.get(&format!("{k}_neg")) == Some(1) {
+                self.why = Some("SDWA abs/neg on an integer operand".into());
+                return None;
+            }
+            return Some(if field == "src0" { "sir_a" } else { "sir_b" }.into());
+        }
         if self.dpp.is_some() && field == "src0" {
             return Some("sir_dpp".into());
         }
@@ -526,7 +666,7 @@ impl Lifter<'_> {
     /// Writes VGPR `vdst` with a float expression, applying VOP3 clamp and omod.
     fn vwrite_f(&mut self, d: &Decoded, expr: String) {
         let mut e = expr;
-        if d.encoding == Encoding::Vop3 {
+        if d.encoding == Encoding::Vop3 || self.sdwa {
             match d.get("omod") {
                 Some(1) => e = format!("({e}) * 2.0f"),
                 Some(2) => e = format!("({e}) * 4.0f"),
@@ -547,7 +687,9 @@ impl Lifter<'_> {
 
     fn vwrite_raw(&mut self, v: u16, expr: String) {
         self.out.vgprs.insert(v);
-        if self.dpp == Some(true) {
+        if self.sdwa {
+            let _ = writeln!(self.out.body, "    sir_r = {expr};");
+        } else if self.dpp == Some(true) {
             let g = if self.f.narrowed { "ex && sir_dv" } else { "sir_dv" };
             let _ = writeln!(self.out.body, "    if ({g}) v{v} = {expr};");
         } else if self.f.narrowed {
@@ -608,6 +750,7 @@ impl Lifter<'_> {
             Encoding::Smem => self.smem(name, &d),
             Encoding::Mimg => self.mimg(name, &d),
             Encoding::Mubuf => self.mubuf(name, &d),
+            Encoding::Mtbuf => self.tbuffer(name, &d),
             Encoding::Exp => self.export(&d),
             Encoding::Vop3p => self.vop3p(name, &d),
             Encoding::Ds if name == "ds_swizzle_b32" => self.swizzle(&d),
@@ -617,7 +760,11 @@ impl Lifter<'_> {
                     if x.name == "dpp16" {
                         return self.dpp16(name, &d, v[0] as u16);
                     }
-                    // SDWA / DPP8: not yet
+                    if x.name.starts_with("sdwa") {
+                        let w = v.clone();
+                        return self.sdwa(name, &d, &w);
+                    }
+                    // DPP8: not yet
                     self.why = Some(if x.name.starts_with("sdwa") { "SDWA".into() } else { x.name.to_string() });
                     return None;
                 }
@@ -687,6 +834,12 @@ impl Lifter<'_> {
 
     fn salu_inner(&mut self, name: &str, d: &Decoded) -> Option<()> {
         let sdst = d.get("sdst");
+        // `s_lshr_b32 x, w, k` (k >= 16) or `s_bfe_u32 x, w, off | width << 16` (off >= 16)
+        self.hi16 = match name {
+            "s_lshr_b32" => self.cval(d, "ssrc1").is_some_and(|k| k & 31 >= 16),
+            "s_bfe_u32" => self.cval(d, "ssrc1").is_some_and(|k| k & 31 >= 16),
+            _ => false,
+        };
         let a = |l: &mut Self| l.usrc(d, "ssrc0");
         let b = |l: &mut Self| l.usrc(d, "ssrc1");
         match name {
@@ -1010,6 +1163,8 @@ impl Lifter<'_> {
         let f1 = |l: &mut Self| -> Option<String> {
             if d.encoding == Encoding::Vop3 {
                 l.fsrc(d, "src1", 1)
+            } else if l.sdwa {
+                l.fsrc(d, "vsrc1", 1)
             } else {
                 let v = d.get("vsrc1")? as u16;
                 l.out.vgprs.insert(v);
@@ -1019,6 +1174,8 @@ impl Lifter<'_> {
         let u1 = |l: &mut Self| -> Option<String> {
             if d.encoding == Encoding::Vop3 {
                 l.usrc(d, "src1")
+            } else if l.sdwa {
+                l.usrc(d, "vsrc1")
             } else {
                 let v = d.get(s1)? as u16;
                 l.out.vgprs.insert(v);
@@ -1042,6 +1199,21 @@ impl Lifter<'_> {
             "v_mov_b32" => {
                 let x = u0(self)?;
                 self.vwrite(d, x);
+                Some(())
+            }
+            // bit scans: -1 when no bit is found, as on the console. `v_ffbh_u32` counts from the top bit;
+            // `v_ffbh_i32` finds the first bit that differs from the sign (none for 0 and -1)
+            "v_ffbl_b32" | "v_ffbh_u32" | "v_ffbh_i32" | "v_bfrev_b32" | "v_not_b32" => {
+                let x = u0(self)?;
+                let e = match name {
+                    "v_ffbl_b32" => format!("firstbitlow({x})"),
+                    "v_ffbh_u32" => format!("({x} == 0u ? 0xffffffffu : 31u - firstbithigh({x}))"),
+                    "v_ffbh_i32" => format!("(({x} == 0u || {x} == 0xffffffffu) ? 0xffffffffu : 31u - firstbithigh((int){x}))"),
+                    "v_bfrev_b32" => format!("reversebits({x})"),
+                    "v_not_b32" => format!("~{x}"),
+                    _ => unreachable!(),
+                };
+                self.vwrite(d, e);
                 Some(())
             }
             // float, one operand
@@ -1217,7 +1389,8 @@ impl Lifter<'_> {
                     "v_min3_u32" => format!("min(min({x}, {y}), {z})"),
                     "v_max3_u32" => format!("max(max({x}, {y}), {z})"),
                     "v_alignbit_b32" => format!("(uint)((((uint64_t){x} << 32) | (uint64_t){y}) >> ({z} & 31))"),
-                    _ => return None, // v_perm_b32: byte select, next step
+                    "v_perm_b32" => format!("sir_perm({x}, {y}, {z})"),
+                    _ => unreachable!(),
                 };
                 self.vwrite(d, e);
                 Some(())
@@ -1248,6 +1421,8 @@ impl Lifter<'_> {
                 let a = self.usrc(d, "src0")?;
                 let m = if d.encoding == Encoding::Vop3 {
                     self.usrc(d, "src1")?
+                } else if self.sdwa {
+                    self.usrc(d, "vsrc1")?
                 } else {
                     let v = d.get("vsrc1")? as u16;
                     self.out.vgprs.insert(v);
@@ -1259,6 +1434,8 @@ impl Lifter<'_> {
                 let a = self.fsrc(d, "src0", 0)?;
                 let b = if d.encoding == Encoding::Vop3 {
                     self.fsrc(d, "src1", 1)?
+                } else if self.sdwa {
+                    self.fsrc(d, "vsrc1", 1)?
                 } else {
                     let v = d.get("vsrc1")? as u16;
                     self.out.vgprs.insert(v);
@@ -1270,6 +1447,8 @@ impl Lifter<'_> {
                 let a = self.usrc(d, "src0")?;
                 let b = if d.encoding == Encoding::Vop3 {
                     self.usrc(d, "src1")?
+                } else if self.sdwa {
+                    self.usrc(d, "vsrc1")?
                 } else {
                     let v = d.get("vsrc1")? as u16;
                     self.out.vgprs.insert(v);
@@ -1291,7 +1470,13 @@ impl Lifter<'_> {
         if x_form {
             return self.mask_write(126, &e);
         }
-        let dst = if d.encoding == Encoding::Vop3 { d.get("vdst")? } else { 106 };
+        let dst = if d.encoding == Encoding::Vop3 {
+            d.get("vdst")?
+        } else if self.sdwa && d.get("sd")? == 1 {
+            d.get("sdst")?
+        } else {
+            106
+        };
         if !matches!(enc::src(dst), Src::VccLo | Src::Sgpr(_)) {
             return None;
         }
@@ -1364,13 +1549,14 @@ pub fn lift_program<'a>(insts: &[Instruction], stage: Stage<'a>, bind: Option<Bi
 
 impl<'a> Lifter<'a> {
     fn new(stage: Stage<'a>, bind: Option<Bindings<'a>>, wave64: bool) -> Self {
-        Lifter { out: Lifted::default(), stage, bind, f: FlowState::default(), why: None, wave64, scc_live: false, dpp: None }
+        Lifter { out: Lifted::default(), stage, bind, f: FlowState::default(), why: None, wave64, scc_live: false, dpp: None, sdwa: false, hi16: false }
     }
 
     /// Lifts instructions in order; `live[k]` says whether SCC is read after instruction k.
     fn run(&mut self, insts: &[Instruction], live: &[bool]) {
         for (k, i) in insts.iter().enumerate() {
             self.why = None;
+            self.hi16 = false;
             self.scc_live = live.get(k).copied().unwrap_or(true);
             if self.inst(i).is_none() {
                 let n = i.name().unwrap_or("?").to_string();
