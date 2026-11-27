@@ -142,3 +142,7 @@ The owner's rules, in their own words:
 - Owner request, hardware limits: built (limits.rs, config limits.*, launcher env); left: VRAM in Build 5 heaps,
   worker pools sized to the core limit, a capped proof run (owner OK).
 - The title has not been run since the kernel-spin fix (2a2af01); ask the owner before any run.
+- oraclediff on our v0 DXIL (2,834 programs, D:\victory-data\translate-dxil as <hash>.dxil, CSV
+  D:\victory-data\oraclediff-v0.csv): 2,829 "differ", but OUR side shows 0 dx.op calls (memory/wave/io all 0):
+  crates/shader/src/bitcode.rs does not recognise dx.op calls in DXC 1.8 output (only checked against the oracle).
+  Fix the reader first (dump one DXC module's calls), then read the real SigIn/SigOut/Bindings diffs.
