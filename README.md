@@ -2,7 +2,7 @@
 
 **A self rebuild of the compatibility layer for Xbox Series, in my own method, focused on performance.**
 
-[**Progress: `[██░░░░░░░░░░░░░░░░░░]` 8 %**](progress.md) — work toward 30 fps, by build step · no title frame measured yet
+[**Progress: `[██░░░░░░░░░░░░░░░░░░]` 11 %**](progress.md) — work toward 30 fps, by build step · no title frame measured yet
 
 A console-to-Windows layer for a current-generation title, built around one decision that the layers it
 learned from make differently: **GPU-owned memory lives in VRAM at the title's addresses and is never
@@ -38,8 +38,8 @@ title does*, then write our own.
 |---|---|---|
 | GPU-owned memory in VRAM at the title's addresses, never copied back | the copy-back is 48-54 ms of the old frame and exists only to fake shared memory | old layer's frame line; `gputest` proves the GPU and CPU can share bytes |
 | CPU changes sent as 64-byte chunks, scattered by one compute dispatch, a frame ahead | the old layer copied 115 MB to deliver ~48 MB of real change; one copy per range costs more than the bytes | **measured here:** 16-30 ms of worker time at the title's real shape, 12.64 GB/s link; one copy per range = 146 ms ([`runs/build0a-upload.md`](runs/build0a-upload.md)) |
-| list calls translated on workers, cached only if it pays | 243 ms of list calls; translation is the CPU half of the frame | Build 0 (b) measures it next |
-| descriptors as a dirty list | the old layer scanned 203,127 slots to update 12,027 | old layer's frame line |
+| list calls translated where the title records them, no cache | the old layer's 29 µs a draw looked like translation, but it was memory bookkeeping | **measured here:** 0.43 µs a draw with the driver, 1.9 ms a frame on one thread ([`runs/build0b-lists.md`](runs/build0b-lists.md)) |
+| descriptors as a dirty list | the old layer scanned 203,127 slots to update 12,027 | **measured here:** 12,027 writes from a dirty list = 2.0 ms |
 | nothing compiles in a frame | runtime pipeline compiles measured 4× slower per draw | old layer's runs |
 | DLSS on NVIDIA, FSR on AMD | the title's own GPU work is 43-63 ms; 30 fps needs fewer pixels, not just less overhead | fork's per-list timestamps; how to lower the internal resolution is still open ([`progress.md`](progress.md)) |
 
@@ -52,7 +52,9 @@ and replacing only the memory model has not been costed, and no title frame has 
 crates/uma        the address space: windows, 64 KiB pages, placement, sharing; 64 B chunk diff
 apps/rebuild     the launcher
 apps/gputest      the proof: the GPU writes, the CPU reads, nothing is copied
+crates/xlist      list calls as records; the lock-free translator into D3D12
 apps/uploadbench  Build 0 (a): write-watch + 64 B diff + upload, timed at the old layer's volume
+apps/listbench    Build 0 (b): per-draw translation into real D3D12 lists
 ```
 
 
@@ -71,7 +73,7 @@ route       GPU-owned in VRAM, CPU changes as dirty chunks + parallel list trans
 **"Better than both" is specific, not a slogan.** Where they made a choice that costs frame time we take
 the opposite one: no host mirror, no copy-back path, no guard-page faults, no runtime pipeline compiles,
 no per-frame descriptor scans — plus what neither of them does: descriptor updates tracked as a dirty list
-instead of a 203,127-slot scan, and command lists cached by content, kept only if the hit rate pays.
+instead of a 203,127-slot scan.
 
 ## The decision
 

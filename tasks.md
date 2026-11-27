@@ -17,8 +17,8 @@ Order and decisions are `plan.md`'s; overall progress is in [`progress.md`](prog
 | state | work | closes when |
 |---|---|---|
 | done | (a) dirty-chunk upload benchmark: write-watch + 64 B diff (shadow and hash) + PCIe upload (copy-per-run and compute scatter) at 115 MB/frame | `uploadbench` — results in [`runs/build0a-upload.md`](runs/build0a-upload.md) |
-| todo | (b) per-draw translation microbenchmark: a recorded console draw → D3D12 calls, on our own code. Note: the old 243 ms is spread over the title's 5 recording threads (0 ms on the render thread, 70 % waiting on the title's own scheduler), so the budget is per recording thread, not serial | µs per draw against the 7.4 µs budget (1.6 µs per list call) |
-| todo | (c) the title's real GPU time from per-list timestamp pairs (the fork's per-pass tool never printed). The fork's own figures run 43-63 ms, with RT lighting off | a measured replacement for the soft ~45 ms, RT on and off |
+| done | (b) per-draw translation microbenchmark: synthetic frame in the title's shape (4,500 draws, 20,311 calls, 1,433 pipelines) through our translator (`crates/xlist`, 5 tests) into real D3D12 lists, plus 12,027 descriptor writes from a dirty list | `listbench`: 0.43 µs a draw on one thread, 1.9 ms a frame; descriptors 2.0 ms — [`runs/build0b-lists.md`](runs/build0b-lists.md) |
+| blocked | (c) the title's real GPU time from per-list timestamp pairs, RT on and off. Needs the title rendering on our code, so it closes in Build 5; until then the fork's 43-63 ms (RT off) stands | a measured replacement for the soft ~45 ms |
 | todo | owner: fill the minimum spec in `plan.md` (GPUs, VRAM, ReBAR, output resolution, upscaler mode) | filled before Build 7 |
 
 ## Build 1 — tiled VRAM at console addresses
@@ -71,13 +71,15 @@ Order and decisions are `plan.md`'s; overall progress is in [`progress.md`](prog
 | todo | console descriptor heaps (T#/V# slots shaders index), PC descriptors beside, dirty list (no scan) | a shader samples a texture made by title code |
 | todo | present / vsync / window | a non-black frame, captured to PNG |
 | todo | frame line: fps · ms · draws · dropped · upload MB · upload ms · translation ms · output res · upscaler/mode · vendor | one parseable line a second |
+| todo | Build 0 (c), moved here: the title's GPU time from per-list timestamp pairs, RT on and off | measured; replaces the ~45 ms everywhere it is quoted |
 
 ## Build 6 — parallel list translation
 
 | state | work | closes when |
 |---|---|---|
-| todo | list calls recorded as data, translated on worker threads (leave cores for the title) | per-draw CPU cost on the critical thread ≤ 7.4 µs |
-| todo | cache identical lists by content — tried, shipped only if the hit rate pays | hit rate and net ms reported; dropped if it does not pay |
+| done | translator core: state elision, address and pipeline mapping, no locks (`crates/xlist`) | 0.43 µs a draw with the driver, synthetic frame (Build 0 (b)) |
+| todo | translate each list on the title's own recording thread at Close, no extra pool | per-draw CPU cost on the real stream ≤ 1 µs (Build 0 (b) floor ~0.4 µs), frame line |
+| dropped | list cache by content | Build 0 (b): translation is ~2 ms a frame; hashing could not pay |
 
 ## Build 7 — the upscaler: one interface, two backends
 

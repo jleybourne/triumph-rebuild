@@ -1,0 +1,19 @@
+listbench — Build 0 (b): per-draw translation, our own code
+frame     4500 draws · 20311 list calls · 48 lists · 1433 pipelines (built in 18 ms at start) · 200000 descriptor slots
+budget    7.4 µs a draw / 1.6 µs a call if serial (33.3 ms / 4,500 draws)
+          30 timed frames after 3 warm-up, medians
+
+sink                          T |  wall ms thread ms |   µs/draw   µs/call |  elided refused
+counting (ours alone)         1 |     0.16      0.14 |     0.032     0.007 |    3317       0
+counting (ours alone)         2 |     0.08      0.14 |     0.030     0.007 |    3317       0
+counting (ours alone)         4 |     0.06      0.16 |     0.036     0.008 |    3317       0
+counting (ours alone)         6 |     0.06      0.18 |     0.039     0.009 |    3317       0
+D3D12 lists (ours + driver)   1 |     1.97      1.92 |     0.426     0.094 |    3317       0
+D3D12 lists (ours + driver)   2 |     0.99      1.89 |     0.420     0.093 |    3317       0
+D3D12 lists (ours + driver)   4 |     0.70      2.63 |     0.584     0.129 |    3317       0
+D3D12 lists (ours + driver)   6 |     0.52      2.80 |     0.622     0.138 |    3317       0
+
+descriptors  12,027 written a frame from a dirty list (the old layer scanned 203,127): 1.99 ms = 0.166 µs each
+
+columns   wall = first list started -> last list closed; thread ms = summed over workers
+          µs/draw and µs/call are thread time per draw/call; every recorded frame was executed

@@ -1,7 +1,7 @@
 # Progress
 
 ```
-work toward 30 fps   [██░░░░░░░░░░░░░░░░░░]   8 %
+work toward 30 fps   [██░░░░░░░░░░░░░░░░░░]  11 %
 measured fps         none yet — the title has not rendered a frame on this code
 baseline to beat     7.6 fps · 131.3 ms · ~4,500 draws · 356 dropped   (the layer being replaced)
 target               30 fps · 33.3 ms · same draws · stated output resolution and upscaler mode
@@ -16,17 +16,17 @@ second row and is the number that counts.
 
 | # | build | weight | done | earned | state |
 |---|---|---:|---:|---:|---|
-| 0 | three answers before more code | 10 | 40 % | 4.0 | (a) upload **done**: decision 1 holds with conditions; (b) and (c) todo |
+| 0 | three answers before more code | 10 | 70 % | 7.0 | (a) upload **done**; (b) translation **done**: 0.43 µs a draw; (c) blocked until the title renders (moved to Build 5) |
 | 1 | tiled VRAM at console addresses | 10 | 20 % | 2.0 | page bookkeeping (8 tests) and the GPU↔CPU proof done; tiles on the GPU not started |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 20 % | 1.6 | 64 B diff and gather written and tested (7 tests); method chosen by measurement; ring, fence and pool todo |
 | 3 | PE loader + console runtime | 15 | 0 % | 0 | — |
 | 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 0 % | 0 | — |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
-| 6 | parallel list translation | 8 | 0 % | 0 | — |
+| 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 0 % | 0 | plan correction needed: method 0x218 is not the upscale call |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **7.6 ≈ 8 %** | |
+| | **total** | **100** | | **11.4 ≈ 11 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -40,10 +40,13 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
   ~16-30 ms of worker wall time, ~1-7 ms of it on the GPU. It must use hash diff + compute scatter and
   run a frame ahead, off the submit thread. Every config verified byte-exact.
 - 64-byte chunk diff, gather and chunk index (`crates/uma/src/chunks.rs`, 7 tests).
+- **Build 0 (b) — translation benchmark** (`listbench`, [`runs/build0b-lists.md`](runs/build0b-lists.md)):
+  our translator plus D3D12 costs 0.43 µs a draw, 1.9 ms for the title-shaped frame on one thread, which is 18×
+  under budget. 12,027 descriptor writes from a dirty list cost 2.0 ms. List translation is not the CPU problem.
 
 ## Not done
 
-- Build 0 (b): per-draw translation cost. (c): the title's real GPU time, with RT on and off.
+- Build 0 (c): the title's real GPU time, with RT on and off. Blocked: it needs the title rendering, so it moved to Build 5.
 - Minimum spec in `plan.md` (owner decision, needed before Build 7).
 - Everything from Build 1 tiles onward: see [`tasks.md`](tasks.md).
 
@@ -61,6 +64,28 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Build 0 (b): per-draw translation
+
+```
+[██░░░░░░░░░░░░░░░░░░]  11 %   (was 8 %: +3.0 Build 0 (b), +0.8 Build 6 translator core)
+measured fps   none yet
+```
+
+- **Built** `crates/xlist`: list calls as records, and a lock-free translator (state elision, console→PC
+  addresses, pipeline table). It writes to a counting sink or a real D3D12 list. 5 tests; 20 in the
+  workspace, all green.
+- **Built** `listbench`: a synthetic frame in the title's shape (4,500 draws, 20,311 calls, 48 lists, 1,433
+  pipelines, 200k descriptor slots). It runs on a persistent pool of 1-6 workers, and every frame is
+  executed on the GPU.
+- **Measured:** our cost is 0.03 µs a draw; with D3D12 and the driver it is 0.43 µs a draw, 1.9 ms a frame on
+  one thread (0.52 ms on 6). 12,027 descriptor writes from a dirty list cost 2.0 ms.
+  [`runs/build0b-lists.md`](runs/build0b-lists.md)
+- **Decided:** decision 3 is simplified. One thread fits, so translate on the title's own recording threads,
+  with no extra pool. The **list cache is dropped**: it could not pay at 2 ms a frame. The old 29 µs a draw
+  was memory bookkeeping, which decision 1 removes.
+- **Moved:** Build 0 (c) needs the title rendering, so it closes in Build 5. Until then the fork's 43-63 ms stands.
+- **Next:** Build 1, tiled VRAM at console addresses.
 
 ### 2026-11-27 — README: why we chose a rebuild
 

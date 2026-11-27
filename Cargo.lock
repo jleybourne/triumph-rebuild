@@ -25,10 +25,18 @@ name = "rebuild"
 version = "0.1.0"
 dependencies = [
  "rebuild-uma",
+ "rebuild-xlist",
 ]
 
 [[package]]
 name = "rebuild-uma"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
+name = "rebuild-xlist"
 version = "0.1.0"
 dependencies = [
  "windows",
