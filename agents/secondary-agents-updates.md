@@ -18,6 +18,7 @@ Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives w
 | **shader** | S7: classify the last v0 interface diffs against the oracle (tool fixes only; translator bugs reported) | `agent/shader-s7` | `D:\Developer	riumph-rebuild-shader` | running |
 | **shader-cf** | v1: structurize reducible control flow in `crates/sir` (handed over by the lead during Build 5) | `agent/shader-cf` | `D:\Developer	riumph-rebuild-cf` | running |
 | **pipelines** | root signatures and the hash-keyed pipeline library (`crates/pipelines`) | `agent/pipelines` | `D:\Developer	riumph-rebuild-pipelines` | running |
+| **cmdlist** | Build 5/6: the D3D12.X command list and allocator objects (`crates/xlist`), interface for the lead's device | `agent/cmdlist` | `D:\Developer	riumph-rebuild-cmdlist` | running |
 
 
 ### Round 2 (from 2026-11-27 14:15)
