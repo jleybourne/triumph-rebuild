@@ -29,6 +29,9 @@ fn main() {
         let n = |f: &str, d: usize| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(d);
         return print(rebuild_uma::tileproof::prove_ring(n("--frames", 60), n("--workers", 4)));
     }
+    if has("--labels") {
+        return print(rebuild_uma::tileproof::prove_labels(200));
+    }
     if has("--arena") {
         return print(rebuild_uma::tileproof::prove_arena());
     }

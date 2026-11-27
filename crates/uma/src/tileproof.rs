@@ -114,6 +114,10 @@ impl Gpu {
         }
     }
 
+    pub fn device_check(&self) -> Result<(), String> {
+        unsafe { self.device.GetDeviceRemovedReason() }.map_err(err("device removed"))
+    }
+
     /// Wait for everything on the queue (including tile mapping updates).
     pub fn wait(&mut self) -> Result<(), String> {
         unsafe {
@@ -556,3 +560,160 @@ pub fn prove_ring(frames: usize, workers: usize) -> Result<Vec<String>, String> 
     check(&mut lines, true, format!("after {frames} frames both regions read back through the tiles byte for byte; no copy on the submit thread"))?;
     Ok(lines)
 }
+
+/// Build 2's GPU→CPU region on the card: can the GPU write labels straight into title memory, and
+/// how early does the CPU see them, against a fence and against a CPU relay.
+pub fn prove_labels(iterations: usize) -> Result<Vec<String>, String> {
+    use crate::labels::LabelMemory;
+    use crate::ring::{Watched, MEM_WRITE_WATCH};
+    use windows::Win32::System::Memory::*;
+
+    let mut lines = Vec::new();
+    let mut gpu = Gpu::new()?;
+
+    // 1. which title memory can be opened for the GPU to write
+    let kinds: [(&str, VIRTUAL_ALLOCATION_TYPE, usize); 3] = [
+        ("plain VirtualAlloc, 64 KiB", MEM_RESERVE | MEM_COMMIT, 64 << 10),
+        ("plain VirtualAlloc, 16 MiB", MEM_RESERVE | MEM_COMMIT, 16 << 20),
+        ("write-watched VirtualAlloc, 64 KiB", MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, 64 << 10),
+    ];
+    let mut opened = None;
+    for (name, flags, len) in kinds {
+        let base = unsafe { VirtualAlloc(None, len, flags, PAGE_READWRITE) } as *mut u8;
+        match LabelMemory::open(&gpu.device, base, len) {
+            Ok(m) => {
+                lines.push(format!("opens     {name}"));
+                if opened.is_none() {
+                    opened = Some((base, m));
+                }
+            }
+            Err(e) => {
+                lines.push(format!("REFUSED   {name}: {e}"));
+                unsafe {
+                    let _ = VirtualFree(base as *mut _, 0, MEM_RELEASE);
+                }
+            }
+        }
+    }
+    let _ = Watched::alloc; // the ring's regions are write-watched; see the third line above
+    let (label_base, label) = opened.ok_or("no title memory could be opened for GPU writes")?;
+
+    // 2. latency: a dispatch that takes about a millisecond, then a MARKER_OUT label, then a fence
+    let scratch = {
+        let mut desc = crate::tiles::buffer_desc(64 << 20);
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        let mut r: Option<ID3D12Resource> = None;
+        unsafe {
+            gpu.device.CreateCommittedResource(&D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() }, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, None, &mut r)
+        }
+        .map_err(err("scratch"))?;
+        r.ok_or("scratch: none")?
+    };
+    let fence: ID3D12Fence = unsafe { gpu.device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }.map_err(err("fence"))?;
+    let list2: ID3D12GraphicsCommandList2 = gpu.list.cast().map_err(err("ID3D12GraphicsCommandList2"))?;
+    let lp = label_base as *const u32;
+    let mut early = Vec::new(); // label seen this long before the fence (ms; negative = after)
+    let mut busy = Vec::new();
+    let mut fences = Vec::new();
+    for i in 1..=iterations as u32 {
+        unsafe {
+            gpu.alloc.Reset().map_err(err("reset"))?;
+            gpu.list.Reset(&gpu.alloc, None).map_err(err("reset"))?;
+            gpu.list.SetComputeRootSignature(&gpu.signature);
+            gpu.list.SetPipelineState(&gpu.fill);
+            gpu.list.SetComputeRoot32BitConstant(0, i, 0);
+            gpu.list.SetComputeRoot32BitConstant(0, 16 << 20, 1);
+            gpu.list.SetComputeRootUnorderedAccessView(2, scratch.GetGPUVirtualAddress());
+            for _ in 0..8 {
+                gpu.list.Dispatch((16u32 << 20) / 256, 1, 1);
+            }
+            label.write(&list2, 0, i);
+            gpu.list.Close().map_err(err("close"))?;
+            let t0 = Instant::now();
+            gpu.queue.ExecuteCommandLists(&[Some(gpu.list.cast().map_err(err("cast"))?)]);
+            gpu.queue.Signal(&fence, i as u64).map_err(err("signal"))?;
+            let (mut t_label, mut t_fence) = (None, None);
+            while t_label.is_none() || t_fence.is_none() {
+                if t_label.is_none() && lp.read_volatile() == i {
+                    t_label = Some(t0.elapsed());
+                }
+                if t_fence.is_none() && fence.GetCompletedValue() >= i as u64 {
+                    t_fence = Some(t0.elapsed());
+                }
+                if t0.elapsed().as_secs() > 5 {
+                    return Err(format!("label {i} never arrived"));
+                }
+            }
+            let (tl, tf) = (t_label.unwrap().as_secs_f64() * 1000.0, t_fence.unwrap().as_secs_f64() * 1000.0);
+            early.push(tf - tl);
+            busy.push(tl);
+            fences.push(tf);
+        }
+    }
+    gpu.device_check()?;
+    // a label seen in less than half the usual time could not have waited for its work
+    let mut sorted = fences.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let typical = sorted[sorted.len() / 2];
+    let too_soon = busy.iter().filter(|&&t| t < 0.5 * typical).count();
+
+    // 3. the fallback: a CPU worker that waits on the fence and then writes the label itself
+    let relay_mem = vec![0u32; 16];
+    let relay = Ptr32(relay_mem.as_ptr() as *mut u32);
+    let mut relay_late = Vec::new();
+    for i in 1..=iterations as u64 {
+        let v = 1_000_000 + i;
+        let f2 = fence.clone();
+        let r = relay;
+        let worker = std::thread::spawn(move || unsafe {
+            let r = r;
+            f2.SetEventOnCompletion(v, HANDLE::default()).expect("relay wait");
+            r.0.write_volatile(v as u32);
+        });
+        unsafe {
+            gpu.alloc.Reset().map_err(err("reset"))?;
+            gpu.list.Reset(&gpu.alloc, None).map_err(err("reset"))?;
+            gpu.list.SetComputeRootSignature(&gpu.signature);
+            gpu.list.SetPipelineState(&gpu.fill);
+            gpu.list.SetComputeRoot32BitConstant(0, i as u32, 0);
+            gpu.list.SetComputeRoot32BitConstant(0, 16 << 20, 1);
+            gpu.list.SetComputeRootUnorderedAccessView(2, scratch.GetGPUVirtualAddress());
+            for _ in 0..8 {
+                gpu.list.Dispatch((16u32 << 20) / 256, 1, 1);
+            }
+            gpu.list.Close().map_err(err("close"))?;
+            let t0 = Instant::now();
+            gpu.queue.ExecuteCommandLists(&[Some(gpu.list.cast().map_err(err("cast"))?)]);
+            gpu.queue.Signal(&fence, v).map_err(err("signal"))?;
+            let (mut t_relay, mut t_fence) = (None, None);
+            while t_relay.is_none() || t_fence.is_none() {
+                if t_relay.is_none() && relay.0.read_volatile() == v as u32 {
+                    t_relay = Some(t0.elapsed());
+                }
+                if t_fence.is_none() && fence.GetCompletedValue() >= v {
+                    t_fence = Some(t0.elapsed());
+                }
+            }
+            relay_late.push((t_relay.unwrap().as_secs_f64() - t_fence.unwrap().as_secs_f64()) * 1000.0);
+        }
+        worker.join().map_err(|_| "relay worker panicked".to_string())?;
+    }
+    drop(relay_mem);
+
+    let med = |mut v: Vec<f64>| {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        (v[v.len() / 2], v[v.len() * 95 / 100], v[0], v[v.len() - 1])
+    };
+    let (b50, ..) = med(busy.clone());
+    let (e50, e95, emin, _) = med(early);
+    let (r50, r95, _, rmax) = med(relay_late);
+    lines.push(format!("work      each label follows a dispatch of ~{b50:.2} ms; {iterations} labels per method"));
+    lines.push(format!("GPU label (MARKER_OUT into title memory): seen {:.1} µs before the fence median, {:.1} µs at p95, {:.1} µs least", e50 * 1000.0, e95 * 1000.0, emin * 1000.0));
+    lines.push(format!("CPU relay (worker waits on the fence, writes the label): {:.1} µs after the fence median, {:.1} µs p95, {:.1} µs worst", r50 * 1000.0, r95 * 1000.0, rmax * 1000.0));
+    check(&mut lines, too_soon == 0, format!("{iterations}/{iterations} GPU labels arrived in order, after their work, never early"))?;
+    Ok(lines)
+}
+
+#[derive(Clone, Copy)]
+struct Ptr32(*mut u32);
+unsafe impl Send for Ptr32 {}

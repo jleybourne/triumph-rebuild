@@ -30,6 +30,9 @@ pub mod tileproof;
 #[cfg(windows)]
 pub mod ring;
 
+#[cfg(windows)]
+pub mod labels;
+
 pub const PAGE: usize = 64 << 10;
 pub const WINDOW: usize = 4 << 30;
 

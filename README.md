@@ -4,7 +4,7 @@
 built around the right memory model from the first line, aiming at 30 frames a second.</b></p>
 
 <p align="center">
-  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-24%25-yellow?style=for-the-badge"></a>
+  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-26%25-yellow?style=for-the-badge"></a>
   <a href="progress.md"><img alt="frame" src="https://img.shields.io/badge/title%20frame-not%20yet-lightgrey?style=for-the-badge"></a>
   <a href="tasks.md"><img alt="shaders" src="https://img.shields.io/badge/shaders-0%20%2F%2025%2C694-lightgrey?style=for-the-badge"></a>
   <a href="plan.md"><img alt="target" src="https://img.shields.io/badge/target-30%20fps-blue?style=for-the-badge"></a>
@@ -18,7 +18,7 @@ built around the right memory model from the first line, aiming at 30 frames a s
   <a href="LICENSE"><img alt="licence" src="https://img.shields.io/badge/licence-GPL--3.0--only-blue"></a>
 </p>
 
-<p align="center"><a href="progress.md"><b>Progress <code>[█████░░░░░░░░░░░░░░░]</code> 24 %</b></a><br>
+<p align="center"><a href="progress.md"><b>Progress <code>[█████░░░░░░░░░░░░░░░]</code> 26 %</b></a><br>
 <sub>work toward 30 fps, weighted by build step · no title frame measured yet</sub></p>
 
 <table align="center">
@@ -117,7 +117,7 @@ and replacing only the memory model has not been costed, and no title frame has 
 |:--:|:--|:--|:--:|
 | 0 | **Three answers before more code**: upload cost, translation cost, the title's GPU time | decide the design on numbers | ✅ a · ✅ b · ⏸️ c (needs a frame) |
 | 1 | **Tiled VRAM at console addresses**, sharing by address, arena | no copy-back, ever | ✅ closed |
-| 2 | **CPU-written memory on an async ring**; the GPU→CPU region | uploads off the submit thread; labels the title polls | ✅ ring · 🔄 labels |
+| 2 | **CPU-written memory on an async ring**; the GPU→CPU region | uploads off the submit thread; labels the title polls | ✅ closed |
 | 3 | **PE loader + console runtime** | the title's own code runs | ⏳ |
 | 4 | **Shaders**: 25,694 programs, our own core, wave32, offline | the full scene, no refusals, ~10-22 ms of GPU time back | 📐 decided |
 | 5 | **D3D12.X device, lists, descriptors, present** | a frame, and the frame line | ⏳ |
@@ -129,6 +129,10 @@ and replacing only the memory model has not been costed, and no title frame has 
 Full status with outcomes: **[tasks](tasks.md)** · **[progress](progress.md)**.
 
 ## 🔎 Recent findings
+
+- **The GPU writes the title's labels into the title's own memory.** Title memory, write-watched included,
+  opens as a D3D12 heap. Labels are seen 65 µs before the fence even reports, with no CPU relay and never a
+  frame late.
 
 - **The submit thread is free.** With the ring, a frame's upload costs the submit thread 32 µs. The 34 MB
   the title changes land on the GPU 19 ms later, from 4 workers.
@@ -155,6 +159,7 @@ cargo run --release --bin gputest -- --tiled          # Build 1: tiles, console 
 cargo run --release --bin gputest -- --arena          # what cannot be tiled on this card
 cargo run --release --bin gputest -- --scale 10       # commit 10 GiB through the tiles
 cargo run --release --bin gputest -- --ring           # Build 2: the upload ring, 60 frames
+cargo run --release --bin gputest -- --labels         # Build 2: GPU-written labels into title memory
 cargo run --release --bin uploadbench [-- --tiled]    # Build 0 (a): the upload benchmark
 cargo run --release --bin listbench                   # Build 0 (b): per-draw translation
 ```

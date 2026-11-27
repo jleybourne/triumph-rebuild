@@ -32,7 +32,7 @@ Order and decisions are `plan.md`'s; overall progress is in [`progress.md`](prog
 | done | straddle refusals (window, arena) | unit tests: window straddle, arena partial overlap |
 | done | upload destination = the tiled windows | `uploadbench --tiled`: no measurable penalty (clock-state noise dominates) |
 
-## Build 2 — CPU-written memory on an async ring; the GPU→CPU region  — [`runs/build2-ring.md`](runs/build2-ring.md)
+## Build 2 — CPU-written memory on an async ring; the GPU→CPU region  ✅ closed — [`ring`](runs/build2-ring.md) · [`labels`](runs/build2-labels.md)
 
 | state | work | closes when |
 |---|---|---|
@@ -41,7 +41,8 @@ Order and decisions are `plan.md`'s; overall progress is in [`progress.md`](prog
 | done | upload path: hash diff + compute scatter, one dispatch per window, on a persistent pool | 34 MB / 342k runs a flush lands in 19.4 ms, verified byte for byte after 60 frames |
 | done | async compute queue + fence; the title's queue waits on it; 3 staging slots | submit thread blocked 32 µs median, 72 µs worst |
 | done | never copy inline: the submit thread is marked, and a copy of title memory on it panics | unit test, kept in every build |
-| todo | GPU→CPU region: fence labels, queries, bottom-of-pipe writes the title polls; signalled when the title's Signal says (fork trap: a frame late) | label latency measured; labels advance exactly, in order |
+| done | GPU→CPU region: the title's memory opened as a heap; labels written by the GPU (`WriteBufferImmediate`, MARKER_OUT) straight into it; CPU relay only as a fallback | 200/200 in order, never early; seen 65 µs before the fence (relay: 17 µs after) |
+| todo | Build 5: per resource, direct GPU read of title memory over PCIe vs the ring (no diff, no upload) for rarely-written data | chosen by the frame line |
 
 ## Build 3 — loader and runtime
 

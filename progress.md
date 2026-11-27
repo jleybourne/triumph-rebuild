@@ -1,7 +1,7 @@
 # Progress
 
 ```
-work toward 30 fps   [█████░░░░░░░░░░░░░░░]  24 %
+work toward 30 fps   [█████░░░░░░░░░░░░░░░]  26 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (fork reference: 25,694 translated, 7 pipelines refused)
 measured fps         none yet — the title has not rendered a frame on this code
 baseline to beat     7.6 fps · 131.3 ms · ~4,500 draws · 356 dropped   (the layer being replaced)
@@ -19,7 +19,7 @@ second row and is the number that counts.
 |---|---|---:|---:|---:|---|
 | 0 | three answers before more code | 10 | 70 % | 7.0 | (a) upload **done**; (b) translation **done**: 0.43 µs a draw; (c) blocked until the title renders (moved to Build 5) |
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
-| 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 80 % | 6.4 | ring built and proven: submit thread 32 µs, upload 19 ms at the title's shape, verified; GPU→CPU labels todo |
+| 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
 | 3 | PE loader + console runtime | 15 | 0 % | 0 | — |
 | 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 0 % | 0 | decided: our own core (lane state as data, direct addressing, uniformity, native ops); decode front end may be vendored with credit |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
@@ -27,7 +27,7 @@ second row and is the number that counts.
 | 7 | upscaler: DLSS + FSR | 10 | 0 % | 0 | plan corrected: the upscale pass is found by bindings; lowering the internal resolution is its own task |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **24.2 ≈ 24 %** | |
+| | **total** | **100** | | **25.8 ≈ 26 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -53,12 +53,14 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 - **Build 2 — the upload ring** ([`runs/build2-ring.md`](runs/build2-ring.md)): the submit thread calls `flush()` and
   queues a GPU wait in 32 µs. The coordinator and 4 workers send 34 MB in 342k runs in 19.4 ms. Both regions
   verified byte for byte after 60 frames.
+- **Build 2 — labels** ([`runs/build2-labels.md`](runs/build2-labels.md)): title memory (write-watched too) opens as a
+  GPU heap. The GPU writes the title's labels into it directly, 65 µs before the fence reports; 200/200 in order.
 
 ## Not done
 
 - Build 0 (c): the title's real GPU time, with RT on and off. Blocked: it needs the title rendering, so it moved to Build 5.
 - Minimum spec in `plan.md` (owner decision, needed before Build 7).
-- Build 2's GPU→CPU labels, then everything from Build 3 onward: see [`tasks.md`](tasks.md).
+- Everything from Build 3 onward: see [`tasks.md`](tasks.md).
 
 ## Open problems that could move the target
 
@@ -74,6 +76,27 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Build 2 closed: GPU-written labels into title memory
+
+```
+[█████░░░░░░░░░░░░░░░]  26 %   (was 24 %: +1.6 Build 2 closed)
+shaders     0 / 25,694
+measured fps   none yet
+```
+
+- **Built** `crates/uma/src/labels.rs`: the title's memory is opened as a D3D12 heap with a buffer placed
+  over it. The title's bottom-of-pipe labels become `WriteBufferImmediate` (MARKER_OUT) straight into it.
+- **Measured** with `gputest --labels`: plain and write-watched title memory both open. GPU labels are seen
+  65 µs *before* the fence reports, against 17 µs *after* it for a CPU relay. 200/200 in order, never
+  early. [`runs/build2-labels.md`](runs/build2-labels.md)
+- **Decided:** labels are GPU-written. The relay is a fallback only. This designs out the fork's
+  "a frame late" fence trap.
+- **Opened:** write-watched title memory can be a GPU heap, so the GPU could read rarely-written data
+  directly over PCIe, with no upload. That is a Build 5 measurement, per resource.
+- **First run under the measurement lock** (`agents/MEASURING`).
+- **Next:** Build 3's second half and Build 5's device need the loader (helper lane `loader`). Meanwhile:
+  the shader IR design (decision 4), from the fork's census numbers until lane `shader` reports.
 
 ### 2026-11-27 — Build 2: the upload ring; helper-agent plan; README links
 

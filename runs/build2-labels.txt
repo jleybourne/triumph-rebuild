@@ -1,0 +1,7 @@
+opens     plain VirtualAlloc, 64 KiB
+opens     plain VirtualAlloc, 16 MiB
+opens     write-watched VirtualAlloc, 64 KiB
+work      each label follows a dispatch of ~1.15 ms; 200 labels per method
+GPU label (MARKER_OUT into title memory): seen 64.6 µs before the fence median, 72.5 µs at p95, 25.1 µs least
+CPU relay (worker waits on the fence, writes the label): 17.0 µs after the fence median, 39.8 µs p95, 42.4 µs worst
+PROVEN    200/200 GPU labels arrived in order, after their work, never early

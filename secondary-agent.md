@@ -109,8 +109,8 @@ evidence. The lead picks it up at merge.
 ## 8. Status of the lead (as this file was written, 2026-11-27)
 
 ```
-done      Build 0 (a), 0 (b), Build 1 (tiles), translator core (crates/xlist)
-doing     Build 2: crates/uma/src/ring.rs — the async upload ring and its proof (gputest --ring)
-next      Build 2 GPU→CPU labels, then the shader IR design (it waits for lane shader's S4)
-progress  19 % (see progress.md)
+done      Build 0 (a), 0 (b), Build 1 (tiles), Build 2 (ring + labels), translator core (crates/xlist)
+doing     the shader IR design (plan decision 4); lane shader's S4 feeds it
+next      Build 3 second half (kernel, runtime) once lane loader's L1-L3 merge
+progress  26 % (see progress.md)
 ```
