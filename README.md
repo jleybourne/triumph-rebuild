@@ -14,7 +14,7 @@ built around the right memory model from the first line, aiming at 30 frames a s
   <a href="https://www.rust-lang.org"><img alt="Rust" src="https://img.shields.io/badge/Rust-1.100-000000?logo=rust"></a>
   <a href="https://learn.microsoft.com/windows/win32/direct3d12/directx-12-programming-guide"><img alt="Direct3D 12" src="https://img.shields.io/badge/Direct3D-12-0078D4"></a>
   <a href="HANDOFF.md"><img alt="GPU" src="https://img.shields.io/badge/tested%20on-RTX%204070%20Ti-76B900?logo=nvidia"></a>
-  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-37%20green-brightgreen"></a>
+  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-43%20green-brightgreen"></a>
   <a href="LICENSE"><img alt="licence" src="https://img.shields.io/badge/licence-GPL--3.0--only-blue"></a>
 </p>
 
@@ -56,8 +56,9 @@ Measured on one machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB RAM, PCIe 3.0, Win
 | **List translation** | ✅ 0.43 µs a draw with the driver, 1.9 ms a frame ([Build 0 b](runs/build0b-lists.md)) | ≤ 7.4 µs a draw |
 | **Descriptors** | ✅ 12,027 a frame from a dirty list: 2.0 ms | no scan |
 | **Shaders** | 0 / 25,694; core proven on the card: IR → HLSL → DXC → GPU exact, wave64 on wave32 exact ([run](runs/build4-sirtest.md)) | 25,694, wave32, 0 refused |
+| **Launcher** | settings registry built (18 options, validated); desktop launcher in progress ([design](docs/design/launcher.md)) | launcher, mods, profiles, in-game menu |
 | **Upscaler** | not started; plan corrected (the title's upscale pass is found by bindings) | DLSS on NVIDIA, FSR on AMD |
-| **Tests** | 37 green (`crates/uma` 24, `crates/xlist` 5, `crates/sir` 8) | |
+| **Tests** | 43 green (`crates/uma` 24, `crates/xlist` 5, `crates/sir` 8, `crates/config` 6) | |
 
 Every result is reported as **fps · ms · draws · dropped** together, with resolution and upscaler mode.
 A faster frame that draws less of the scene is not a win.
@@ -123,6 +124,7 @@ and replacing only the memory model has not been costed, and no title frame has 
 | 5 | **D3D12.X device, lists, descriptors, present** | a frame, and the frame line | ⏳ |
 | 6 | **List translation** on the title's threads | the CPU half of the frame | 🔄 core built |
 | 7 | **Upscaler**: find the title's pass, lower the internal resolution, DLSS + FSR | fewer pixels | ⏳ |
+| L | **Launcher, settings, mods, in-game menu** (one registry drives all three) | a proper application in front of the layer | 🔄 registry built |
 | 8 | **Frame pacing** | frame time ≈ the card's own work: **30 fps on NVIDIA** | ⏳ |
 | 9 | **AMD validation by testers** | 30 fps on AMD | ⏳ |
 
@@ -158,7 +160,7 @@ Full status with outcomes: **[tasks](tasks.md)** · **[progress](progress.md)**.
 Requirements: Windows 10/11 x64, a Direct3D 12 GPU with tiled resources tier 2 or higher, and Rust.
 
 ```powershell
-cargo test --release                                  # 37 tests, no GPU or game data needed
+cargo test --release                                  # 43 tests, no GPU or game data needed
 cargo run --release --bin gputest                     # the GPU writes, the CPU reads, no copy
 cargo run --release --bin gputest -- --bare           # control: never blame the machine
 cargo run --release --bin gputest -- --tiled          # Build 1: tiles, console addresses, sharing
@@ -179,6 +181,7 @@ crates/uma        the address space: windows, 64 KiB pages, placement, sharing, 
                   tiles (reserved windows on 64 MiB heaps), the arena, the 64 B chunk diff and upload
 crates/xlist      list calls as records; the lock-free translator into D3D12
 crates/sir        the shader core: IR, uniformity, wave-size classifier, lane doubling (EXEC as data)
+crates/config     every option, declared once: the launcher, the layer and the in-game menu read it
 apps/rebuild      the launcher, gputest, uploadbench, listbench
 runs/             every measurement: a write-up and the raw output beside it
 ```
@@ -203,5 +206,6 @@ runs/             every measurement: a write-up and the raw output beside it
 | 📊 | [Runs](runs/README.md) | Build 0 (a) upload, Build 0 (b) translation, Build 1 tiles |
 | 🔍 | [Handoff](HANDOFF.md) · [Review prompt](REVIEW-PROMPT.md) | the brief for an independent review |
 | 🤝 | [Helper agents and handover](secondary-agent.md) | helper lanes and rules; the live state; how a new session takes over as lead |
+| 🚀 | [Launcher design](docs/design/launcher.md) | settings registry, launcher, mods, in-game menu |
 | 📐 | [Shader core design](docs/design/shader-ir.md) | classify, uniformity, lane doubling, window addressing, HLSL → DXC |
 | 💭 | [Thoughts](thoughts.md) | the first reasoning, before the plan's corrections |

@@ -33,7 +33,7 @@ That is the lead's working tree, and switching it breaks a run in progress.
 
 | rule | why |
 |:--|:--|
-| **Do not edit** `crates/uma/**`, `crates/xlist/**`, `crates/sir/**`, `docs/**`, `apps/rebuild/src/bin/{gputest,uploadbench,listbench,sirtest}.rs`, `plan.md`, `tasks.md`, `progress.md`, `README.md`, `HANDOFF.md`, `REVIEW-PROMPT.md`, `runs/**`, `secondary-agent.md` | the lead is changing these right now; any edit becomes a merge conflict |
+| **Do not edit** `crates/uma/**`, `crates/xlist/**`, `crates/sir/**`, `crates/config/**` (lane `launcher`: propose registry additions in `agents/launcher.md`), `docs/**`, `apps/rebuild/src/bin/{gputest,uploadbench,listbench,sirtest}.rs`, `plan.md`, `tasks.md`, `progress.md`, `README.md`, `HANDOFF.md`, `REVIEW-PROMPT.md`, `runs/**`, `secondary-agent.md` | the lead is changing these right now; any edit becomes a merge conflict |
 | You **may** add one line to the root `Cargo.toml` `members` list for your crate | the lead resolves that one line on merge |
 | **Measurement lock:** while `D:\Developer\triumph-rebuild\agents\MEASURING` exists, run **no** builds, tests or other heavy work. Check before every build: `if (Test-Path D:\Developer\triumph-rebuild\agents\MEASURING) { "wait" }` | the lead's GPU and CPU timings need a quiet machine. One background build once turned 7.3 fps into 2.3. |
 | Build with `cargo build --release -j 4` | leaves cores free for the lead |
@@ -96,6 +96,23 @@ file).
 
 Stop after S4. Translating decoded GFX10 into `sir` is the lead's (section 8).
 
+### Lane `launcher` — the desktop launcher (design: `docs/design/launcher.md`)
+
+New app `apps/launcher` (package `rebuild-launcher`), egui/eframe. It depends on `crates/config` (read
+only: the registry is the lead's; propose new options in `agents/launcher.md`). No network crates, no
+telemetry, no browser engine.
+
+| # | task | closes when |
+|:--:|:--|:--|
+| U1 | shell: tabs Play · Display & upscaler · Title settings · Features · Mods · Diagnostics · Profiles · About. **Every settings widget is generated from `rebuild_config::REGISTRY`**: bool → checkbox, int → slider in range, choice → dropdown, path → picker; help text, live/restart badge, experimental warning, reset to default | saves a `rebuild.toml` that `Config::parse` reads with 0 problems; a test round-trips every registry entry through the UI model |
+| U2 | first-run setup and system check: game folder, GPU and driver, tiled resources tier ≥ 2, shader model 6.6, DXC present, VRAM, ReBAR, each with a one-line fix. Querying the adapter through DXGI is fine; **creating a D3D12 device needs the measurement lock to be absent** | each check reports pass/fail; checks are unit-tested with fakes |
+| U3 | title settings: show `title.*` registry entries; on launch, write them into a **copy** of the title's `settings.xml` under the launcher's own overlay folder (never the game folder or the title's storage) | the original file's hash is unchanged (test) |
+| U4 | mods tab: list `mods/<name>/` folders, enable/disable, reorder, and show conflicts (two enabled mods with the same relative path: the later wins) | conflict detection unit-tested |
+| U5 | Play: [Launch] starts `rebuild.exe` with `--config <path>`; shows the frame-line log file (`diagnostics.frame_log`) as it grows. Until the layer runs the title, launch the proofs (`gputest --bare`) to show the path works | launch and log tail work with the proof binaries |
+
+Launch-time integration with the real layer (C2), the overlay file system and the in-game menu (L5) are the
+lead's.
+
 ## 6. Handing back
 
 1. Keep `agents/<lane>.md` in your branch: what you built, the numbers, what's left. Use the same voice
@@ -114,9 +131,9 @@ evidence. The lead picks it up at merge.
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, after the shader core's emission was proven on the card
+updated   2026-11-27, after the settings registry (launcher track C1)
 progress  28 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
-tests     37 green: cargo test --release  (uma 24, xlist 5, sir 8)
+tests     43 green: cargo test --release  (uma 24, xlist 5, sir 8, config 6)
 ```
 
 | build | state | where | proof |
@@ -132,6 +149,7 @@ tests     37 green: cargo test --release  (uma 24, xlist 5, sir 8)
 | 6 list translation | 🔄 core built | `crates/xlist` | Build 0 (b) |
 | 7 upscaler | ⏳ (plan decision 5 corrected) | — | — |
 | 8 pacing · 9 AMD testers | ⏳ | — | — |
+| launcher track | 🔄 C1 registry built; launcher app in lane `launcher` | `crates/config`, [design](docs/design/launcher.md) | 6 unit tests |
 
 ## 9. Taking over as lead
 

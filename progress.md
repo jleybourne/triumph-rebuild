@@ -3,6 +3,7 @@
 ```
 work toward 30 fps   [██████░░░░░░░░░░░░░░]  28 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (fork reference: 25,694 translated, 7 pipelines refused)
+launcher track       [███░░░░░░░░░░░░░░░░░]  1 / 7 steps (C1 settings registry); does not count toward the fps %
 measured fps         none yet — the title has not rendered a frame on this code
 baseline to beat     7.6 fps · 131.3 ms · ~4,500 draws · 356 dropped   (the layer being replaced)
 target               30 fps · 33.3 ms · same draws · stated output resolution and upscaler mode
@@ -80,6 +81,27 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Launcher track: one settings registry; launcher lane opened
+
+```
+[██████░░░░░░░░░░░░░░]  28 %   (unchanged: the launcher track has its own bar)
+launcher    [███░░░░░░░░░░░░░░░░░]  1 / 7 steps
+shaders     0 / 25,694
+measured fps   none yet
+```
+
+- **Owner request:** a proper launcher in front of the layer, with options, settings, features to enable and
+  disable, mods, and an in-game menu.
+- **Designed** ([`docs/design/launcher.md`](docs/design/launcher.md), plan decision 7): one registry drives
+  three faces: the desktop launcher (egui), the layer at start, and the in-game menu (F10, input isolated).
+  Mods are folders layered by the overlay file system; the game folder is never written.
+- **Built** `crates/config`: 18 options in 8 groups (game, display, upscaler, title, memory, shaders,
+  diagnostics, menu), each with its type, range, measured-best default, live/restart and stable/experimental.
+  `rebuild.toml` load and save; unknown keys reported; bad values refused with reasons (`fsrQuality` 4: the
+  fork's black screen). Stable-only profiles. 6 tests; 43 in the workspace.
+- **Opened** helper lane `launcher` (L1-L4) in `secondary-agent.md`.
+- **Next:** `sir` live-mask analysis (main line).
 
 ### 2026-11-27 — The shader core runs on the card; handover doc
 

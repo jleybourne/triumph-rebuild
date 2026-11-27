@@ -1,0 +1,8 @@
+[package]
+name = "rebuild-config"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+toml = "0.8"

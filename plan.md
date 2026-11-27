@@ -143,6 +143,15 @@ they are identical for both. **FSR 3.1 runs on NVIDIA**, so both backends are ve
 fps · ms · draws · dropped · upload MB · upload ms · translation ms · output res · upscaler/mode · vendor
 ```
 
+### 7. One settings registry; a launcher and an in-game menu built from it (owner request, 2026-11-27)
+
+Every option is declared once in `crates/config`: type, range, default (the measured best), live or
+restart, stable or experimental. The desktop launcher (settings, features, title settings, mods, profiles,
+system check), the layer at start, and the in-game menu (F10, input isolated) are all generated from it.
+Unknown keys are reported, and bad values are refused with their reason. This replaces the old layer's
+untyped environment variables. Mods are folders layered by the overlay file system; the game folder is
+never written. Design: [`docs/design/launcher.md`](docs/design/launcher.md).
+
 ## Order of work — each step ends in a number
 
 | # | build | done when |

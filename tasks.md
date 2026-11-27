@@ -140,6 +140,20 @@ decision 4.
 |---|---|---|
 | todo | frame generation (DLSS FG / FSR FG through the same upscaler inputs) | two presented frames per rendered frame, UI does not wobble |
 
+## Launcher track — settings, features, mods, in-game menu (parallel; does not move the fps number)
+
+Design: [`docs/design/launcher.md`](docs/design/launcher.md). Its own bar in `progress.md`.
+
+| state | work | closes when |
+|---|---|---|
+| done | C1 `crates/config`: the settings registry (18 options in 8 groups), `rebuild.toml` load/save, validation, refused values with reasons, stable-only profiles | 6 unit tests |
+| todo | C2 the layer reads `rebuild.toml` at start; every switch lives in the registry (lead) | benches and proofs take options from it |
+| todo | L1 launcher shell (egui): tabs, Features generated from the registry, profiles (helper lane `launcher`) | writes a `rebuild.toml` that `config` validates with 0 problems |
+| todo | L2 setup and system check: GPU, driver, tiled tier, SM 6.6, DXC, VRAM, ReBAR (lane `launcher`) | each check has pass/fail and a fix line |
+| todo | L3 title settings applied to a copy of `settings.xml` in the write overlay (lane `launcher`) | the original's hash is unchanged |
+| todo | L4 mods tab: enable, order, conflicts (lane `launcher`); the overlay file system is Build 3 (lead) | conflicts listed; order respected |
+| todo | L5 in-game menu on the present path, input isolated (lead, after Build 5) | live options toggle; isolation test passes |
+
 ## Known traps, from the fork (jleybourne/Triumph) — each must be designed out, not rediscovered
 
 | affects | trap | rule for the rebuild |
