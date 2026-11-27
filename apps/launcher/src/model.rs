@@ -351,14 +351,14 @@ mod tests {
         let b = rebuild_config::builtin("low-pc").unwrap();
         st.model.apply_builtin(b).unwrap();
         // the user then edits one setting outside the profile
-        st.model.apply(rebuild_config::find("display.frame_cap").unwrap(), Edit::Slide(60)).unwrap();
+        st.model.apply(rebuild_config::find("display.frame_cap").unwrap(), Edit::Slide(144)).unwrap();
         st.save(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let back = Config::parse(&text).unwrap();
         assert!(back.bool("display.vsync"));
         assert!(text.contains("\"memory.upload_workers\" = 4"), "an explicit default is kept:\n{text}");
         assert!(text.contains("future.switch"), "an unknown key is kept");
-        assert_eq!(back.int("display.frame_cap"), 60);
+        assert_eq!(back.int("display.frame_cap"), 144);
         assert!(b.matches(&back));
         assert_eq!(rebuild_config::profiles::Active::of(&back), rebuild_config::profiles::Active::Builtin(b));
         // a stable-only file refuses a built-in that uses an experimental limit, and is unchanged
