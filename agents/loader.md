@@ -14,6 +14,8 @@ L2  map, relocate, bind    closed   synthetic DLL maps at 4 bases and at a Virtu
 L3  import census          closed   18 images, 93 DLLs, 962 distinct imported functions;
                                     GDK discovery list = 697 functions in 86 DLLs
 L4  the title's DLLs       closed   16 DLLs with export counts; the 6 that are not the C++ runtime listed in full
+L5  run-time lookups       closed   76 names (high 42 · medium 3 · low 31) in loader-getproc.csv; the 6 names
+                                    the fork saw the title look up through GetProcAddress: 6 / 6 found, all high
 ```
 
 ## Built
@@ -443,6 +445,55 @@ All exports are named; none forwarded, none ordinal-only. The six that are not t
 
 </details>
 
+### L5 — names the title looks up at run time
+
+`REBUILD_GAME_DIR=<game_dir> imports --getproc` (0.9 s; `crates/loader/src/strings.rs`, 3 tests, plus
+`Image::table_strings` with 1 test). Every ASCII and UTF-16LE string of 4+ characters in the 18 images
+(15,066 strings, after removing the strings the import/export tables point at and the resource section;
+2,812 look like API names). A DLL-name string within 512 bytes of an API-like name is the evidence of a
+lookup table or a `LoadLibrary` + `GetProcAddress` pair. Exports are checked against this PC's System32
+(API sets as `kernelbase`, `gcombase` as `combase`; `xgameruntime.dll` and `gameplatformservices.dll`
+are on this PC) and the title's own DLLs. A DLL never confirms strings in its own image.
+
+| confidence | rule | names |
+|:--|:--|--:|
+| high | next to a DLL name, and a DLL this image names exports it | **42** |
+| medium | next to a DLL name we cannot check, or exported by a DLL this image names with no DLL name near | **3** |
+| low | a console API family name (`XStore*`, `XUser*`, `Xbl*`, `HC*`, …) with nothing confirming: most likely log or assert strings | **31** |
+
+What the high names are:
+
+| from | names | looked up by |
+|:--|:--|:--|
+| `xgameruntime.dll` | `InitializeApiImpl`, `InitializeApiImplEx`, `InitializeApiImplEx2`, `UninitializeApiImpl`, `QueryApiImpl`, `XErrorReport` | the exe, libHttpClient, XCurl (the GDK runtime stub each links) |
+| `gameplatformservices.dll` | `GetApiVersionImpl`, `RestartApiImpl`, `RundownApiImpl` | XCurl |
+| `amd_fidelityfx_upscaler_xbox.dll` | `ffxConfigure`, `ffxCreateContext`, `ffxDestroyContext`, `ffxDispatch`, `ffxQuery` | the FidelityFX loader |
+| `winhttp.dll` | 6 × `WinHttpWebSocket*` | libHttpClient |
+| `icu.dll` | 14 × `ucal_*` / `uenum_*` (time zones) | `msvcp140_atomic_wait.dll` |
+| Win32 | `GetPackagesByPackageFamily`, `GetCurrentPackageId`, `Get/SetThreadPreferredUILanguages`, `RegGetValueW`, `MiniDumpWriteDump`, `RtlDllShutdownInProgress`, `RoOriginateLanguageException` | various |
+
+So the GDK families (`XGame*`, `XUser*`, `XAsync*`, `XTaskQueue*`, `XStore*`) are **not** looked up by name.
+The title takes the 6 `xgameruntime` entry points by name, then reaches every area through `QueryApiImpl`
+objects (the fork's design notes say the same). The `XStore*` / `XUser*` / `Xbl*` names in the exe sit
+with no DLL nearby (low): they tell which areas the title uses, not names it resolves.
+
+**Check against the fork.** The 133 names the fork's runtime exports (`hle_export!` across
+`victory-hle`, names only, read through git) include 44 that no image imports statically. All 6 that the
+fork documents as `GetProcAddress` lookups are found here, all high. The other 38 are not strings in
+the title (most are `ws2_32` functions the exe imports **by ordinal**, plus Win32 file and HTTP-proxy calls
+the fork implemented in general), so they are not misses of this scan. 45 high + medium names here; 6 are
+in the fork's list. The other 39 are names the fork's runtime never had to answer by name (WinHttp
+WebSocket, ICU, the FidelityFX upscaler, gameplatformservices) or does not export yet.
+
+DLL names the title's images carry as strings, beyond those it imports: `xgameruntime.dll` (3),
+`gameplatformservices.dll`, `icu.dll`, `dbghelp.dll`, `rpcrt4.dll`, `appmodel.dll`, `gcombase.dll`,
+`vcomp120ui.dll`, `amd_fidelityfx_framegeneration_xbox.dll` (named by the FidelityFX loader, **not
+shipped**), `amd_fidelityfx_upscaler_xbox.dll`.
+
+[`loader-getproc.csv`](loader-getproc.csv): name, confidence, nearest DLL name and distance, exporters
+found, whether it is also imported statically, encoding, occurrences, images. Names only. The game
+folder was identical before and after (110 files; 18/18 images rehashed).
+
 ## Decided
 
 - No vendoring: the fork's `victory-pe` wraps the `object` crate; a dependency-free parser was smaller than
@@ -473,5 +524,10 @@ All exports are named; none forwarded, none ordinal-only. The six that are not t
 3. `README.md` badge and table say 35 tests; with this branch it is **48** (`crates/loader` adds 13).
 4. Two warnings in the lead's crate on every build: `crates/uma/src/tileproof.rs:572` (unused `mut`) and
    `crates/uma/src/upload.rs:560` (field `len` never read).
-5. `apps/rebuild/Cargo.toml` gained `rebuild-loader` as a dependency (for the `imports` binary), and the
+5. **L5, for the run-time resolver**: `GetProcAddress` must answer by name for `xgameruntime.dll` (6),
+   `gameplatformservices.dll` (3), `winhttp.dll` (6 WebSocket), `icu.dll` (14) and, if the FidelityFX
+   loader is ever called, `amd_fidelityfx_upscaler_xbox.dll` (5, which ships) and
+   `amd_fidelityfx_framegeneration_xbox.dll` (named by the loader, not shipped: its `LoadLibrary` must fail
+   cleanly). Item 2 above is answered: GDK areas come through `QueryApiImpl`, not through names.
+6. `apps/rebuild/Cargo.toml` gained `rebuild-loader` as a dependency (for the `imports` binary), and the
    root `Cargo.toml` `members` gained `crates/loader`.
