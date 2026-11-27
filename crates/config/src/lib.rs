@@ -68,6 +68,8 @@ pub struct Setting {
     pub tier: Tier,
     /// values refused with a reason (known to break something)
     pub refused: &'static [(Default, &'static str)],
+    /// common values of an `Int`, offered beside the slider
+    pub presets: &'static [i64],
 }
 
 /// A default, as a constant.
@@ -129,7 +131,7 @@ const fn s(
     apply: Apply,
     tier: Tier,
 ) -> Setting {
-    Setting { key, label, help, kind, default, apply, tier, refused: &[] }
+    Setting { key, label, help, kind, default, apply, tier, refused: &[], presets: &[] }
 }
 
 use Apply::*;
@@ -142,7 +144,11 @@ pub static REGISTRY: &[Setting] = &[
     s("display.height", "Output height", "The height of the window or screen the frame is presented at.", Kind::Int { min: 360, max: 4320 }, Default::Int(2160), Restart, Stable),
     s("display.window", "Window mode", "borderless = a window the size of the screen (fastest to switch away from); fullscreen = exclusive.", Kind::Choice { options: &["windowed", "borderless", "fullscreen"] }, Default::Choice("borderless"), Restart, Stable),
     s("display.vsync", "Vsync", "Wait for the display's refresh before presenting.", Kind::Bool, Default::Bool(false), Live, Stable),
-    s("display.frame_cap", "Frame cap", "0 = no cap. The title also caps itself at 30 in menus.", Kind::Int { min: 0, max: 360 }, Default::Int(0), Live, Stable),
+    s("display.frame_rate", "Frame rate", "title = the game's own pacing (30 fps); capped = at most Frame cap; unlimited = as fast as the PC can go (with vsync off).", Kind::Choice { options: &["title", "capped", "unlimited"] }, Default::Choice("title"), Live, Stable),
+    Setting {
+        presets: &[30, 40, 60, 90, 120, 144, 165, 240],
+        ..s("display.frame_cap", "Frame cap", "The most frames a second when Frame rate is capped. Your display's refresh rate, or a divisor of it, paces most evenly.", Kind::Int { min: 20, max: 360 }, Default::Int(60), Live, Stable)
+    },
     s("upscaler.backend", "Upscaler", "auto = DLSS on NVIDIA, FSR on AMD (Build 7). native = the title's own pass.", Kind::Choice { options: &["auto", "dlss", "fsr", "native"] }, Default::Choice("auto"), Restart, Stable),
     s("upscaler.mode", "Upscaler mode", "How far the internal resolution drops before upscaling.", Kind::Choice { options: &["dlaa", "quality", "balanced", "performance", "ultra_performance"] }, Default::Choice("quality"), Restart, Stable),
     Setting {
@@ -175,6 +181,15 @@ pub static REGISTRY: &[Setting] = &[
     s("diagnostics.warp", "WARP (software GPU)", "Run on WARP, the software rasterizer: very slow, but title work that would hang a GPU only fails. For diagnosis.", Kind::Bool, Default::Bool(false), Restart, Experimental),
     s("menu.key", "In-game menu key", "Toggles the in-game menu. While it is open the title sees no input.", Kind::Choice { options: &["F10", "F11", "F12", "Insert", "Home"] }, Default::Choice("F10"), Restart, Stable),
 ];
+
+/// `REBUILD_FRAME_RATE` for the layer from `display.frame_rate` and `display.frame_cap`: `title`, `unlimited`, or
+/// the cap in fps.
+pub fn frame_rate_env(c: &Config) -> String {
+    match c.choice("display.frame_rate").as_str() {
+        "capped" => c.int("display.frame_cap").to_string(),
+        other => other.to_string(),
+    }
+}
 
 /// An `upscaler.mode` choice in the upscaler's spelling (see [`Config::upscaler_mode`]).
 pub fn upscaler_mode_name(choice: &str) -> String {
@@ -423,6 +438,45 @@ mod tests {
         assert!(c.set("diagnostics.retention_days", Value::Int(-1)).is_err());
         let back = Config::parse(&c.to_toml()).unwrap();
         assert_eq!(back.choice("launcher.theme"), "light");
+    }
+
+    #[test]
+    fn the_frame_rate_is_a_choice_with_a_selectable_cap() {
+        let c = Config::parse("").unwrap();
+        assert_eq!(c.choice("display.frame_rate"), "title");
+        assert_eq!(c.int("display.frame_cap"), 60);
+        assert!(!c.bool("display.vsync"));
+        assert_eq!(frame_rate_env(&c), "title");
+        let cap = find("display.frame_cap").unwrap();
+        let Kind::Int { min, max } = cap.kind else { panic!("display.frame_cap is an int") };
+        assert_eq!((min, max), (20, 360));
+        assert!(!cap.presets.is_empty());
+        for p in cap.presets {
+            assert!(cap.check(&Value::Int(*p)).is_ok(), "preset {p} is in range");
+        }
+        assert_eq!(find("display.frame_rate").unwrap().apply, Apply::Live);
+        let mut c = Config::parse(
+            r#"
+            [settings]
+            "display.frame_rate" = "capped"
+            "display.frame_cap" = 144
+            "#,
+        )
+        .unwrap();
+        assert!(c.problems.is_empty(), "{:#?}", c.problems);
+        assert_eq!(frame_rate_env(&c), "144");
+        c.set("display.frame_rate", Value::Choice("unlimited".into())).unwrap();
+        assert_eq!(frame_rate_env(&c), "unlimited");
+        assert!(c.set("display.frame_rate", Value::Choice("uncapped".into())).is_err(), "not one of the options");
+        assert!(c.set("display.frame_cap", Value::Int(0)).is_err(), "0 is no longer a cap: unlimited is its own choice");
+        assert!(c.set("display.frame_cap", Value::Int(361)).is_err());
+        let back = Config::parse(&c.to_toml()).unwrap();
+        assert_eq!(back.choice("display.frame_rate"), "unlimited");
+        assert_eq!(back.int("display.frame_cap"), 144);
+        // an old file's `frame_cap = 0` is reported, kept as written, and the default cap applies
+        let old = Config::parse("[settings]\n\"display.frame_cap\" = 0\n").unwrap();
+        assert_eq!(old.problems.len(), 1, "{:#?}", old.problems);
+        assert_eq!(old.int("display.frame_cap"), 60);
     }
 
     #[test]

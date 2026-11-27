@@ -65,7 +65,18 @@ pub fn setting_row(ui: &mut egui::Ui, m: &mut Model, s: &'static Setting, first:
                         // memory sizes: a number field, not a slider a pixel of which is a gigabyte
                         ui.add(egui::DragValue::new(v).range(min..=max).speed(64.0)).changed()
                     } else {
-                        ui.add(egui::Slider::new(v, min..=max).trailing_fill(true)).changed()
+                        // right to left: the presets sit right of the slider
+                        let mut ch = false;
+                        if !s.presets.is_empty() {
+                            let before = *v;
+                            egui::ComboBox::from_id_salt((s.key, "presets")).width(64.0).selected_text("Presets").show_ui(ui, |ui| {
+                                for p in s.presets {
+                                    ui.selectable_value(v, *p, p.to_string());
+                                }
+                            });
+                            ch |= *v != before;
+                        }
+                        ch | ui.add(egui::Slider::new(v, min..=max).trailing_fill(true)).changed()
                     }
                 }
                 (Edit::Pick(i), Widget::Dropdown { options }) => {

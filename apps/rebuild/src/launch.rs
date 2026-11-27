@@ -181,6 +181,7 @@ fn device_report() {
     }
     let fc: Vec<u64> = rebuild_runtime::frame::CALLS.iter().map(|c| c.load(std::sync::atomic::Ordering::Relaxed)).collect();
     println!("frame     interval/schedule/wait/statistics calls: {fc:?}");
+    println!("pacing    {}", rebuild_runtime::frame::describe());
     let rt = rebuild_d3d12x::traps();
     if !rt.is_empty() {
         println!("resources slots called that trap: {}", rt.len());

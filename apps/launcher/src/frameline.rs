@@ -246,6 +246,18 @@ mod tests {
         assert_eq!(f.upscaler, None);
     }
 
+    /// The layer's pacing header (crates/runtime/src/frame.rs `describe`) is a startup message, not a frame.
+    #[test]
+    fn the_pacing_header_is_not_a_frame() {
+        for h in [
+            "frame rate title (30.0 fps, the title's interval) | vsync off (tearing allowed)",
+            "frame rate cap 144 fps | vsync on",
+            "frame rate unlimited (bounded by the present's 3 frame slots on the GPU) | vsync off (no tearing support: the compositor may still wait)",
+        ] {
+            assert_eq!(parse(h), None, "{h}");
+        }
+    }
+
     #[test]
     fn a_full_frame_line_parses() {
         let f = parse("t  12s | fps 30.8 | ms 32.5 | gpu 21.0 ms | draws 4,512 | dropped 3 | upload 1.9 ms | xlate 2.4 ms | upscale 1.1 ms | wait 6.0 ms | 1707x960 -> 2560x1440 dlss quality").unwrap();

@@ -24,7 +24,11 @@
 //! **The summary** (`[summary]`): `avg_fps`, `low1_fps` (the 99th percentile frame time as fps, from a 0.25 ms
 //! histogram), `frame_ms`, `gpu_ms`, `frames`, `seconds` and `measured_from` over the measuring window:
 //! `REBUILD_MEASURE_FROM=title_start` (the default) starts it at the first present, `after_loading` at the first
-//! frame with a draw.
+//! frame with a draw. Then `frame_rate` (`title`, `cap N`, `unlimited`) and `vsync`, as they were at the end.
+//!
+//! **The header.** Before the first frame line, and again whenever it changes: the pacing as
+//! [`crate::frame::describe`] words it (`frame rate unlimited (...) | vsync off (tearing allowed)`). It carries
+//! no frame field, so the launcher reads it as a startup message.
 
 #![cfg(windows)]
 
@@ -328,6 +332,7 @@ pub fn summary_keys(with_seconds: bool) -> String {
         s += &format!("seconds = {:.1}\n", now_ns().saturating_sub(WINDOW_START.load(Ordering::Relaxed)) as f64 / 1e9);
     }
     s += &format!("measured_from = \"{}\"\n", if after_loading() { "after_loading" } else { "title_start" });
+    s += &format!("frame_rate = \"{}\"\nvsync = {}\n", crate::frame::frame_limit(), crate::frame::vsync());
     s
 }
 
@@ -359,6 +364,7 @@ fn run() {
     let request = session.as_ref().map(|s| s.join("capture.request"));
     let mut prev = counts();
     let mut prev_t = base().elapsed();
+    let mut header = String::new();
     loop {
         // the next whole second after the process started
         let next = Duration::from_secs(prev_t.as_secs() + 1);
@@ -366,6 +372,11 @@ fn run() {
         let now_t = base().elapsed();
         let now = counts();
         if let Some(w) = log.as_mut() {
+            let pacing = crate::frame::describe();
+            if pacing != header {
+                let _ = writeln!(w, "{pacing}");
+                header = pacing;
+            }
             let l = line(now_t.as_secs(), (now_t - prev_t).as_secs_f64(), &prev, &now);
             let _ = writeln!(w, "{}", format(&l));
             let _ = w.flush();

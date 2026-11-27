@@ -33,8 +33,7 @@ pub struct EnvEntry {
 }
 
 /// The keys that reach the runtime: as an environment variable ([`Config::runtime_env`]) or as an argument
-/// (`dstorage.bcpack_tables`, [`Config::bcpack_tables`]). `display.frame_rate` may not be in the registry
-/// yet; it is read when it is.
+/// (`dstorage.bcpack_tables`, [`Config::bcpack_tables`]). The frame rate is [`crate::frame_rate_env`].
 pub const RUNTIME_KEYS: &[(&str, &str)] = &[
     ("game.dir", "REBUILD_GAME_DIR"),
     ("game.console", "REBUILD_CONSOLE"),
@@ -87,22 +86,6 @@ impl Config {
         (!p.trim().is_empty()).then(|| p.into())
     }
 
-    /// `REBUILD_FRAME_RATE`: `title`, `unlimited` or a cap in fps. With `display.frame_rate` in the registry
-    /// (title / capped / unlimited) it decides, and `capped` takes `display.frame_cap`; without it, a
-    /// `display.frame_cap` above 0 is the cap and 0 leaves the runtime's default.
-    pub fn frame_rate(&self) -> Option<String> {
-        let cap = self.int("display.frame_cap");
-        if find("display.frame_rate").is_none() {
-            return (cap > 0).then(|| cap.to_string());
-        }
-        Some(match self.choice("display.frame_rate").as_str() {
-            "title" => "title".into(),
-            "unlimited" => "unlimited".into(),
-            _ if cap > 0 => cap.to_string(),
-            _ => "unlimited".into(),
-        })
-    }
-
     /// Every variable the runtime reads that a setting decides. Paths left empty are not listed.
     pub fn runtime_env(&self) -> Vec<EnvEntry> {
         let mut out = Vec::new();
@@ -122,9 +105,8 @@ impl Config {
         put("game.dir", "REBUILD_GAME_DIR", path("game.dir"), ex("game.dir"));
         put("game.console", "REBUILD_CONSOLE", set(self.choice("game.console")), ex("game.console"));
         put("display.vsync", "REBUILD_VSYNC", set(if self.bool("display.vsync") { "1" } else { "0" }.into()), ex("display.vsync"));
-        let rate_key = if find("display.frame_rate").is_some() { "display.frame_rate" } else { "display.frame_cap" };
-        let rate_ex = ex("display.frame_cap") || (find("display.frame_rate").is_some() && ex("display.frame_rate"));
-        put(rate_key, "REBUILD_FRAME_RATE", self.frame_rate().map(EnvValue::Set), rate_ex);
+        let rate_ex = ex("display.frame_rate") || ex("display.frame_cap");
+        put("display.frame_rate", "REBUILD_FRAME_RATE", set(crate::frame_rate_env(self)), rate_ex);
         put("upscaler.backend", "REBUILD_UPSCALER", set(self.choice("upscaler.backend")), ex("upscaler.backend"));
         for (key, var) in [
             ("upscaler.dlss_dll", "REBUILD_DLSS_DLL"),
@@ -200,7 +182,7 @@ mod tests {
             assert!(find(k).is_some(), "{k} is not in the registry");
         }
         for (k, _) in RUNTIME_KEYS {
-            assert!(find(k).is_some() || *k == "display.frame_rate", "{k} is not in the registry");
+            assert!(find(k).is_some(), "{k} is not in the registry");
         }
     }
 
@@ -230,6 +212,7 @@ mod tests {
             "game.dir" = 'D:\games\title'
             "game.console" = "series-s"
             "display.vsync" = true
+            "display.frame_rate" = "capped"
             "display.frame_cap" = 60
             "upscaler.backend" = "fsr"
             "upscaler.fidelityfx_dir" = 'C:\ffx'
@@ -256,32 +239,28 @@ mod tests {
         assert_eq!(e.get("REBUILD_LIMIT_RAM_MB").cloned(), set("8192"));
         assert_eq!(e.get("REBUILD_LIMIT_CPU_CORES").cloned(), set("7"));
         assert_eq!(c.bcpack_tables(), Some(r"C:\t\bcpack.bin".into()));
-        if find("display.frame_rate").is_none() {
-            assert_eq!(e.get("REBUILD_FRAME_RATE").cloned(), set("60"));
-        }
+        assert_eq!(e.get("REBUILD_FRAME_RATE").cloned(), set("60"));
         // the frame log off removes the variable, whatever the path
         let off = Config::parse("[settings]\n\"diagnostics.frame_log\" = false\n\"diagnostics.frame_log_path\" = 'C:\\x.log'").unwrap();
         assert_eq!(env_of(&off).get("REBUILD_FRAME_LOG"), Some(&EnvValue::Remove));
     }
 
     #[test]
-    fn the_frame_rate_follows_the_cap_and_the_mode_when_there_is_one() {
-        let c = Config::parse("").unwrap();
-        let cap = |n: i64| {
-            let mut c = c.clone();
-            c.set("display.frame_cap", Value::Int(n)).unwrap();
-            c
-        };
-        if find("display.frame_rate").is_none() {
-            assert_eq!(c.frame_rate(), None, "no cap: the runtime's default");
-            assert_eq!(cap(144).frame_rate().as_deref(), Some("144"));
-            return;
-        }
-        for (mode, cap_n, want) in [("title", 60, "title"), ("unlimited", 60, "unlimited"), ("capped", 60, "60"), ("capped", 0, "unlimited")] {
-            let mut c = cap(cap_n);
+    fn the_frame_rate_is_frame_rate_env_and_either_key_makes_it_explicit() {
+        let rate = |c: &Config| c.runtime_env().into_iter().find(|e| e.var == "REBUILD_FRAME_RATE").unwrap();
+        let d = Config::parse("").unwrap();
+        assert_eq!(rate(&d).value, EnvValue::Set("title".into()));
+        assert!(!rate(&d).explicit);
+        for (mode, want) in [("title", "title"), ("unlimited", "unlimited"), ("capped", "144")] {
+            let mut c = d.clone();
+            c.set("display.frame_cap", Value::Int(144)).unwrap();
             c.set("display.frame_rate", Value::Choice(mode.into())).unwrap();
-            assert_eq!(c.frame_rate().as_deref(), Some(want), "{mode} {cap_n}");
+            assert_eq!(rate(&c).value, EnvValue::Set(want.into()), "{mode}");
+            assert_eq!(crate::frame_rate_env(&c), want);
         }
+        let mut cap_only = d.clone();
+        cap_only.set("display.frame_cap", Value::Int(90)).unwrap();
+        assert!(rate(&cap_only).explicit, "the cap alone counts as set");
     }
 
     #[test]

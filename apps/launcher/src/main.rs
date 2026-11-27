@@ -799,6 +799,10 @@ impl App {
             (None, true) => "proof".into(),
             (None, false) => config.profile.clone(),
         };
+        // the same values the layer takes from rebuild.toml (C2); passed too so a proof binary, which reads no
+        // settings file, paces the same way
+        env.push(("REBUILD_FRAME_RATE".into(), rebuild_config::frame_rate_env(&config)));
+        env.push(("REBUILD_VSYNC".into(), if config.bool("display.vsync") { "1" } else { "0" }.into()));
         let exe = if proof {
             PathBuf::from(self.proof_exe.trim())
         } else {
