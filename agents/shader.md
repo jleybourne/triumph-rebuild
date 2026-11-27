@@ -105,12 +105,12 @@ Definitions (in `crates/shader/src/features.rs`):
 
 ```powershell
 # 1. the fork's own offline translator, the build that made its 25,694 / 25,694 census
-#    (wt-bisect targetn\diagictory.exe, sha256 b744f584...8c1b), one thread, a fresh cache:
-$env:VICTORY_CACHE_DIR = 'D:ictory-dataebuild-oracle-work\cache'
+#    (wt-bisect target\vn\diag\victory.exe, sha256 b744f584...8c1b), one thread, a fresh cache:
+$env:VICTORY_CACHE_DIR = 'D:\victory-data\rebuild-oracle-work\cache'
 victory.exe translate --warm all --jobs 1 <game>\shaders.rpf          # 1,180 s
 # 2. pair the entries with hashes, write the oracle and its index
-$env:REBUILD_ORACLE_DIR = 'D:ictory-dataebuild-oracle'; $env:REBUILD_FORK_EXE = '<that victory.exe>'
-cargo run --release --bin oracle -- --cache D:ictory-dataebuild-oracle-work\cache --verify 50
+$env:REBUILD_ORACLE_DIR = 'D:\victory-data\rebuild-oracle'; $env:REBUILD_FORK_EXE = '<that victory.exe>'
+cargo run --release --bin oracle -- --cache D:\victory-data\rebuild-oracle-work\cache --verify 50
 ```
 
 **Built:** `apps/rebuild/src/bin/oracle.rs`. The fork's shader cache (`cache-fx`) cannot be used: its key is
@@ -131,12 +131,12 @@ index         agents/shader-oracle.csv: hash, stage, present, dxil_bytes, entry_
 read-only     shaders.rpf unchanged
 ```
 
-Files, outside git: `D:ictory-dataebuild-oracle\<hash>.dxil` (the DXIL the fork emits) and `<hash>.vsh`
+Files, outside git: `D:\victory-data\rebuild-oracle\<hash>.dxil` (the DXIL the fork emits) and `<hash>.vsh`
 (the whole cache entry: DXIL plus the fork's root bindings, user-data, samplers; format `VSH1` in the
 fork's `victory-gpu/src/shader_cache.rs`). The translation is the host-agnostic one (`--warm` makes no
 device; the fork's runs on a 32-lane card may differ where `VICTORY_HOST_WAVE`/`VICTORY_VIEW_LIMIT` apply).
 
-A first warm with the fork's newer `targeteleaseictory.exe` gave 25,636 (its 58 known refusals), so it
+A first warm with the fork's newer `target\release\victory.exe` gave 25,636 (its 58 known refusals), so it
 was not used.
 
 ## Decided
