@@ -205,6 +205,14 @@ unsafe fn report_inner(kind: &str, p: *const EXCEPTION_POINTERS) {
                     }
                     unsafe { (g as *const u64).read_unaligned() }.wrapping_add(off)
                 }
+                // [reg+inner]+off: base 18 + register index, the inner offset in `global`
+                r if (18..34).contains(&r) => {
+                    let g = regs[r - 18].wrapping_add(global);
+                    if !readable(g) {
+                        continue;
+                    }
+                    unsafe { (g as *const u64).read_unaligned() }.wrapping_add(off)
+                }
                 r => regs[r - 1].wrapping_add(off),
             };
             let mut m = MEMORY_BASIC_INFORMATION::default();
@@ -214,6 +222,7 @@ unsafe fn report_inner(kind: &str, p: *const EXCEPTION_POINTERS) {
             let tag = match base {
                 0 => "exe+",
                 17 => "[global]",
+                r if (18..34).contains(&r) => "[reg]",
                 r => REGS[r - 1],
             };
             if ok {
@@ -385,7 +394,14 @@ pub fn install(images: Vec<(String, u64, u64)>) {
                 if let Some(rest) = t.strip_prefix('[') {
                     let (g, off) = rest.split_once(']')?;
                     let off = off.trim_start_matches('+');
-                    return Some((17, if off.is_empty() { 0 } else { parse(off)? }, exe_rel(parse(g)?)));
+                    let off = if off.is_empty() { 0 } else { parse(off)? };
+                    // [reg+inner]+off, or [0x14global]+off
+                    if let Some((r, inner)) = g.split_once('+') {
+                        if let Some(i) = REGS.iter().position(|x| *x == r) {
+                            return Some((18 + i, off, parse(inner)?));
+                        }
+                    }
+                    return Some((17, off, exe_rel(parse(g)?)));
                 }
                 match t.split_once('+') {
                     Some((r, o)) => REGS.iter().position(|x| *x == r).and_then(|i| parse(o).map(|o| (i + 1, o, 0))),
