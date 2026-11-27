@@ -198,7 +198,7 @@ fn every_list_and_allocator_slot_in_the_csv_resolves() {
 fn traps_count_and_fail_with_their_return_kind() {
     let h = Arc::new(TestHost::default());
     let (l, a, _) = fake_list(h.clone());
-    // 0x058 ClearState (void) and 0x4a8 (past the known methods): value traps.
+    // 0x058 ClearState (void) and 0x4f8 (the last slot, past the known methods): value traps.
     let before = traps().iter().find(|t| t.object == "list" && t.offset == 0x58).map_or(0, |t| t.count);
     assert_eq!(unsafe { method::<V0>(l, 0x58)(l) }, 0);
     assert_eq!(unsafe { method::<V0>(l, 0x58)(l) }, 0);

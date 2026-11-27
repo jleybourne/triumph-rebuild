@@ -17,6 +17,6 @@ pub mod menu;
 pub mod pad;
 pub mod source;
 
-pub use menu::{Change, Input, Phase, Polled, MENU_KEY};
+pub use menu::{menu_key_named, Change, Input, Phase, Polled, MENU_KEY, MENU_KEYS};
 pub use pad::{buttons, KeyState, PadState, NEUTRAL};
 pub use source::{Fake, Frame, Source, PADS};

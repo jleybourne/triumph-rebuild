@@ -389,6 +389,16 @@ mod tests {
     }
 
     #[test]
+    fn every_menu_key_choice_names_a_key_the_input_takes() {
+        let Kind::Choice { options } = find("menu.key").unwrap().kind else { panic!("menu.key is a choice") };
+        for o in options {
+            assert!(rebuild_input::menu_key_named(o).is_some(), "menu.key {o}");
+        }
+        let c = Config::parse("").unwrap();
+        assert_eq!(rebuild_input::menu_key_named(&c.choice("menu.key")), Some(rebuild_input::MENU_KEY));
+    }
+
+    #[test]
     fn retention_and_theme_have_their_defaults_and_ranges() {
         let c = Config::parse("").unwrap();
         assert_eq!(c.int("diagnostics.retention_days"), 14);
