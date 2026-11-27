@@ -389,11 +389,12 @@ fn trace_failed_open(function: &str, path: &str) {
     use std::sync::atomic::{AtomicU32, Ordering};
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     static N: AtomicU32 = AtomicU32::new(0);
-    if !*ON.get_or_init(|| std::env::var_os("REBUILD_TRACE_FILES").is_some()) || N.fetch_add(1, Ordering::Relaxed) >= 200 {
-        return;
-    }
+    // the title reads the last error next: reading the environment (and printing) must not change it
     let code = unsafe { host::GetLastError() };
-    eprintln!("files     {function} failed ({code}): {path}");
+    if *ON.get_or_init(|| std::env::var_os("REBUILD_TRACE_FILES").is_some()) && N.fetch_add(1, Ordering::Relaxed) < 200 {
+        eprintln!("files     {function} failed ({code}): {path}");
+    }
+    set_last_error(code);
 }
 
 pub unsafe extern "system" fn CreateFileW(
