@@ -1,7 +1,7 @@
 # Progress
 
 ```
-work toward 30 fps   [█████░░░░░░░░░░░░░░░]  26 %
+work toward 30 fps   [█████░░░░░░░░░░░░░░░]  27 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (fork reference: 25,694 translated, 7 pipelines refused)
 measured fps         none yet — the title has not rendered a frame on this code
 baseline to beat     7.6 fps · 131.3 ms · ~4,500 draws · 356 dropped   (the layer being replaced)
@@ -21,13 +21,13 @@ second row and is the number that counts.
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
 | 3 | PE loader + console runtime | 15 | 0 % | 0 | — |
-| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 0 % | 0 | decided: our own core (lane state as data, direct addressing, uniformity, native ops); decode front end may be vendored with credit |
+| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 10 % | 1.5 | designed; IR, classifier and lane-doubling model built and proven bit-exact (100k programs); HLSL → DXC chosen; decoder in lane `shader` |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 0 % | 0 | plan corrected: the upscale pass is found by bindings; lowering the internal resolution is its own task |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **25.8 ≈ 26 %** | |
+| | **total** | **100** | | **27.3 ≈ 27 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -56,6 +56,10 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 - **Build 2 — labels** ([`runs/build2-labels.md`](runs/build2-labels.md)): title memory (write-watched too) opens as a
   GPU heap. The GPU writes the title's labels into it directly, 65 µs before the fence reports; 200/200 in order.
 
+- **Shader core, first piece** ([`docs/design/shader-ir.md`](docs/design/shader-ir.md), `crates/sir`): the design
+  (classify, uniformity, lane doubling, window addressing, HLSL → DXC offline). The lane-doubling model is
+  bit-exact against a 64-lane console on 100,000 random programs, including the fork's refusal case.
+
 ## Not done
 
 - Build 0 (c): the title's real GPU time, with RT on and off. Blocked: it needs the title rendering, so it moved to Build 5.
@@ -76,6 +80,28 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — The shader core: design, and the lane model proven
+
+```
+[█████░░░░░░░░░░░░░░░]  27 %   (was 26 %: +1.5 Build 4 design and lane model)
+shaders     0 / 25,694   (programs count once they are emitted and match the oracle)
+measured fps   none yet
+```
+
+- **Designed** the shader core ([`docs/design/shader-ir.md`](docs/design/shader-ir.md)): classify each program
+  (most never observe the wave size, so they run as plain wave32 at no cost), then uniformity, lane doubling
+  for the rest, window addressing, native 16-bit/quad/wave ops, and HLSL compiled offline by DXC.
+- **Decided: HLSL + DXC, not our own DXIL writer.** DXC's optimiser runs on every program, and a bitcode
+  writer carries no performance. Checked: DXC 1.8 (Windows SDK) accepts SM 6.6, `[WaveSize(32)]`, wave and
+  quad intrinsics, and `float16_t`.
+- **Built** `crates/sir`: IR, uniformity, the classifier, and two interpreters (a 64-lane console, and lane
+  doubling on a 32-lane host using host-wave operations only). **100,000 random programs bit-exact**,
+  and the fork's refusal case (a reduction with lanes 3, 40 and 63 running) is exact. 35 tests in the
+  workspace.
+- **Rules found:** wave ops must run in host-uniform control flow (predicate divergent branches that hold
+  them). A per-lane `WaveReadLaneAt` is to be checked on the GPU.
+- **Next:** HLSL emission from `sir`, run on the card against the interpreter.
 
 ### 2026-11-27 — Build 2 closed: GPU-written labels into title memory
 

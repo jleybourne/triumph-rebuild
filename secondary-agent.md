@@ -28,7 +28,7 @@ That is the lead's working tree, and switching it breaks a run in progress.
 
 | rule | why |
 |:--|:--|
-| **Do not edit** `crates/uma/**`, `crates/xlist/**`, `apps/rebuild/src/bin/{gputest,uploadbench,listbench}.rs`, `plan.md`, `tasks.md`, `progress.md`, `README.md`, `HANDOFF.md`, `REVIEW-PROMPT.md`, `runs/**`, `secondary-agent.md` | the lead is changing these right now; any edit becomes a merge conflict |
+| **Do not edit** `crates/uma/**`, `crates/xlist/**`, `crates/sir/**`, `docs/**`, `apps/rebuild/src/bin/{gputest,uploadbench,listbench}.rs`, `plan.md`, `tasks.md`, `progress.md`, `README.md`, `HANDOFF.md`, `REVIEW-PROMPT.md`, `runs/**`, `secondary-agent.md` | the lead is changing these right now; any edit becomes a merge conflict |
 | You **may** add one line to the root `Cargo.toml` `members` list for your crate | the lead resolves that one line on merge |
 | **Measurement lock:** while `D:\Developer\triumph-rebuild\agents\MEASURING` exists, run **no** builds, tests or other heavy work. Check before every build: `if (Test-Path D:\Developer\triumph-rebuild\agents\MEASURING) { "wait" }` | the lead's GPU and CPU timings need a quiet machine. One background build once turned 7.3 fps into 2.3. |
 | Build with `cargo build --release -j 4` | leaves cores free for the lead |
@@ -112,5 +112,5 @@ evidence. The lead picks it up at merge.
 done      Build 0 (a), 0 (b), Build 1 (tiles), Build 2 (ring + labels), translator core (crates/xlist)
 doing     the shader IR design (plan decision 4); lane shader's S4 feeds it
 next      Build 3 second half (kernel, runtime) once lane loader's L1-L3 merge
-progress  26 % (see progress.md)
+progress  27 % (see progress.md); the shader IR lives in crates/sir (lead only)
 ```
