@@ -17,6 +17,9 @@ rebuild-xlist = { path = "../xlist" }
 rebuild-pipelines = { path = "../pipelines" }
 rebuild-shader = { path = "../shader" }
 rebuild-ffx = { path = "../ffx" }
+rebuild-overlay = { path = "../overlay" }
+rebuild-input = { path = "../input" }
+rebuild-config = { path = "../config" }
 png = "0.17"
 
 [target.'cfg(windows)'.dependencies]

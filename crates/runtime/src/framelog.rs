@@ -34,7 +34,7 @@
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 static FRAMES: AtomicU64 = AtomicU64::new(0);
@@ -346,6 +346,13 @@ pub fn write_summary(outcome: &str) {
 // ------------------------------------------------------------------------------------- the thread
 
 static STARTED: AtomicBool = AtomicBool::new(false);
+/// The last second's line (the in-game menu's stats), whether or not a log is written.
+static LATEST: Mutex<Option<Line>> = Mutex::new(None);
+
+/// The last second's frame line, once the first second has passed.
+pub fn latest() -> Option<Line> {
+    LATEST.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
 
 /// Start the once-a-second thread (with the device; later calls do nothing).
 pub fn start() {
@@ -371,16 +378,17 @@ fn run() {
         std::thread::sleep(next.saturating_sub(base().elapsed()));
         let now_t = base().elapsed();
         let now = counts();
+        let l = line(now_t.as_secs(), (now_t - prev_t).as_secs_f64(), &prev, &now);
         if let Some(w) = log.as_mut() {
             let pacing = crate::frame::describe();
             if pacing != header {
                 let _ = writeln!(w, "{pacing}");
                 header = pacing;
             }
-            let l = line(now_t.as_secs(), (now_t - prev_t).as_secs_f64(), &prev, &now);
             let _ = writeln!(w, "{}", format(&l));
             let _ = w.flush();
         }
+        *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         prev = now;
         prev_t = now_t;
         if let Some(r) = &request {

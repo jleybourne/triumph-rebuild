@@ -45,6 +45,11 @@
 //! buffer, the back buffer's size) is copied to a readback buffer in the same list, and a thread of ours writes it
 //! as `captures/frame-<n>.png` in the session folder (`REBUILD_SESSION_DIR`, else the current folder) once the GPU
 //! is done, then deletes `capture.request`.
+//!
+//! **The in-game menu** ([`crate::overlay`], task L5): while it (or the stats readout) is shown, a second small list
+//! per frame draws it over the swap chain's buffer after the title's image, executed with the present list. It
+//! never touches the title's image, and a capture is copied before it unless `REBUILD_CAPTURE_OVERLAY=1`. While
+//! nothing is shown its cost is one relaxed load a present.
 
 #![cfg(windows)]
 #![allow(non_snake_case)]
@@ -475,6 +480,8 @@ impl Presenter {
             let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE).map_err(e("fence"))?;
             TEARING.store(1 + usize::from(tearing), Ordering::Relaxed);
             PRESENT_QUEUE.store(q as *const Queue as usize, Ordering::Release);
+            // the in-game menu: its input thread, font and pipeline are made off this thread
+            crate::overlay::attach(&device, format, frequency, FRAMES);
             Ok(Presenter {
                 device,
                 queue: q,
@@ -531,6 +538,10 @@ impl Presenter {
         let started = self.queue.frame_started.swap(false, Ordering::AcqRel);
         let frame = self.shown_frames + 1;
         let capture = CAPTURE.swap(false, Ordering::AcqRel) || capture_frames().contains(&frame);
+        // the overlay draws after the title's image; a capture is taken before it unless REBUILD_CAPTURE_OVERLAY=1
+        let overlay = crate::overlay::visible();
+        let capture_overlay = capture && overlay && crate::overlay::capture_overlay();
+        let capture_main = capture && !capture_overlay;
         let (w, h) = (desc.Width as u32, desc.Height);
         let copy = family(desc.Format.0 as u32) == Some(self.format)
             && w <= self.size.0
@@ -544,7 +555,7 @@ impl Presenter {
         let list = &list;
         let mut readback = None;
         let shown_size = if copy { (w, h) } else { self.size };
-        let cached = !capture && self.slots[i].cache[back].key.as_ref().is_some_and(|k| k.0 == *source && (k.1, k.2, k.3) == (w, h, copy));
+        let cached = !capture_main && self.slots[i].cache[back].key.as_ref().is_some_and(|k| k.0 == *source && (k.1, k.2, k.3) == (w, h, copy));
         unsafe {
             if !cached {
                 self.slots[i].cache[back].key = None;
@@ -562,7 +573,7 @@ impl Presenter {
                     self.draw(list, i * FRAMES + back, back, source, desc, &target);
                     (self.size.0, self.size.1, D3D12_RESOURCE_STATE_RENDER_TARGET)
                 };
-                if capture {
+                if capture_main {
                     list.ResourceBarrier(&[transition(&target, shown.2, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
                     readback = self.capture(list, &target, (shown.0, shown.1));
                     list.ResourceBarrier(&[transition(&target, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT)]);
@@ -574,15 +585,38 @@ impl Presenter {
                 if list.Close().is_err() {
                     return;
                 }
-                if !capture {
+                if !capture_main {
                     self.slots[i].cache[back].key = Some((source.clone(), w, h, copy));
                 }
             }
+            // the in-game menu over the shown image: its own list, recorded only while something is shown
+            crate::overlay::set_target(shown_size.0, shown_size.1);
+            let mut over = None;
+            if overlay {
+                let rtv = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: self.rtv.GetCPUDescriptorHandleForHeapStart().ptr + back * self.rtv_step };
+                if let Some(l) = crate::overlay::record(i, &target, D3D12_RESOURCE_STATE_PRESENT, rtv, self.fence.GetCompletedValue(), self.value + 1) {
+                    if capture_overlay {
+                        l.ResourceBarrier(&[transition(&target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+                        readback = self.capture(&l, &target, shown_size);
+                        l.ResourceBarrier(&[transition(&target, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT)]);
+                    } else {
+                        l.ResourceBarrier(&[transition(&target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT)]);
+                    }
+                    if l.Close().is_ok() {
+                        over = Some(l);
+                    }
+                }
+            }
+            if capture_overlay && over.is_none() {
+                readback = None;
+                CAPTURE.store(true, Ordering::Release); // the overlay was not drawn: capture the next frame instead
+            }
             // the frame's start timestamp in front when no submission of this frame put it there
             let begin = BEGIN[i].load(Ordering::Relaxed) as *mut c_void;
-            let raw = [begin, list.as_raw()];
+            let raw = [begin, list.as_raw(), over.as_ref().map_or(std::ptr::null_mut(), |l| l.as_raw())];
             let first = usize::from(started || begin.is_null());
-            (Interface::vtable(&self.queue.host).ExecuteCommandLists)(Interface::as_raw(&self.queue.host), (2 - first) as u32, raw[first..].as_ptr() as *const _);
+            let count = if over.is_some() { 3 } else { 2 };
+            (Interface::vtable(&self.queue.host).ExecuteCommandLists)(Interface::as_raw(&self.queue.host), (count - first) as u32, raw[first..].as_ptr() as *const _);
             let shown = shown_size;
             if (shown.0, shown.1) != self.shown {
                 let s2: Option<IDXGISwapChain2> = self.swap.cast().ok();
