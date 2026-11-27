@@ -45,14 +45,14 @@ says "skipped" and passes. Run it with:
 
 ## For the lead
 
-1. **The state after the upscale (needs xlist, yours).** The upscale binds its own descriptor heaps, root
-   signature and pipeline on the host list. The console list's elision shadow still names the title's.
-   The title re-binds after `ffxDispatch` because the FFX contract says state is lost, and xlist would
-   drop those re-binds as repeats. Proposal: `rebuild_xlist::console::forget_bound_state(list: Raw)`, in
-   `list.rs`. It sets `sh.heap_count = 0`, clears the bound pipeline, both root signatures and the root
-   argument shadows, and `heaps = [None; 2]`, so the next set of each is applied. Call it from
-   `XboxHost::record` after `f` (`crates/ffx/src/host.rs`, marked). Until then, expect wrong bindings on
-   the first draws after the upscale.
+1. **The state after the upscale: done in xlist, at your request.** The upscale binds its own descriptor
+   heaps, root signature and pipeline on the host list. `rebuild_xlist::console::forget_bound_state(list)`
+   (`list.rs`) runs after it in `XboxHost::record`:
+   - It clears the elision shadow, so the title's re-binds after `ffxDispatch` are applied.
+   - It binds the title's descriptor heaps again at once, so its tables keep mapping.
+   - It marks the pipeline unbound. A draw before the title sets one is dropped, not run with FSR's or
+     DLSS's pipeline.
+   - Test: `after_outside_commands_the_titles_rebinds_are_applied_not_elided`.
 2. **The runtime edits are small.** `exports.rs`: two names in `CONSOLE_DLLS`, one match arm,
    `replaces_title_dll`, one test. `title.rs`: skip those two files. `device.rs`: `prepare_dlss()` before
    `D3D12CreateDevice`, and `install_xbox(resources, &host)` after the resources. `Cargo.toml`: the member
@@ -88,7 +88,7 @@ start with `ffx:`:
 
 ## Next
 
-- xlist `forget_bound_state` (lead), then the first frame with the upscale in place;
+- the first frame with the upscale in place;
 - auto exposure in `Inputs`; reactive/T&C into FSR (DLSS has no such inputs);
 - then lowering the internal resolution goes through the title's own FSR quality setting, since the
   render size now reaches us as a number rather than as texture sizes.

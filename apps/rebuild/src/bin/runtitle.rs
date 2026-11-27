@@ -17,6 +17,8 @@
 mod sampler;
 #[path = "../crash.rs"]
 mod crash;
+#[path = "../watch.rs"]
+mod watch;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -65,10 +67,12 @@ fn write_summary(outcome: &str, detail: &str) {
     let elapsed = unsafe { STARTED }.map(|s| s.elapsed().as_secs_f64()).unwrap_or(0.0);
     let limits = rebuild_runtime::limits::get();
     let text = format!(
-        "[summary]\noutcome = \"{outcome}\"\ndetail = \"{}\"\nseconds = {elapsed:.3}\nmeasured_from = \"title_start\"\n\
+        "[summary]\noutcome = \"{outcome}\"\ndetail = \"{}\"\nseconds = {elapsed:.3}\n{}\
          [title]\nbudget_mib = {}\nbudget_used_mib = {}\n\
          [limits]\nram_mb = {}\nvram_mb = {}\ncpu_cores = {}\ncpu_rate = {}\n",
         detail.replace('\\', "\\\\").replace('"', "\\\""),
+        // the frame keys (avg_fps, low1_fps, frame_ms, gpu_ms, frames, measured_from) from the present's counters
+        rebuild_runtime::framelog::summary_keys(false),
         rebuild_runtime::budget::limit() >> 20,
         rebuild_runtime::budget::used() >> 20,
         limits.ram_mb,
@@ -288,6 +292,8 @@ fn main() {
     }
     crash::install(title.images.iter().map(|l| (l.name.clone(), l.base, l.image.size_of_image as u64)).collect());
     crash::on_fatal(device_report);
+    // REBUILD_WATCH: who writes an address (hardware watchpoint on every thread)
+    watch::install();
     // console CPU instructions the host lacks (clwb), patched where the title uses them; first in the handler line
     rebuild_runtime::cpu::install();
     // the title's code assumes its TLS block is slot 0 (an exe's): give it slot 0 before any thread runs

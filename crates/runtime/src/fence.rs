@@ -6,11 +6,14 @@
 //! writes the completed value into the cell as the GPU passes each signal, so the title's direct reads see
 //! progress. (A later step can let the GPU write the cell itself, the Build 2 label path, if the frame line shows
 //! the watcher's latency matters.)
+//!
+//! The title's pointer leads to our [`Fence`] without a lock (+0x38 of the object, after the method table checks
+//! out), and a list's memory wait on a fence's value cell is found by [`by_cell`] (a scan of a fixed table, no lock),
+//! so submission can make it a host queue wait on the host fence.
 
 #![cfg(windows)]
 #![allow(non_snake_case)]
 
-use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -59,11 +62,43 @@ impl Fence {
     }
 }
 
-static FENCES: Mutex<Option<HashMap<usize, &'static Fence>>> = Mutex::new(None);
+/// Where the console object keeps its [`Fence`].
+const OURS: usize = 0x38;
+/// Every fence made, by console object, for [`by_cell`] (append-only; more than this are still served, only not
+/// found by their cell).
+const MAX_FENCES: usize = 4096;
+static ALL: [std::sync::atomic::AtomicUsize; MAX_FENCES] = [const { std::sync::atomic::AtomicUsize::new(0) }; MAX_FENCES];
+static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static CALLS: [AtomicU32; SLOTS] = [const { AtomicU32::new(0) }; SLOTS];
 
+/// The fence behind a title fence pointer: read from the object, no lock.
+#[inline]
 pub fn find(object: usize) -> Option<&'static Fence> {
-    FENCES.lock().unwrap().as_ref()?.get(&object).copied()
+    if object == 0 || object % 8 != 0 {
+        return None;
+    }
+    let table = VTABLE.get()?.as_ptr() as usize;
+    // SAFETY: a pointer the title says is a fence; +0x38 is read only once the table shows it is ours.
+    unsafe {
+        if *(object as *const usize) != table {
+            return None;
+        }
+        ((object + OURS) as *const *const Fence).read().as_ref()
+    }
+}
+
+/// The fence whose value cell (the address `GetGpuAddress` handed out) is `address`.
+pub fn by_cell(address: u64) -> Option<&'static Fence> {
+    let object = (address as usize).checked_sub(0x10)?;
+    let n = COUNT.load(Ordering::Acquire).min(MAX_FENCES);
+    ALL[..n].iter().any(|o| o.load(Ordering::Relaxed) == object).then(|| find(object)).flatten()
+}
+
+impl Fence {
+    /// The title-visible value.
+    pub fn value(&self) -> u64 {
+        self.cell().load(Ordering::Acquire)
+    }
 }
 
 fn note(slot: usize) {
@@ -145,11 +180,14 @@ unsafe extern "system" fn GetCompletedValue(this: *mut c_void) -> u64 {
 unsafe extern "system" fn SetEventOnCompletion(this: *mut c_void, value: u64, event: HANDLE) -> i32 {
     note(9);
     let Some(f) = find(this as usize) else { return 0x8000_4005u32 as i32 };
+    let blocking = event.is_invalid() || event.0.is_null();
+    let started = blocking.then(std::time::Instant::now);
     let r = match unsafe { f.host.SetEventOnCompletion(value, event) } {
         Ok(()) => 0,
         Err(e) => e.code().0,
     };
-    if event.is_invalid() || event.0.is_null() {
+    if let Some(t) = started {
+        crate::framelog::waited(t.elapsed());
         f.refresh();
     }
     r
@@ -242,7 +280,11 @@ pub fn create(initial: u64) -> Result<usize, i32> {
         ((base + 0x10) as *mut u64).write(initial);
     }
     let f: &'static Fence = Box::leak(Box::new(Fence { host, cell: base + 0x10, pending: Mutex::new(initial), wake: Condvar::new() }));
-    FENCES.lock().unwrap().get_or_insert_with(HashMap::new).insert(base, f);
+    unsafe { ((base + OURS) as *mut *const Fence).write(f) };
+    let i = COUNT.fetch_add(1, Ordering::AcqRel);
+    if i < MAX_FENCES {
+        ALL[i].store(base, Ordering::Release);
+    }
     std::thread::Builder::new().name("fence-watch".into()).stack_size(64 << 10).spawn(move || watch(f)).map_err(|_| 0x8000_4005u32 as i32)?;
     Ok(base)
 }

@@ -1,8 +1,8 @@
 # Progress
 
 ```
-overall   ████████████░░░░░░░░  58 %   work toward 30 fps, weighted by build step
-fps       no frame yet                 target 30 · baseline 7.6
+overall   ████████████░░░░░░░░  59 %   work toward 30 fps, weighted by build step
+fps       frame 1 presented (black, as the title draws it); frame 2 next · target 30 · baseline 7.6
 updated   2026-11-27
 ```
 
@@ -13,11 +13,11 @@ and becomes the number that counts.
 
 | track | progress | | note |
 |---|---|--:|---|
-| **Build 5 · first frame** | `████████░░░░░░░░░░░░` | 40 % | next: Execute, Present (lane `present`), a null program binding |
+| **Build 5 · first frame** | `██████████░░░░░░░░░░` | 50 % | frame 1 presented and captured; frame 2 blocked by a null program binding |
 | shaders compiled (v0 set) | `████████████████████` | 2,834 / 2,881 | pixel 1,791 · vertex 926 · compute 117 |
 | shaders counted | `░░░░░░░░░░░░░░░░░░░░` | 0 / 25,694 | counted once execution matches the oracle |
 | runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
-| launcher | `██████████████░░░░░░` | 5 / 7 | C2 and L5 left · not part of the 58 % |
+| launcher | `██████████████░░░░░░` | 5 / 7 | C2 and L5 left · not part of the 59 % |
 
 | | fps | frame time | draws |
 |---|--:|--:|--:|
@@ -33,12 +33,12 @@ and becomes the number that counts.
 | 2 | CPU-written memory ring; GPU→CPU | `████████████████████` | 100 % | 8 | closed |
 | 3 | PE loader + console runtime | `████████████████████` | 100 % | 15 | closed: the title's code runs |
 | 4 | shader recompiler RDNA2 → DXIL | `█████████████░░░░░░░` | 65 % | 15 | front end closed; execution check, wave64 open |
-| 5 | device, lists, descriptors, present | `████████░░░░░░░░░░░░` | 40 % | 12 | creation path built; the title calls Execute and Present |
+| 5 | device, lists, descriptors, present | `██████████░░░░░░░░░░` | 50 % | 12 | frame 1 presented through our layer; frame 2 next |
 | 6 | list translation | `██░░░░░░░░░░░░░░░░░░` | 10 % | 8 | translator core measured |
 | 7 | upscaler: DLSS + FSR | `██████░░░░░░░░░░░░░░` | 30 % | 10 | both standalone; wiring to the title open |
 | 8 | frame pacing | `░░░░░░░░░░░░░░░░░░░░` | 0 % | 6 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | `░░░░░░░░░░░░░░░░░░░░` | 0 % | 6 | 30 fps on AMD closes here |
-| | **total** | `████████████░░░░░░░░` | **58 %** | 100 | 58.35 points earned |
+| | **total** | `████████████░░░░░░░░` | **59 %** | 100 | 59.55 points earned |
 
 ## Build 5 · first frame, piece by piece
 
@@ -46,20 +46,18 @@ and becomes the number that counts.
 |---|---|---|
 | device, queues, fences, allocators, lists, resources, DXGI | `████████████████████` | done |
 | root signatures, query heaps, command signatures | `████████████████████` | done |
-| compute pipelines (library + pool) | `████████████████░░░░` | done; 80 BVH-builder programs need on-demand translation |
+| compute pipelines (library + pool) | `████████████████████` | done; programs outside the library translated on demand and cached (PR #31) |
 | graphics and stream pipelines (0x50, 0x2b0) | `████████████████████` | done (PR #30): 14 created, 0 refused |
 | title start-up to its first submission | `████████████████████` | done: ExecuteCommandListsX and PresentX called at 1.44 s |
-| ExecuteCommandLists + PresentX | `██████░░░░░░░░░░░░░░` | lane `present` building them; then a null program binding at `exe+0xb5a5f8` |
-| a non-black frame, captured | `░░░░░░░░░░░░░░░░░░░░` | todo: closes Build 5 |
-| frame line (fps, ms, draws, …) | `██░░░░░░░░░░░░░░░░░░` | contract agreed with the launcher; todo |
+| ExecuteCommandLists + PresentX | `████████████████████` | done (PR #32): submit, borderless window, flip swap chain, PNG capture |
+| a non-black frame, captured | `██████████░░░░░░░░░░` | frame 1 captured (black, 1920×1080); frame 2 crashes: the title draws with no program bound (`exe+0xb5a5f8`) |
+| frame line (fps, ms, draws, …) | `██████████████████░░` | written each second + summary.toml (PR #32); upload/xlate/upscale fields to come |
 | Build 0 (c): the title's GPU time | `░░░░░░░░░░░░░░░░░░░░` | needs a frame |
 
 ## Helper lanes running
 
 | lane | build | working on |
 |---|---|---|
-| `present` | 5 | ExecuteCommandLists, PresentX, frame capture, frame line |
-| `ondemand` | 5 | translating programs missing from the library when the title creates them |
 | `shaderexec` | 4 | our shaders against the oracle's, on the GPU: the "shaders counted" bar |
 | `shadercov` | 4 | the last 1,726 agnostic programs (7,402 → 9,128) |
 | `wave64` | 4 | wave-wide programs, the other ~16,500 |

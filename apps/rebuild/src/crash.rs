@@ -72,7 +72,7 @@ fn write_err(b: &[u8]) {
 fn name(out: &mut Buf, addr: u64) {
     if let Some((n, b, _)) = IMAGES.get().and_then(|v| v.iter().find(|(_, b, s)| addr >= *b && addr < b + s)) {
         let _ = write!(out, "{n}+{:#x}", addr - b);
-    } else if !host_symbol(out, addr) {
+    } else if NO_SYMBOLS.load(Ordering::Relaxed) || !host_symbol(out, addr) {
         let _ = write!(out, "{addr:#x}");
     }
 }
@@ -127,6 +127,9 @@ fn in_title(addr: u64) -> bool {
 /// (base, offset): base 0 is the exe (a preferred address given), 1..=16 a register of the faulting context
 static PEEKS: std::sync::OnceLock<Vec<(usize, u64)>> = std::sync::OnceLock::new();
 const REGS: [&str; 16] = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"];
+
+/// Set by handlers that may run inside the host heap (a watchpoint hit): no DbgHelp, which allocates.
+pub static NO_SYMBOLS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 static REPORTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -477,4 +480,30 @@ fn unwind_into(out: &mut Buf, c: &mut windows::Win32::System::Diagnostics::Debug
         let mut frame = 0u64;
         unsafe { RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, f, c, &mut data, &mut frame, None) };
     }
+}
+
+/// One report line in a fixed buffer, written with one call (for other diagnostics, e.g. `watch.rs`).
+pub struct Line(Buf);
+
+impl Line {
+    pub fn new() -> Line {
+        Line(Buf { b: [0; 2048], n: 0 })
+    }
+    pub fn flush(&mut self) {
+        let _ = self.0.write_str("\n");
+        write_err(&self.0.b[..self.0.n]);
+        self.0.n = 0;
+    }
+}
+
+impl std::fmt::Write for Line {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.0.write_str(s)
+    }
+}
+
+/// The unwound call chain of `ctx` (a copy), `frames` deep, onto `out`.
+pub fn chain(out: &mut Line, ctx: &windows::Win32::System::Diagnostics::Debug::CONTEXT, frames: usize) {
+    let mut c = *ctx;
+    unwind_into(&mut out.0, &mut c, frames);
 }

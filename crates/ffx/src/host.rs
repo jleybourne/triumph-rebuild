@@ -32,8 +32,8 @@ pub trait Host: Send + Sync {
 
     /// Run `f` on the host list that `list` records into at this moment, in order with the commands
     /// recorded before and after this call. The upscale binds its own descriptor heaps, root signature
-    /// and pipeline: the console list's bound state must be re-applied before its next command
-    /// (`agents/ffx.md`, "state after the upscale").
+    /// and pipeline: the console list must forget its bound state afterwards
+    /// (`rebuild_xlist::console::forget_bound_state`).
     fn record(&self, list: Raw, f: &mut dyn FnMut(&ID3D12GraphicsCommandList) -> Result<(), String>) -> Result<(), String>;
 
     /// A new upscaler for one context.
@@ -83,10 +83,11 @@ impl Host for XboxHost {
     fn record(&self, list: Raw, f: &mut dyn FnMut(&ID3D12GraphicsCommandList) -> Result<(), String>) -> Result<(), String> {
         let segments = rebuild_xlist::console::segments(list).ok_or("the command list is not a console list of ours")?;
         let open = segments.last().ok_or("the console list has no open host list")?;
-        f(&open.list.list)
-        // The console list's elision state still names the title's heaps, root signatures and pipeline.
-        // Until xlist exposes `forget_bound_state` (agents/ffx.md), the title's own re-binds after the
-        // dispatch may be dropped as repeats.
+        let r = f(&open.list.list);
+        // the upscale bound its own heaps, root signature and pipeline: the title's re-binds after the
+        // dispatch must be applied, not dropped as repeats of what the list last saw
+        rebuild_xlist::console::forget_bound_state(list);
+        r
     }
 
     fn upscaler(&self, want: &Wanted) -> Result<Backend, String> {

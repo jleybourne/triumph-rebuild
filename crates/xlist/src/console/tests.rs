@@ -427,6 +427,34 @@ fn a_pipeline_with_no_host_object_drops_its_draws_and_never_reuses_the_one_befor
     release(l);
 }
 
+#[test]
+fn after_outside_commands_the_titles_rebinds_are_applied_not_elided() {
+    let h = Arc::new(TestHost::default());
+    let (l, _a, _backend) = fake_list(h.clone());
+    type Draw = unsafe extern "system" fn(Raw, u32, u32, u32, i32, u32);
+    let bind = || unsafe {
+        method::<unsafe extern "system" fn(Raw, u32, *const Raw)>(l, 0x100)(l, 1, &HEAP);
+        method::<unsafe extern "system" fn(Raw, Raw)>(l, 0xc8)(l, 0xAAA0 as Raw);
+        method::<unsafe extern "system" fn(Raw, u32, u64)>(l, 0x120)(l, 0, 0x1000_0000 + 3 * 32);
+    };
+    bind();
+    let f = fake::host_of(l);
+    assert_eq!((f.count(host::SET_DESCRIPTOR_HEAPS), f.count(host::SET_PIPELINE_STATE), f.count(host::SET_GRAPHICS_ROOT_TABLE)), (1, 1, 1));
+    // the upscale records into the host list, then the list forgets: the heaps are bound again at once
+    assert!(forget_bound_state(l));
+    assert_eq!(f.count(host::SET_DESCRIPTOR_HEAPS), 2);
+    // a draw before the title binds a pipeline is dropped, not run with the upscale's pipeline
+    unsafe { method::<Draw>(l, 0x68)(l, 3, 1, 0, 0, 0) };
+    assert_eq!(f.count(host::DRAW_INDEXED), 0);
+    // the title's re-binds (identical to before) reach the host list
+    bind();
+    unsafe { method::<Draw>(l, 0x68)(l, 3, 1, 0, 0, 0) };
+    assert_eq!(f.count(host::SET_DESCRIPTOR_HEAPS), 2, "the heaps were already re-bound: this one repeats");
+    assert_eq!((f.count(host::SET_PIPELINE_STATE), f.count(host::SET_GRAPHICS_ROOT_TABLE), f.count(host::DRAW_INDEXED)), (2, 2, 1));
+    assert!(!forget_bound_state(std::ptr::null_mut()));
+    release(l);
+}
+
 fn rebuild_xlist_stats(l: Raw) -> crate::console::ListStats {
     crate::console::list::stats(l).expect("our list")
 }
