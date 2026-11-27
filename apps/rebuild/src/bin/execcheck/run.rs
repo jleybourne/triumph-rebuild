@@ -139,11 +139,12 @@ pub fn plan(p: &Prog) -> Result<Plan, String> {
             }
         }
         if u.shadow != 0 {
-            pl.notes.push("shadow stride = access size");
+            pl.notes.push("shadow stride = record end");
             if let Some(off) = u.byte_off {
                 let (_, base) = table_base[&u.user_data];
                 let slot = ((base * 32) as i64 + off as i64) as u32 / 32;
-                pl.strides.entry(slot).or_insert(u.shadow as u32);
+                let e = pl.strides.entry(slot).or_insert(0);
+                *e = (*e).max(u32::from(u.shadow).next_multiple_of(4));
             }
         }
     }
@@ -429,7 +430,7 @@ impl Diff {
 }
 
 /// Runs a compute program and the oracle's on every input set.
-pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path) -> Row {
+pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &[u32]) -> Row {
     let trace = std::env::var_os("REBUILD_EXEC_TRACE").is_some();
     let step = |s: &str| {
         if trace {
@@ -440,22 +441,30 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path) -> Row 
     if o.root_views > 0 {
         return row("untested", "the oracle binds root views".into(), String::new());
     }
-    if p.stage == "vs" {
-        return row("untested", "stage not run yet".into(), String::new());
-    }
     let pl = match plan(p) {
         Ok(pl) => pl,
         Err(e) => return row("untested", e, String::new()),
     };
     step(&format!("plan {:?}", p.uses));
-    let cs = p.stage == "cs";
+    let (cs, vsx) = (p.stage == "cs", p.stage == "vs");
     let ours_layout = StageLayout { user_data: true, shadow: true, samplers: p.immediate.clone(), compare: p.compare };
     let ours_root = if cs {
         RootDesc::compute(&ours_layout, layout::USER_DATA_DWORDS)
+    } else if vsx {
+        let mut r = RootDesc::graphics(&ours_layout, &StageLayout::default(), layout::USER_DATA_DWORDS);
+        r.flags |= 0x40; // ALLOW_STREAM_OUTPUT
+        r
     } else {
         RootDesc::graphics(&StageLayout::default(), &ours_layout, layout::USER_DATA_DWORDS)
     };
-    let oracle_root = oracle_root(&o.statics, &ours_root, if cs { Visibility::All } else { Visibility::Pixel });
+    let vis = if cs {
+        Visibility::All
+    } else if vsx {
+        Visibility::Vertex
+    } else {
+        Visibility::Pixel
+    };
+    let oracle_root = oracle_root(&o.statics, &ours_root, vis);
     let roots = [&ours_root, &oracle_root].map(|r| rebuild_pipelines::d3d::serialize(r).and_then(|b| g.root_signature(&b)));
     let (ours_rs, oracle_rs) = match roots {
         [Ok(a), Ok(b)] => (a, b),
@@ -464,8 +473,21 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path) -> Row 
     };
     step("roots");
     let targets = if cs { Vec::new() } else { super::ps::targets_of(&p.outputs) };
+    let mut vsetup = None;
     let pipelines = if cs {
         (g.compute(&ours_rs, &p.dxil), g.compute(&oracle_rs, &o.dxil))
+    } else if vsx {
+        let oracle_in = rebuild_shader::Container::parse(&o.dxil)
+            .ok()
+            .and_then(|c| c.part(rebuild_shader::FourCC::ISG1).map(|x| rebuild_shader::signature::parse(x.data).unwrap_or_default()))
+            .unwrap_or_default();
+        let st = match super::vs::setup(&p.inputs, &oracle_in, &p.outputs) {
+            Ok(st) => st,
+            Err(e) => return row("untested", e, String::new()),
+        };
+        let r = (super::vs::pipeline(g, &ours_rs, &p.dxil, &st), super::vs::pipeline(g, &oracle_rs, &o.dxil, &st));
+        vsetup = Some(st);
+        r
     } else {
         let vs = match super::ps::feed_vs(&p.src).and_then(|src| super::ps::compile_vs(&src, out, &p.hash)) {
             Ok(v) => v,
@@ -499,6 +521,11 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path) -> Row 
     let mut diff = Diff::default();
     let mut per_set = Vec::new();
     for set in 0..SETS {
+        if skip.contains(&set) {
+            per_set.push(format!("set{set} never finished"));
+            continue;
+        }
+        let _ = std::fs::write(out.join("current"), format!("{} {set}", p.hash));
         // one resource per slot (a dynamic region shares one per view)
         let mut bound: Vec<(Vec<u32>, Bound)> = Vec::new();
         let mut by_view: BTreeMap<View, usize> = BTreeMap::new();
@@ -518,10 +545,19 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path) -> Row 
                 Err(e) => return row("error", "input resource".into(), e),
             }
         }
-        let tres = match super::ps::make_targets(g, &targets, set) {
+        let mut tres = match super::ps::make_targets(g, &targets, set) {
             Ok(t) => t,
             Err(e) => return row("error", "render target".into(), e),
         };
+        if let Some(st) = &vsetup {
+            match super::vs::make(g, st, set) {
+                Ok((vb, so)) => {
+                    tres.push(vb);
+                    tres.push(so);
+                }
+                Err(e) => return row("error", "vertex buffers".into(), e),
+            }
+        }
         step("resources");
         g.clear_heaps();
         for (slots, b) in &bound {
@@ -550,6 +586,11 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path) -> Row 
                     l.SetComputeRoot32BitConstants(layout::param::CS_USER_DATA, 16, ud, 0);
                     l.SetComputeRootShaderResourceView(layout::param::CS_SHADOW, shadow.GetGPUVirtualAddress());
                     l.Dispatch(groups[0], groups[1], groups[2]);
+                } else if let Some(st) = &vsetup {
+                    l.SetGraphicsRootSignature(rs);
+                    l.SetGraphicsRoot32BitConstants(layout::param::VS_USER_DATA, 16, ud, 0);
+                    l.SetGraphicsRootShaderResourceView(layout::param::GFX_SHADOW, shadow.GetGPUVirtualAddress());
+                    super::vs::draw(g, st, &tres[0], &tres[1]);
                 } else {
                     l.SetGraphicsRootSignature(rs);
                     l.SetGraphicsRoot32BitConstants(layout::param::PS_USER_DATA, 16, ud, 0);

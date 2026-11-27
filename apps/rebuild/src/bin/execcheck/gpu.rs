@@ -159,7 +159,7 @@ impl Gpu {
                     }
                     let mut buf = vec![0u64; len.div_ceil(8)];
                     let m = buf.as_mut_ptr() as *mut D3D12_MESSAGE;
-                    if q.GetMessage(i, Some(m), &mut len).is_ok() && (*m).Severity.0 <= D3D12_MESSAGE_SEVERITY_WARNING.0 {
+                    if q.GetMessage(i, Some(m), &mut len).is_ok() && (*m).Severity.0 <= D3D12_MESSAGE_SEVERITY_ERROR.0 {
                         out.push(std::ffi::CStr::from_ptr((*m).pDescription as *const std::ffi::c_char).to_string_lossy().into_owned());
                     }
                 }

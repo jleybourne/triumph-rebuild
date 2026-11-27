@@ -40,6 +40,7 @@ use rebuild_sir::lift::res::{DescUse, Heap, View};
 mod gpu;
 mod ps;
 mod run;
+mod vs;
 
 fn arg(name: &str) -> Option<String> {
     let a: Vec<String> = std::env::args().collect();
@@ -378,13 +379,21 @@ fn main() {
             eprintln!("execcheck: {e}");
             std::process::exit(2);
         });
+        // input sets that never finished, by program (the supervisor's record): skipped
+        let mut hung: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+        for l in std::fs::read_to_string(out.join("hung.txt")).unwrap_or_default().lines() {
+            if let Some((h, k)) = l.split_once(' ') {
+                hung.entry(h.to_string()).or_default().extend(k.trim().parse::<u32>().ok());
+            }
+        }
         for p in progs.iter().filter(|p| !done.contains(&p.hash)) {
             measuring_wait();
             std::fs::write(out.join("current"), &p.hash).unwrap();
             let row = match oracle(&odir, &p.hash) {
                 Err(e) => Row { hash: p.hash.clone(), stage: p.stage, single: p.single, verdict: "untested", reason: e, detail: String::new() },
                 Ok(o) => {
-                    let mut r = run::program(&mut g, p, &o, &out);
+                    let skip = hung.get(&p.hash).cloned().unwrap_or_default();
+                    let mut r = run::program(&mut g, p, &o, &out, &skip);
                     if g.lost() && r.verdict != "crash" {
                         r.detail = format!("{}: {}", r.reason, r.detail);
                         r.verdict = "crash";
@@ -413,6 +422,7 @@ fn main() {
     // supervisor: the skips first, then workers until every program has a row
     if !flag("--resume") {
         let _ = std::fs::remove_file(&csv);
+        let _ = std::fs::remove_file(out.join("hung.txt"));
         let _ = std::fs::remove_file(out.join("current"));
     }
     {
@@ -436,10 +446,26 @@ fn main() {
             break;
         }
         // the worker died on a program: name it and go on
-        let cur = std::fs::read_to_string(out.join("current")).unwrap_or_default();
+        let cur_set = std::fs::read_to_string(out.join("current")).unwrap_or_default();
+        let (cur, set) = match cur_set.split_once(' ') {
+            Some((h, k)) => (h.to_string(), k.trim().parse::<u32>().ok()),
+            None => (cur_set.trim().to_string(), None),
+        };
         if cur.is_empty() {
             eprintln!("execcheck: worker failed with no program in hand ({st})");
             std::process::exit(1);
+        }
+        // an input set that never finished (a loop whose trip count comes from the data): skipped next time,
+        // unless every set has
+        if let (Some(4), Some(k)) = (st.code(), set) {
+            let path = out.join("hung.txt");
+            let mut h = std::fs::read_to_string(&path).unwrap_or_default();
+            h.push_str(&format!("{cur} {k}\n"));
+            std::fs::write(&path, &h).unwrap();
+            if h.lines().filter(|l| l.starts_with(&cur)).count() < run::SETS as usize {
+                let _ = std::fs::remove_file(out.join("current"));
+                continue;
+            }
         }
         let have = std::fs::read_to_string(&csv).unwrap_or_default();
         if !have.lines().any(|l| l.starts_with(&cur)) {
@@ -449,7 +475,7 @@ fn main() {
                 stage: p.map_or("?", |p| p.stage),
                 single: p.is_some_and(|p| p.single),
                 verdict: "crash",
-                reason: if st.code() == Some(4) { "no completion in 30 s".into() } else { "device lost".into() },
+                reason: if st.code() == Some(4) { "never finishes on any input set".into() } else { "device lost".into() },
                 detail: format!("{st}"),
             };
             let mut f = std::fs::OpenOptions::new().append(true).open(&csv).unwrap();

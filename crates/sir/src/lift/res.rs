@@ -97,8 +97,8 @@ pub struct DescUse {
     pub user_data: u8,
     pub byte_off: Option<i32>,
     pub view: View,
-    /// When the access also reads the descriptor's shadow-table entry (stride and record count): the bytes it
-    /// reads or writes per record (else 0).
+    /// When the access also reads the descriptor's shadow-table entry (stride and record count): where in the
+    /// record it ends (the instruction's constant offset plus the bytes it moves, at most 255; else 0).
     pub shadow: u8,
 }
 
@@ -298,7 +298,7 @@ impl Lifter<'_> {
         let soff = self.usrc(d, "soffset")?;
         let (idxen, offen) = (d.get("idxen")? == 1, d.get("offen")? == 1);
         let uav = store || self.desc_is_uav(rsrc);
-        self.use_desc(rsrc, if uav { View::RwRaw } else { View::Raw }, if idxen { n as u8 * 4 } else { 0 });
+        self.use_desc(rsrc, if uav { View::RwRaw } else { View::Raw }, if idxen { (d.get("offset")? + u32::from(n) * 4).min(255) as u8 } else { 0 });
         let vaddr = d.get("vaddr")? as u16;
         let mut addr = format!("{}u + {soff}", d.get("offset")?);
         // with idxen, vaddr is the index and vaddr + 1 the offset (when offen)
