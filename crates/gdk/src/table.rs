@@ -1,7 +1,7 @@
 //! G4: every (interface, slot) -> Rust function the lead wires into `QueryApiImpl`. The objects
 //! are built from these definitions, so the table and what the title calls cannot drift apart.
 
-use crate::areas::{queue, xgame, xnetworking, xpackage, xstore, xsystem, xuser};
+use crate::areas::{queue, xdisplay, xgame, xlocalstorage, xnetworking, xpackage, xstore, xsystem, xuser};
 use crate::object::InterfaceDef;
 
 pub static ALL: &[&InterfaceDef] = &[
@@ -17,6 +17,8 @@ pub static ALL: &[&InterfaceDef] = &[
     &xpackage::PACKAGE_IFACE,
     &xstore::STORE_IFACE,
     &xnetworking::NETWORKING_IFACE,
+    &xlocalstorage::LOCAL_STORAGE_IFACE,
+    &xdisplay::DISPLAY_IFACE,
 ];
 
 /// One row per implemented slot: area, provider, interface ids, offset, API name, arguments.

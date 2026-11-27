@@ -1,6 +1,5 @@
 //! Every runtime GUID we can name: the ones this crate serves, and the ones the fork's design names
-//! for areas not served here yet (display, capture, game saves, game UI, local storage, speech, the
-//! user's devices). For `gdkguids` and the G1 table.
+//! for areas not served here yet (shell, capture, game saves, game UI, speech, the user's devices). For `gdkguids` and the G1 table.
 
 use crate::guid::Guid;
 
@@ -28,8 +27,8 @@ pub static KNOWN: &[(Guid, &str, &str, bool)] = &[
     (Guid::parse("2d42fea5-e71d-4b76-97cd-c50afbb3ae5d"), "store", "iid with durables", true),
     (Guid::parse("37e56907-2f10-41e8-b72f-36edb185331a"), "networking", "provider (also an iid)", true),
     (Guid::parse("bf2346b2-39af-4658-b5ea-44713c7e83b3"), "networking", "iid", true),
-    (Guid::parse("03f0fe74-fdd9-4e5c-b630-f9339c47acc5"), "display (HDR)", "provider", false),
-    (Guid::parse("35f07670-706e-4bfb-9476-090798c5ebf3"), "display (HDR)", "iid", false),
+    (Guid::parse("03f0fe74-fdd9-4e5c-b630-f9339c47acc5"), "display (HDR)", "provider", true),
+    (Guid::parse("35f07670-706e-4bfb-9476-090798c5ebf3"), "display (HDR)", "iid", true),
     (Guid::parse("1b339674-328d-4283-a200-3171f18d3639"), "shell (URIs, deferrals)", "provider = iid", false),
     (Guid::parse("a4f1aee2-4bf1-4485-b008-a7c26d52ac27"), "capture", "provider", false),
     (Guid::parse("22e672d7-b4e3-406c-bd50-8f0d25236f9e"), "capture", "iid", false),
@@ -37,9 +36,9 @@ pub static KNOWN: &[(Guid, &str, &str, bool)] = &[
     (Guid::parse("1bfff3af-f14a-40a3-8e35-9ada906593f9"), "game save", "iid", false),
     (Guid::parse("dfcd4649-4ff8-4043-ba07-35d607df98b0"), "game UI", "provider", false),
     (Guid::parse("eaf669df-5542-4590-99a3-8dc061f837cc"), "game UI", "iid", false),
-    (Guid::parse("f4faf4d4-2d04-4fce-b3e0-474a713a3e84"), "local storage", "provider", false),
-    (Guid::parse("41a4e10c-5a7e-41d9-8c37-37bde62a07d6"), "local storage", "iid", false),
-    (Guid::parse("d29411df-0794-4553-8b27-95fc02d0f75d"), "local storage", "iid (older titles)", false),
+    (Guid::parse("f4faf4d4-2d04-4fce-b3e0-474a713a3e84"), "local storage", "provider", true),
+    (Guid::parse("41a4e10c-5a7e-41d9-8c37-37bde62a07d6"), "local storage", "iid", true),
+    (Guid::parse("d29411df-0794-4553-8b27-95fc02d0f75d"), "local storage", "iid (older titles)", true),
     (Guid::parse("3e241977-6237-41e9-8559-102c2d9983f1"), "accessibility / speech", "provider", false),
     (Guid::parse("d722b373-8c4d-4692-9e51-d6ad9b37aa7d"), "accessibility / speech", "iid", false),
 ];
