@@ -12,9 +12,16 @@
 //! valid object; the lists drop its dispatches (`ListStats::skipped`) and the run's report names it. The same
 //! holds for a description the stream reader refuses (mesh shaders, a console subobject of unknown size, ...):
 //! a valid object, counted by reason in the report.
+//!
+//! **The root seam** (`docs/design/root-seam.md`): each console program's root layout (which of the title's root
+//! parameters its user SGPRs hold) is read once per program hash at creation, from the bytecode the title
+//! passes, into a `UserMap` the lists use to write the title's root arguments in the program library's layout.
+//! A pipeline whose programs' layout cannot be read has no host pipeline for the lists (its draws are dropped and
+//! counted), never one bound in the wrong layout.
 #![allow(non_snake_case)]
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -25,9 +32,10 @@ use rebuild_pipelines::pool::{cpu_core_limit, default_threads, Handle, Pool};
 use rebuild_pipelines::ondemand::{self, OnDemand};
 use rebuild_pipelines::pso::{PsoCache, PsoCreator, Programs};
 use rebuild_pipelines::state::{Desc, Key};
-use rebuild_pipelines::stream::{self, Numbering, Parsed, Process, Refusal};
-use rebuild_pipelines::Stage;
-use rebuild_xlist::console::{HostPipeline, Raw};
+use rebuild_pipelines::layout::param;
+use rebuild_pipelines::stream::{self, Memory, Numbering, Parsed, Process, Refusal};
+use rebuild_pipelines::{rootmap, Stage};
+use rebuild_xlist::console::{HostPipeline, Raw, StageUserData, UserMap};
 use windows::core::{Interface, GUID};
 use windows::Win32::Graphics::Direct3D12::{ID3D12DeviceChild, ID3D12Object, ID3D12PipelineState};
 
@@ -48,6 +56,71 @@ static MESH: AtomicU64 = AtomicU64::new(0);
 static REFUSED: Mutex<BTreeMap<&'static str, u32>> = Mutex::new(BTreeMap::new());
 /// console stream subobjects skipped (known size, not read): first type -> count; each type is named once
 static SKIPPED: Mutex<BTreeMap<u32, u32>> = Mutex::new(BTreeMap::new());
+/// each program's user data (`None`: its root layout could not be read), by program hash
+static STAGES: Mutex<Option<HashMap<u64, Option<StageUserData>>>> = Mutex::new(None);
+/// every distinct map, kept for the run (the lists hold `&'static` ones)
+static MAPS: Mutex<Option<HashMap<UserMap, &'static UserMap>>> = Mutex::new(None);
+/// pipelines whose programs' root layout could not be read (no host pipeline for the lists)
+static UNMAPPED: AtomicU64 = AtomicU64::new(0);
+
+/// The user data of the program `bytes` (hash `hash`) at the library root parameter `param`, read once per hash.
+fn stage_user_data(hash: u64, bytes: &[u8], param: u32) -> Option<StageUserData> {
+    if let Some(s) = STAGES.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).get(&hash) {
+        return *s;
+    }
+    let s = rebuild_pipelines::translate::native_of(bytes).ok().and_then(|(p, _, _)| rootmap::stage(&p, param).ok());
+    STAGES.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(hash, s);
+    s
+}
+
+/// The one `'static` copy of `m`.
+fn intern(m: UserMap) -> &'static UserMap {
+    let mut maps = MAPS.lock().unwrap_or_else(|e| e.into_inner());
+    maps.get_or_insert_with(HashMap::new).entry(m).or_insert_with(|| Box::leak(Box::new(m)))
+}
+
+/// A compute pipeline's map, from its program's bytes.
+fn compute_map(cs: u64, bytes: &[u8]) -> Option<&'static UserMap> {
+    let m = stage_user_data(cs, bytes, param::CS_USER_DATA).map(|s| intern(UserMap::new(&[s], param::CS_SHADOW)));
+    if m.is_none() {
+        UNMAPPED.fetch_add(1, Ordering::Relaxed);
+    }
+    m
+}
+
+/// The title's memory, noting where each program a description names lies (to read its root layout).
+struct Capture {
+    inner: Process,
+    seen: RefCell<Vec<(u64, u64, usize)>>,
+}
+
+impl Capture {
+    /// # Safety
+    /// As [`Process::new`].
+    unsafe fn new() -> Capture {
+        Capture { inner: unsafe { Process::new() }, seen: RefCell::new(Vec::new()) }
+    }
+
+    /// The bytes of the program with hash `h` the description named.
+    fn program_bytes(&self, h: u64) -> Option<&[u8]> {
+        let &(_, addr, len) = self.seen.borrow().iter().find(|s| s.0 == h)?;
+        self.inner.bytes(addr, len)
+    }
+}
+
+impl Memory for Capture {
+    fn bytes(&self, addr: u64, len: usize) -> Option<&[u8]> {
+        self.inner.bytes(addr, len)
+    }
+    fn cstr(&self, addr: u64) -> Option<&[u8]> {
+        self.inner.cstr(addr)
+    }
+    fn program(&self, addr: u64, len: usize) -> Option<u64> {
+        let h = stream::program_hash(self.inner.bytes(addr, len)?)?;
+        self.seen.borrow_mut().push((h, addr, len));
+        Some(h)
+    }
+}
 
 /// The program library: `REBUILD_PIPELINES_LIB`, else `library.bin` in `REBUILD_PIPELINES_OUT` (the
 /// `pipelines build` output, default `D:\victory-data\pipelines`).
@@ -97,6 +170,8 @@ struct Pipeline {
     handle: Option<Handle>,
     /// the host root signature (borrowed from the program library's cache), once looked up
     root: AtomicUsize,
+    /// how the title's root arguments become its programs' user data (`None`: not known, so never bound)
+    user: Option<&'static UserMap>,
 }
 
 const SLOTS: usize = 16;
@@ -215,13 +290,14 @@ unsafe fn create_compute(desc: *const ComputeDesc, iid: *const GUID, out: *mut R
             None
         }
     };
-    unsafe { hand_out(key, handle, iid, out) }
+    let user = handle.and_then(|_| compute_map(cs, bytes));
+    unsafe { hand_out(key, handle, user, iid, out) }
 }
 
 /// The console object for a pipeline (with its pool handle, or none), answered as `iid` into `out`.
-unsafe fn hand_out(key: Key, handle: Option<Handle>, iid: *const GUID, out: *mut Raw) -> i32 {
+unsafe fn hand_out(key: Key, handle: Option<Handle>, user: Option<&'static UserMap>, iid: *const GUID, out: *mut Raw) -> i32 {
     CREATED.fetch_add(1, Ordering::Relaxed);
-    let p = Box::into_raw(Box::new(Pipeline { table: table().as_ptr(), bits: 0, refs: AtomicU32::new(1), key, handle, root: AtomicUsize::new(0) }));
+    let p = Box::into_raw(Box::new(Pipeline { table: table().as_ptr(), bits: 0, refs: AtomicU32::new(1), key, handle, root: AtomicUsize::new(0), user }));
     if out.is_null() {
         unsafe { release(p as Raw) };
         return 1; // S_FALSE: creation would succeed
@@ -257,8 +333,9 @@ fn console_sizes() -> &'static [(u32, usize)] {
     })
 }
 
-/// A graphics or compute description read: requested from the pool when its programs are in the library.
-fn request(parsed: Result<Parsed, Refusal>) -> (Key, Option<Handle>) {
+/// A graphics or compute description read: requested from the pool when its programs are in the library, with
+/// its programs' user-data map (read from the bytes `mem` saw).
+fn request(parsed: Result<Parsed, Refusal>, mem: &Capture) -> (Key, Option<Handle>, Option<&'static UserMap>) {
     let p = match parsed {
         Ok(p) => p,
         Err(r) => {
@@ -271,7 +348,7 @@ fn request(parsed: Result<Parsed, Refusal>) -> (Key, Option<Handle>) {
                 eprintln!("pipeline  no host pipeline: {r} (counted from now on)");
             }
             *n += 1;
-            return (Key { compute: false, shaders: [0, 0], state: 0 }, None);
+            return (Key { compute: false, shaders: [0, 0], state: 0 }, None, None);
         }
     };
     if p.skipped > 0 {
@@ -298,7 +375,28 @@ fn request(parsed: Result<Parsed, Refusal>) -> (Key, Option<Handle>) {
             *MISSING.lock().unwrap_or_else(|e| e.into_inner()).entry(h).or_insert(0) += 1;
         }
     }
-    (key, pool.filter(|_| all).map(|pool| pool.request(key, p.desc)))
+    let user = if all { user_map(&p.desc, mem) } else { None };
+    (key, pool.filter(|_| all).map(|pool| pool.request(key, p.desc)), user)
+}
+
+/// The user-data map of a description's programs (`None`, counted, when a program's root layout is unreadable).
+fn user_map(desc: &Desc, mem: &Capture) -> Option<&'static UserMap> {
+    let stage = |h: u64, param: u32| mem.program_bytes(h).and_then(|b| stage_user_data(h, b, param));
+    let m = match desc {
+        Desc::Compute { cs } => stage(*cs, param::CS_USER_DATA).map(|s| UserMap::new(&[s], param::CS_SHADOW)),
+        Desc::Graphics { vs, ps, .. } => {
+            let v = stage(*vs, param::VS_USER_DATA);
+            let p = match ps {
+                Some(ps) => stage(*ps, param::PS_USER_DATA),
+                None => Some(StageUserData { param: param::PS_USER_DATA, ..Default::default() }),
+            };
+            v.zip(p).map(|(v, p)| UserMap::new(&[v, p], param::GFX_SHADOW))
+        }
+    };
+    if m.is_none() {
+        UNMAPPED.fetch_add(1, Ordering::Relaxed);
+    }
+    m.map(intern)
 }
 
 /// `D3D12_PIPELINE_STATE_STREAM_DESC`.
@@ -318,8 +416,9 @@ pub unsafe extern "system" fn CreateGraphicsPipelineState(_this: Raw, desc: *con
     }
     // SAFETY: the title passes a whole description, and what it points at is live for the call
     let d = unsafe { std::slice::from_raw_parts(desc as *const u8, stream::graphics_desc::SIZE) };
-    let (key, handle) = request(stream::parse_graphics(d, &unsafe { Process::new() }));
-    unsafe { hand_out(key, handle, iid, out) }
+    let mem = unsafe { Capture::new() };
+    let (key, handle, user) = request(stream::parse_graphics(d, &mem), &mem);
+    unsafe { hand_out(key, handle, user, iid, out) }
 }
 
 /// 0x2b0 CreatePipelineState: a pipeline state stream, console subobject numbering.
@@ -330,14 +429,17 @@ pub unsafe extern "system" fn CreatePipelineState(_this: Raw, desc: *const c_voi
     }
     // SAFETY: the title passes `size` bytes of stream, and what it points at is live for the call
     let s = unsafe { std::slice::from_raw_parts(d.stream, d.size) };
-    let (key, handle) = request(stream::parse_stream(s, &unsafe { Process::new() }, Numbering::Console, console_sizes()));
-    unsafe { hand_out(key, handle, iid, out) }
+    let mem = unsafe { Capture::new() };
+    let (key, handle, user) = request(stream::parse_stream(s, &mem, Numbering::Console, console_sizes()), &mem);
+    unsafe { hand_out(key, handle, user, iid, out) }
 }
 
-/// The host pipeline of a console one, for the lists. Waits for the pool at a pipeline's first use.
+/// The host pipeline of a console one, for the lists. Waits for the pool at a pipeline's first use. A pipeline
+/// whose programs' root layout is not known has none: its draws are dropped rather than bound wrongly.
 pub fn host(console: Raw) -> Option<HostPipeline> {
     let p = of(console)?;
     let h = p.handle?;
+    let user = p.user?;
     let pool = pool()?;
     let pso = match pool.get(h) {
         Some(pso) => pso,
@@ -356,7 +458,7 @@ pub fn host(console: Raw) -> Option<HostPipeline> {
         root = r.as_raw() as usize;
         p.root.store(root, Ordering::Relaxed);
     }
-    Some(HostPipeline { pso: pso.as_raw(), root_signature: root as Raw, compute: p.key.compute })
+    Some(HostPipeline { pso: pso.as_raw(), root_signature: root as Raw, compute: p.key.compute, user: Some(user) })
 }
 
 /// One line for the run report (a second with the on-demand failures, when there are any).
@@ -367,13 +469,15 @@ pub fn report() -> String {
     let refused = list(REFUSED.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(r, n)| format!("{r} {n}")).collect());
     let skipped = list(SKIPPED.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(t, n)| format!("type {t} x{n}")).collect());
     let mut line = format!(
-        "pipelines {} created, {} graphics, {} mesh ({} programs with no pipeline: {}{}); no host pipeline: {refused}; console subobjects skipped: {skipped}; library {}",
+        "pipelines {} created, {} graphics, {} mesh ({} programs with no pipeline: {}{}); no host pipeline: {refused}; root layout unread {}; user-data maps {}; console subobjects skipped: {skipped}; library {}",
         CREATED.load(Ordering::Relaxed),
         GRAPHICS.load(Ordering::Relaxed),
         MESH.load(Ordering::Relaxed),
         missing.len(),
         first.join(" "),
         if missing.len() > first.len() { " ..." } else { "" },
+        UNMAPPED.load(Ordering::Relaxed),
+        MAPS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |m| m.len()),
         if pool().is_some() { "loaded" } else { "absent" }
     );
     if let Some(od) = pool().and_then(|p| p.creator().programs().ondemand()) {
