@@ -120,6 +120,8 @@ fn device_report() {
             LISTS.load(Relaxed), FOREIGN.load(Relaxed), REEXECUTED.load(Relaxed), BAD.load(Relaxed),
             rebuild_xlist::console::CLOSE_FAILED.load(Relaxed)
         );
+        let ir = &rebuild_xlist::console::INDIRECT_REFUSED;
+        println!("lists     {} indirect calls with no host signature on a graphics pipeline, {} on a compute one", ir[0].load(Relaxed), ir[1].load(Relaxed));
         println!("lists     {} draws and dispatches dropped: a library pipeline with no shadow table bound", rebuild_xlist::console::NO_SHADOW.load(Relaxed));
         println!("views     {} UAVs of resources without unordered access written as null views", rebuild_d3d12x::heap::NO_UAV.load(Relaxed));
     }

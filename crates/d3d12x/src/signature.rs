@@ -90,7 +90,10 @@ impl Resources {
             if d.NumArgumentDescs == 0 { Box::new([]) } else { unsafe { std::slice::from_raw_parts(d.pArgumentDescs, d.NumArgumentDescs as usize) }.into() };
         let host_root = crate::root::of(root).and_then(|r| r.host.clone());
         let host = ctx.host.command_signature(d, host_root.as_ref()).unwrap_or_else(|_| {
-            ctx.events.note("command signature: the host refuses it (arguments)", arguments.first().map_or(0, |a| a.Type.0 as u64));
+            // every argument's type, a byte each (first in the low byte), then the stride
+            let types = arguments.iter().take(6).enumerate().fold(0u64, |t, (i, a)| t | (u64::from(a.Type.0 as u8) << (8 * i)));
+            ctx.events.note("command signature: the host refuses it (argument types, low byte first)", types);
+            ctx.events.note("command signature: its stride and argument count", (u64::from(d.ByteStride) << 32) | u64::from(d.NumArgumentDescs));
             None
         });
         let c = Box::new(CommandSignature { head: Head::new(Object::CommandSignature, ctx), stride: d.ByteStride, arguments, host });

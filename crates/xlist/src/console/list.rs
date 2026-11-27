@@ -1098,6 +1098,8 @@ unsafe extern "system" fn execute_indirect(this: Raw, signature: Raw, max: u32, 
     s.stats.draws += 1;
     let Some(sig) = s.host.command_signature(signature) else {
         s.stats.refused += 1;
+        // which pipeline side such a signature runs with (a console-only argument type: dispatch or mesh?)
+        INDIRECT_REFUSED[s.sh.pso_side.min(1)].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return;
     };
     let Some(a) = s.resource(args) else {
@@ -1164,6 +1166,9 @@ unsafe extern "system" fn discard(this: Raw, resource: Raw, region: *const D3D12
 }
 
 // ---- fixed-function state ----
+
+/// ExecuteIndirect calls refused for want of a host signature, by the bound pipeline's side (graphics, compute).
+pub static INDIRECT_REFUSED: [std::sync::atomic::AtomicU64; 2] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
 
 /// Draws and dispatches dropped: a library pipeline with no shadow table bound.
 pub static NO_SHADOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

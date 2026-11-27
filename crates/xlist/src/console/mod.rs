@@ -51,7 +51,7 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
 
 pub use alloc::{create_allocator, host_allocator, upload_range};
-pub use list::{create_list, CLOSE_FAILED, NO_SHADOW, forget_bound_state, host_list, segments, skip, stats, sync_descriptors, HostList, ListStats, Segment};
+pub use list::{create_list, CLOSE_FAILED, INDIRECT_REFUSED, NO_SHADOW, forget_bound_state, host_list, segments, skip, stats, sync_descriptors, HostList, ListStats, Segment};
 pub use slots::{allocator_slots, list_slots, traps, Returns, SlotInfo, SlotKind, Trap, ALLOCATOR_SLOTS, LIST_SLOTS};
 
 /// A COM or console object pointer, borrowed: never released through this.
