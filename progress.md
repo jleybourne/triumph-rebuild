@@ -2,8 +2,8 @@
 
 ```
 overall   ████████████░░░░░░░░  61 %   work toward 30 fps, weighted by build step
-fps       frames 1-2 presented (black); runs paused after a GPU hang · target 30 · baseline 7.6
-updated   2026-11-27
+fps       frames 1-60 presented on WARP (black) · card runs paused · target 30 · baseline 7.6
+updated   2026-11-28
 ```
 
 The percentage is **work done**, not fps. Once Build 5 shows a frame, the measured fps goes on the second line
@@ -13,7 +13,7 @@ and becomes the number that counts.
 
 | track | progress | | note |
 |---|---|--:|---|
-| **Build 5 · first frame** | `███████████░░░░░░░░░` | 55 % | frames 1-2 presented; runs paused: a GPU hang once lists executed |
+| **Build 5 · first frame** | `███████████░░░░░░░░░` | 55 % | WARP: ~900 lists, frames 1-60 captured; cause of the hangs found (CBV/SRV slot type, fix in #37) |
 | shaders compiled (every class) | `███████░░░░░░░░░░░░░` | 9,415 / 25,694 | pixel 7,840 · vertex 987 · compute 588 · of them wave-wide 1,892 ([wave64](runs/build4-wave64.md)) |
 | shaders counted | `████░░░░░░░░░░░░░░░░` | 5,195 / 25,694 | bit-exact vs the oracle on WARP ([exec](runs/build4-exec.md)) |
 | runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
