@@ -65,8 +65,9 @@ impl rebuild_d3d12x::Events for Log {
 /// pipeline library and the pool in crates/pipelines), there are none.
 pub struct Pipelines;
 impl rebuild_xlist::console::PipelineSource for Pipelines {
-    fn pipeline(&self, _console: rebuild_xlist::console::Raw) -> Option<rebuild_xlist::console::HostPipeline> {
-        None
+    #[inline]
+    fn pipeline(&self, console: rebuild_xlist::console::Raw) -> Option<rebuild_xlist::console::HostPipeline> {
+        crate::pipeline::host(console)
     }
 }
 /// Slots with an implementation (ours or another crate's), by index.
@@ -439,7 +440,9 @@ fn vtable() -> &'static [usize; SLOTS] {
         t[0x278 / 8] = crate::frame::ScheduleFrameEventX as *const () as usize;
         t[0x280 / 8] = crate::frame::WaitFrameEventX as *const () as usize;
         t[0x288 / 8] = crate::frame::GetFrameStatisticsX as *const () as usize;
-        for off in [0x40, 0x48, 0x60, 0x120, 0x180, 0x248, 0x270, 0x278, 0x280, 0x288] {
+        t[0x58 / 8] = crate::pipeline::CreateComputePipelineState as *const () as usize;
+        t[0x1f0 / 8] = crate::pipeline::CreateComputePipelineStateX as *const () as usize;
+        for off in [0x40, 0x48, 0x58, 0x60, 0x120, 0x180, 0x1f0, 0x248, 0x270, 0x278, 0x280, 0x288] {
             WRITTEN[off / 8].store(true, Ordering::Relaxed);
         }
         // resources, heaps, views (crates/d3d12x)
@@ -484,6 +487,8 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
             }
         };
         let resources_ref = resources.clone();
+        // pipelines: the program library and the creation pool (workers start now)
+        crate::pipeline::start(&host);
         let _ = LIST_HOST.set(std::sync::Arc::new(rebuild_d3d12x::Host { resources: resources.clone(), pipelines: Pipelines }));
         rebuild_d3d12x::thunks::install(resources);
         // the console object: method table first, byte +0x18 = 1 (calls, not inline work)
@@ -502,6 +507,11 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
 }
 
 /// The host device as a raw COM pointer, for crates that take one.
+/// The device object the title holds.
+pub fn title_object() -> Option<*mut c_void> {
+    DEVICE.get().map(|d| d.object as *mut c_void)
+}
+
 pub fn host_raw() -> Option<*mut c_void> {
     DEVICE.get().map(|d| d.host.as_raw())
 }

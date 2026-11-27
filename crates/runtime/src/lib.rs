@@ -28,6 +28,7 @@ pub mod exports;
 #[cfg(windows)]
 pub mod modules;
 pub mod physical;
+pub mod pipeline;
 #[cfg(windows)]
 pub mod title;
 pub mod tls;

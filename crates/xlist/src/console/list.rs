@@ -58,6 +58,8 @@ pub struct ListStats {
     pub refused: u32,
     /// host lists the list was cut into beyond the first
     pub splits: u32,
+    /// draws and dispatches dropped because their pipeline has no host object (never run with the one before)
+    pub skipped: u32,
 }
 
 /// The list as the title sees it: [`TITLE_BYTES`] of console layout, then ours.
@@ -99,6 +101,8 @@ struct Consts {
 /// What is bound, in host terms (for replay) and console terms (for elision).
 struct Shadow {
     console_pipeline: Raw,
+    /// the console pipeline set last has no host pipeline: draws and dispatches are dropped until one does
+    pso_missing: bool,
     pso: Raw,
     /// 0 graphics, 1 compute
     root: [Raw; 2],
@@ -132,6 +136,7 @@ impl Shadow {
     fn new() -> Shadow {
         Shadow {
             console_pipeline: NULL,
+            pso_missing: false,
             pso: NULL,
             root: [NULL; 2],
             args: [[Arg::default(); 64]; 2],
@@ -299,11 +304,13 @@ impl ListState {
             self.stats.elided += 1;
             return;
         }
+        self.sh.console_pipeline = console;
         let Some(p) = self.host.pipeline(console) else {
             self.stats.refused += 1;
+            self.sh.pso_missing = true;
             return;
         };
-        self.sh.console_pipeline = console;
+        self.sh.pso_missing = false;
         if !p.root_signature.is_null() {
             self.set_root(p.compute as usize, p.root_signature);
         }
@@ -689,6 +696,10 @@ unsafe extern "system" fn reset_x(this: Raw, allocator: Raw, pipeline: Raw, _fla
 
 unsafe extern "system" fn draw_instanced(this: Raw, vertices: u32, instances: u32, first_vertex: u32, first_instance: u32) {
     let s = enter(this);
+    if s.sh.pso_missing {
+        s.stats.skipped += 1;
+        return;
+    }
     s.work();
     s.stats.draws += 1;
     call!(s.DrawInstanced(vertices, instances, first_vertex, first_instance));
@@ -696,6 +707,10 @@ unsafe extern "system" fn draw_instanced(this: Raw, vertices: u32, instances: u3
 
 unsafe extern "system" fn draw_indexed(this: Raw, indices: u32, instances: u32, first_index: u32, base_vertex: i32, first_instance: u32) {
     let s = enter(this);
+    if s.sh.pso_missing {
+        s.stats.skipped += 1;
+        return;
+    }
     s.work();
     s.stats.draws += 1;
     call!(s.DrawIndexedInstanced(indices, instances, first_index, base_vertex, first_instance));
@@ -703,6 +718,10 @@ unsafe extern "system" fn draw_indexed(this: Raw, indices: u32, instances: u32, 
 
 unsafe extern "system" fn dispatch(this: Raw, x: u32, y: u32, z: u32) {
     let s = enter(this);
+    if s.sh.pso_missing {
+        s.stats.skipped += 1;
+        return;
+    }
     s.work();
     s.stats.dispatches += 1;
     call!(s.Dispatch(x, y, z));
@@ -716,6 +735,10 @@ unsafe extern "system" fn dispatch_x(this: Raw, x: u32, y: u32, z: u32, _flags: 
 /// 0x408 DispatchMesh.
 unsafe extern "system" fn dispatch_mesh(this: Raw, x: u32, y: u32, z: u32) {
     let s = enter(this);
+    if s.sh.pso_missing {
+        s.stats.skipped += 1;
+        return;
+    }
     s.work();
     s.stats.dispatches += 1;
     match &s.current().l6 {
@@ -727,6 +750,10 @@ unsafe extern "system" fn dispatch_mesh(this: Raw, x: u32, y: u32, z: u32) {
 /// 0x1e8 ExecuteIndirect `(signature, max count, args, args offset, count buffer, count offset)`.
 unsafe extern "system" fn execute_indirect(this: Raw, signature: Raw, max: u32, args: Raw, args_offset: u64, count: Raw, count_offset: u64) {
     let s = enter(this);
+    if s.sh.pso_missing {
+        s.stats.skipped += 1;
+        return;
+    }
     s.work();
     s.stats.draws += 1;
     let Some(sig) = s.host.command_signature(signature) else {

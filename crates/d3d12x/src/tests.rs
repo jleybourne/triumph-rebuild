@@ -1118,3 +1118,35 @@ fn a_root_signature_keeps_its_blob_and_answers_as_a_device_child() {
     assert!(r.host_root_signature(rs).is_some());
     assert_eq!(release(rs), 0);
 }
+
+#[test]
+fn query_heaps_and_command_signatures_are_device_children_with_host_objects() {
+    let qd = D3D12_QUERY_HEAP_DESC { Type: D3D12_QUERY_HEAP_TYPE_TIMESTAMP, Count: 4, NodeMask: 0 };
+    let arg = D3D12_INDIRECT_ARGUMENT_DESC { Type: D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH, ..Default::default() };
+    let cd = D3D12_COMMAND_SIGNATURE_DESC { ByteStride: 12, NumArgumentDescs: 1, pArgumentDescs: &arg, NodeMask: 0 };
+    // the stand-in host: valid objects, no host side
+    let rig = rig();
+    let (mut q, mut c): (Raw, Raw) = (std::ptr::null_mut(), std::ptr::null_mut());
+    unsafe {
+        assert_eq!(rig.r.create_query_heap(&qd, &ID3D12QueryHeap::IID, &mut q), S_OK);
+        assert_eq!(rig.r.create_command_signature(&cd, std::ptr::null_mut(), &ID3D12CommandSignature::IID, &mut c), S_OK);
+    }
+    assert_eq!(crate::signature::query_heap_of(q).map(|h| h.desc.Count), Some(4));
+    assert_eq!(crate::signature::of(c).map(|s| (s.stride, s.arguments.len())), Some((12, 1)));
+    assert!(rig.r.host_command_signature(c).is_none());
+    assert_eq!((release(q), release(c)), (0, 0));
+
+    let mut d: Option<ID3D12Device> = None;
+    if unsafe { D3D12CreateDevice(None::<&windows::core::IUnknown>, windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0, &mut d) }.is_err() {
+        println!("skipped: no D3D12 device");
+        return;
+    }
+    let r = Resources::new(&d.unwrap(), Arc::new(PlainMemory::new(1 << 20)), Arc::new(Quiet)).unwrap();
+    unsafe {
+        assert_eq!(r.create_query_heap(&qd, &ID3D12QueryHeap::IID, &mut q), S_OK);
+        assert_eq!(r.create_command_signature(&cd, std::ptr::null_mut(), &ID3D12CommandSignature::IID, &mut c), S_OK);
+    }
+    assert!(r.host_query_heap(q).is_some());
+    assert!(r.host_command_signature(c).is_some());
+    assert_eq!((release(q), release(c)), (0, 0));
+}

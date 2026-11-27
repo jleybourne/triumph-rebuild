@@ -72,9 +72,52 @@ fn write_err(b: &[u8]) {
 fn name(out: &mut Buf, addr: u64) {
     if let Some((n, b, _)) = IMAGES.get().and_then(|v| v.iter().find(|(_, b, s)| addr >= *b && addr < b + s)) {
         let _ = write!(out, "{n}+{:#x}", addr - b);
-    } else {
+    } else if !host_symbol(out, addr) {
         let _ = write!(out, "{addr:#x}");
     }
+}
+
+/// A host address as `function+offset` from its module's symbols (DbgHelp, loaded at the first crash; ours have
+/// a PDB beside the exe). Diagnostic only: DbgHelp allocates.
+fn host_symbol(out: &mut Buf, addr: u64) -> bool {
+    use windows::Win32::System::Diagnostics::Debug::{SymFromAddr, SymInitialize, SymSetOptions, SYMBOL_INFO};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    static READY: OnceLock<bool> = OnceLock::new();
+    let ready = *READY.get_or_init(|| unsafe {
+        SymSetOptions(0x0000_0004 | 0x0000_0002 | 0x0000_0200); // DEFERRED_LOADS | UNDNAME | FAIL_CRITICAL_ERRORS
+        SymInitialize(GetCurrentProcess(), None, true).is_ok()
+    });
+    if !ready {
+        return false;
+    }
+    #[repr(C)]
+    struct Sym {
+        info: SYMBOL_INFO,
+        name: [u8; 256],
+    }
+    let mut s: Sym = unsafe { std::mem::zeroed() };
+    s.info.SizeOfStruct = std::mem::size_of::<SYMBOL_INFO>() as u32;
+    s.info.MaxNameLen = 256;
+    let mut disp = 0u64;
+    if unsafe { SymFromAddr(GetCurrentProcess(), addr, Some(&mut disp), &mut s.info) }.is_err() {
+        // no symbol: the module and the offset into it
+        use windows::Win32::System::LibraryLoader::{GetModuleFileNameA, GetModuleHandleExA, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT};
+        let mut m = windows::Win32::Foundation::HMODULE::default();
+        let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+        if unsafe { GetModuleHandleExA(flags, windows::core::PCSTR(addr as *const u8), &mut m) }.is_err() {
+            return false;
+        }
+        let mut path = [0u8; 260];
+        let n = unsafe { GetModuleFileNameA(m, &mut path) } as usize;
+        let file = path[..n].rsplit(|&b| b == b'\\').next().unwrap_or(&[]);
+        let _ = write!(out, "{}+{:#x}", String::from_utf8_lossy(file), addr - m.0 as u64);
+        return true;
+    }
+    let len = (s.info.NameLen as usize).min(255);
+    // SAFETY: the name continues past SYMBOL_INFO's one-byte array into `name`
+    let name = unsafe { std::slice::from_raw_parts(s.info.Name.as_ptr() as *const u8, len) };
+    let _ = write!(out, "{}+{disp:#x}", String::from_utf8_lossy(name));
+    true
 }
 
 fn in_title(addr: u64) -> bool {

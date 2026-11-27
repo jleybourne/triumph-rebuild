@@ -168,11 +168,20 @@ unsafe extern "system" fn root_signature(_: Raw, _mask: u32, blob: *const u8, si
     r().map_or(E_FAIL, |r| unsafe { r.create_root_signature(blob, size, iid, out) })
 }
 
+unsafe extern "system" fn query_heap(_: Raw, desc: *const D3D12_QUERY_HEAP_DESC, iid: *const GUID, out: *mut Raw) -> HRESULT {
+    r().map_or(E_FAIL, |r| unsafe { r.create_query_heap(desc, iid, out) })
+}
+unsafe extern "system" fn command_signature(_: Raw, desc: *const D3D12_COMMAND_SIGNATURE_DESC, root: Raw, iid: *const GUID, out: *mut Raw) -> HRESULT {
+    r().map_or(E_FAIL, |r| unsafe { r.create_command_signature(desc, root, iid, out) })
+}
+
 /// The device slots served here: `(offset, name, function)`.
 pub fn device_slots() -> Vec<(usize, &'static str, Fp)> {
     vec![
         (0x070, "CreateDescriptorHeap", Fp(create_descriptor_heap as *const ())),
         (0x080, "CreateRootSignature", Fp(root_signature as *const ())),
+        (0x138, "CreateQueryHeap", Fp(query_heap as *const ())),
+        (0x148, "CreateCommandSignature", Fp(command_signature as *const ())),
         (0x078, "GetDescriptorHandleIncrementSize", Fp(increment as *const ())),
         (0x088, "CreateConstantBufferView", Fp(cbv as *const ())),
         (0x090, "CreateShaderResourceView", Fp(srv as *const ())),

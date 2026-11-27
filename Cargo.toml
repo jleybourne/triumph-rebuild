@@ -11,3 +11,5 @@ version = "0.1.0"
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+# function names and lines in the PDB for crash reports (no effect on generated code)
+debug = "line-tables-only"

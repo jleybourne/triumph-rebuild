@@ -201,3 +201,14 @@ ebuild-oracle (backup in oracle-swapped-backup); `apps/rebuild/src/bin/oracle.rs
 - Diagnostics: crash.rs reports C++ throws (type + value + unwound chain), REBUILD_PEEK=addr,...,rsp+N,
   REBUILD_THREADS=1 (all threads unwound at a fatal). Scratch tool: xref/xrange.py (RIP-relative refs).
 - Tests 439 green. Progress 56 %.
+
+## 2026-11-27 night (later) — pipelines, query heaps, command signatures; the title loads content
+- runtime/src/pipeline.rs: 0x58/0x1f0 compute pipelines -> Pool<PsoCreator> (library D:\victory-data\pipelines\library.bin,
+  rebuilt in format 2 with `REBUILD_PIPELINES_IN=D:\victory-data\translate pipelines build`); hash = BLAKE3(container)[..8] BE.
+  Programs not in the library (BVH builder's 80) -> object with no host PSO; xlist drops draws/dispatches after it (skipped).
+- d3d12x: Object::QueryHeap (0x138), Object::CommandSignature (0x148, console arg type 0x69 refused by host -> no host).
+- cpu.rs: clzero detour (int3-padding cave + stub); heap.rs: descriptor copies validated (dst 0x3b7ad918130 unmapped: TODO find why).
+- Run now: 7.1 GiB loaded; list slot 0x3f0 traps; device 0x2b0 CreatePipelineState x6 traps; then AV read [0+0x68] at
+  exe+0xb5a5f8 (fn 0x140B5A5D0, rcx struct [0]=null, from exe+0x32764; game-side lookup returned null) on several threads.
+- Symbolize our frames offline: python scratch sym.py target\release\runtitle.exe <off>... (crash prints runtitle.exe+off).
+- Tests 445 green. Progress 57 %.

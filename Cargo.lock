@@ -2179,6 +2179,8 @@ dependencies = [
  "rebuild-dstorage",
  "rebuild-gdk",
  "rebuild-loader",
+ "rebuild-pipelines",
+ "rebuild-shader",
  "rebuild-vfs",
  "rebuild-winfiles",
  "rebuild-xg",

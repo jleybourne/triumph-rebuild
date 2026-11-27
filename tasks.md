@@ -123,7 +123,7 @@ decision 4.
 
 | state | work | closes when |
 |---|---|---|
-| doing | D3D12.X device, lists, PSOs, root signatures from title state: device, queues, fences, allocators, lists, resources, root signatures built; the title passes render setup; **next: compute pipelines (0x1f0) for the BVH builder**, graphics/stream pipelines (0x50/0x2b0) | creation path completes |
+| doing | D3D12.X device, lists, PSOs, root signatures from title state: device, queues, fences, allocators, lists, resources, root signatures built; query heaps, command signatures, compute pipelines (0x58/0x1f0, pool + library) built; the title loads content; **next: stream pipelines (0x2b0), graphics (0x50); on-demand translation for programs outside the library (the BVH builder's 80)** | creation path completes |
 | todo | console descriptor heaps (T#/V# slots shaders index), PC descriptors beside, dirty list (no scan) | a shader samples a texture made by title code |
 | todo | present / vsync / window | a non-black frame, captured to PNG |
 | todo | frame line: fps · ms · draws · dropped · upload MB · upload ms · translation ms · output res · upscaler/mode · vendor | one parseable line a second |

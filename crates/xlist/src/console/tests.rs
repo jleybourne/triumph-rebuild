@@ -333,7 +333,8 @@ fn calls_are_translated_into_the_host_list() {
             ConsoleBarrier { kind: 0, flags: 0, a: BAD, b: 0, c: 0 },
         ];
         method::<unsafe extern "system" fn(Raw, u32, *const ConsoleBarrier) -> u32>(l, 0xd0)(l, 2, b.as_ptr());
-        // ExecuteIndirect: signature and argument buffer mapped
+        // ExecuteIndirect: signature and argument buffer mapped (under a known pipeline: after BAD it would be dropped)
+        method::<unsafe extern "system" fn(Raw, Raw)>(l, 0xc8)(l, 0xAAA0 as Raw);
         method::<unsafe extern "system" fn(Raw, Raw, u32, Raw, u64, Raw, u64)>(l, 0x1e8)(l, 0x516 as Raw, 4, 0xA000 as Raw, 0x20, std::ptr::null_mut(), 0);
         // copy memory to memory: both addresses become (resource, offset)
         method::<unsafe extern "system" fn(Raw, u64, u64, u64, u32)>(l, 0x1f0)(l, MEM + 0x1000, MEM + 0x2000, 256, 0);
@@ -399,6 +400,35 @@ fn calls_are_translated_into_the_host_list() {
     assert!(host_list(l).is_some());
     assert_eq!(release(l), 0);
     assert_eq!(release(a), 0);
+}
+
+#[test]
+fn a_pipeline_with_no_host_object_drops_its_draws_and_never_reuses_the_one_before() {
+    let h = Arc::new(TestHost::default());
+    let (l, _a, _backend) = fake_list(h.clone());
+    type Draw = unsafe extern "system" fn(Raw, u32, u32, u32, i32, u32);
+    type Dispatch = unsafe extern "system" fn(Raw, u32, u32, u32);
+    unsafe {
+        method::<unsafe extern "system" fn(Raw, Raw)>(l, 0xc8)(l, 0xAAA0 as Raw);
+        method::<Draw>(l, 0x68)(l, 3, 1, 0, 0, 0);
+        // no host pipeline: the draw and the dispatch after it are dropped, not run with 0xAAA0's
+        method::<unsafe extern "system" fn(Raw, Raw)>(l, 0xc8)(l, BAD);
+        method::<Draw>(l, 0x68)(l, 3, 1, 0, 0, 0);
+        method::<Dispatch>(l, 0x70)(l, 1, 1, 1);
+        // a known pipeline again: draws run
+        method::<unsafe extern "system" fn(Raw, Raw)>(l, 0xc8)(l, 0xAAA0 as Raw);
+        method::<Draw>(l, 0x68)(l, 3, 1, 0, 0, 0);
+    }
+    let f = fake::host_of(l);
+    assert_eq!(f.count(host::DRAW_INDEXED), 2);
+    assert_eq!(f.count(host::DISPATCH), 0);
+    let st = rebuild_xlist_stats(l);
+    assert_eq!((st.skipped, st.refused), (2, 1));
+    release(l);
+}
+
+fn rebuild_xlist_stats(l: Raw) -> crate::console::ListStats {
+    crate::console::list::stats(l).expect("our list")
 }
 
 #[test]

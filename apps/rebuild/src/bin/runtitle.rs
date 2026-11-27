@@ -95,6 +95,7 @@ fn device_report() {
     if !REACHED.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
+    println!("{}", rebuild_runtime::pipeline::report());
     let t = rebuild_runtime::device::traps();
     println!("device    {} slots called that are not written yet (first call, ms after the device):", t.len());
     for (off, name, n, ms) in t {
@@ -138,6 +139,10 @@ fn device_report() {
     let p = rebuild_runtime::cpu::patched();
     if p > 0 {
         println!("cpu       {p} clwb sites patched to NOPs (the host CPU has no clwb)");
+    }
+    let (z, ze) = rebuild_runtime::cpu::clzero();
+    if z + ze > 0 {
+        println!("cpu       {z} clzero sites detoured, {ze} executions emulated (AMD-only; the host CPU has none)");
     }
     let (n, iid) = rebuild_runtime::device::unknown_iid();
     if n > 0 {

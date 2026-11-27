@@ -35,10 +35,14 @@ pub enum Object {
     Heap,
     DescriptorHeap,
     RootSignature,
+    QueryHeap,
+    CommandSignature,
 }
 
 impl Object {
-    pub const ALL: [Object; 4] = [Object::Resource, Object::Heap, Object::DescriptorHeap, Object::RootSignature];
+    pub const COUNT: usize = 6;
+    pub const ALL: [Object; Object::COUNT] =
+        [Object::Resource, Object::Heap, Object::DescriptorHeap, Object::RootSignature, Object::QueryHeap, Object::CommandSignature];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -46,6 +50,8 @@ impl Object {
             Object::Heap => "heap",
             Object::DescriptorHeap => "descriptor heap",
             Object::RootSignature => "root signature",
+            Object::QueryHeap => "query heap",
+            Object::CommandSignature => "command signature",
         }
     }
 
@@ -94,7 +100,7 @@ fn returns(object: Object, offset: usize) -> Returns {
     let own: &[usize] = match object {
         Object::Resource => &[0x40, 0x60, 0x68, 0x70, 0x78],
         Object::Heap => &[0x48],
-        Object::DescriptorHeap | Object::RootSignature => &[],
+        Object::DescriptorHeap | Object::RootSignature | Object::QueryHeap | Object::CommandSignature => &[],
     };
     if COMMON.contains(&offset) || own.contains(&offset) {
         Returns::Hresult
@@ -112,7 +118,7 @@ struct Cell {
 const CELL: Cell = Cell { count: AtomicU64::new(0), first_ns: AtomicU64::new(0) };
 #[allow(clippy::declare_interior_mutable_const)]
 const ROW: [Cell; SLOTS] = [CELL; SLOTS];
-static TRAPS: [[Cell; SLOTS]; 4] = [ROW; 4];
+static TRAPS: [[Cell; SLOTS]; Object::COUNT] = [ROW; Object::COUNT];
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 
 pub(crate) fn start_clock() {
@@ -167,6 +173,10 @@ traps!(DH_HR, trap_hr, 2);
 traps!(DH_VALUE, trap_value, 2);
 traps!(RS_HR, trap_hr, 3);
 traps!(RS_VALUE, trap_value, 3);
+traps!(QH_HR, trap_hr, 4);
+traps!(QH_VALUE, trap_value, 4);
+traps!(CS_HR, trap_hr, 5);
+traps!(CS_VALUE, trap_value, 5);
 
 /// A built table: the functions, and what each slot is.
 pub(crate) struct Table {
@@ -180,6 +190,8 @@ pub(crate) fn build(object: Object, implemented: &[(usize, &'static str, Fp)]) -
         Object::Heap => (&HEAP_HR, &HEAP_VALUE),
         Object::DescriptorHeap => (&DH_HR, &DH_VALUE),
         Object::RootSignature => (&RS_HR, &RS_VALUE),
+        Object::QueryHeap => (&QH_HR, &QH_VALUE),
+        Object::CommandSignature => (&CS_HR, &CS_VALUE),
     };
     let mut funcs = Vec::with_capacity(SLOTS);
     let mut info = Vec::with_capacity(SLOTS);

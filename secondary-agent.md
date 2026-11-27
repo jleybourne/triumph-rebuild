@@ -317,8 +317,8 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ```
 updated   2026-11-27 (late), second lead session: Build 3 closed (the title reaches D3D12XboxCreateDevice in 1.4 s);
           v0 shaders 2,834 / 2,881 compile; round 3 of the lanes running
-progress  56 % (progress.md) · shaders 0 / 25,694 counted (they count once the execution check matches the oracle)
-tests     439 green, 0 warnings: cargo test --release --no-fail-fast
+progress  57 % (progress.md) · shaders 0 / 25,694 counted (they count once the execution check matches the oracle)
+tests     445 green, 0 warnings: cargo test --release --no-fail-fast
 ```
 
 | build | state | where | proof |
@@ -330,7 +330,7 @@ tests     439 green, 0 warnings: cargo test --release --no-fail-fast
 | 2 upload ring + labels | ✅ | `crates/uma/src/{ring,labels}.rs`, `gputest --ring/--labels` | [ring](runs/build2-ring.md) · [labels](runs/build2-labels.md) |
 | 3 loader + runtime | ✅ the title reaches `D3D12XboxCreateDevice` in 1.4 s: GDK runtime ours, TLS slot 0 the title's (`runtime/src/tls.rs`), graphics placement no longer spins in the kernel; runs guarded (job, budget, watchdog, crash reporter) | `crates/loader`, `crates/runtime`, `runtitle` | [reached](runs/build3-reached.md) · [startup](runs/build3-startup.md) |
 | 4 shaders | 🔄 v0 set 2,834 / 2,881 compile (PS 1,791, VS 926, CS 117); interface vs the oracle: ≤ 42 diffs (lane S7 classifying); execution check, control flow, wave64 ⏳ | `crates/sir/src/lift*`, `translate ps/vs/cs`, [design](docs/design/shader-ir.md) | [ps](runs/build4-ps.md) · [vs](runs/build4-vs.md) · [cs](runs/build4-cs.md) · [oracle](runs/build4-oraclediff.md) |
-| 5 device, lists, present | 🔄 device setup and render setup pass (queues, fences, 439 allocators, 581 lists, resources, descriptors, DXGI, root signatures); D3D memory through the title's XMem hooks; next: compute pipelines 0x1f0, then Execute/Present | `crates/runtime/src/{device,queue,fence,dxgi}.rs`, `crates/d3d12x` | — |
+| 5 device, lists, present | 🔄 device setup and render setup pass (queues, fences, 439 allocators, 581 lists, resources, descriptors, DXGI, root signatures); D3D memory through the title's XMem hooks; compute pipelines, query heaps, command signatures; the title loads content; next: stream pipelines 0x2b0, Execute/Present | `crates/runtime/src/{device,queue,fence,dxgi}.rs`, `crates/d3d12x` | — |
 | 6 list translation | 🔄 core built | `crates/xlist` | Build 0 (b) |
 | 7 upscaler | ⏳ (plan decision 5 corrected) | — | — |
 | 8 pacing · 9 AMD testers | ⏳ | — | — |

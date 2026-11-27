@@ -4,8 +4,8 @@
 built around the right memory model from the first line, aiming at 30 frames a second.</b></p>
 
 <p align="center">
-  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-56%25-yellow?style=for-the-badge"></a>
-  <a href="progress.md"><img alt="frame" src="https://img.shields.io/badge/title-passes%20render%20setup-blue?style=for-the-badge"></a>
+  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-57%25-yellow?style=for-the-badge"></a>
+  <a href="progress.md"><img alt="frame" src="https://img.shields.io/badge/title-loads%20content-blue?style=for-the-badge"></a>
   <a href="tasks.md"><img alt="shaders" src="https://img.shields.io/badge/shaders-0%20%2F%2025%2C694-lightgrey?style=for-the-badge"></a>
   <a href="plan.md"><img alt="target" src="https://img.shields.io/badge/target-30%20fps-blue?style=for-the-badge"></a>
 </p>

@@ -1028,8 +1028,36 @@ impl Resources {
             return;
         }
         let len = u64::from(count) * step;
+        if !(self.descriptor_memory(src, len, false) && self.descriptor_memory(dst, len, true)) {
+            // a handle into memory nobody mapped: never write there; name the first ones
+            let n = self.inner.counters.bad_copies.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 4 {
+                self.inner.events.note("descriptor copy: destination handle outside mapped memory", dst);
+                self.inner.events.note("descriptor copy: its source handle", src);
+                self.inner.events.note("descriptor copy: descriptors x increment", (u64::from(count) << 32) | step);
+            }
+            return;
+        }
         unsafe { std::ptr::copy(src as *const u8, dst as *mut u8, len as usize) };
         self.sync(dst, len);
+    }
+
+    /// `len` bytes of descriptors at CPU handle `at` are memory we may read (or write): inside a console heap
+    /// (no system call), or committed title memory with that access.
+    fn descriptor_memory(&self, at: u64, len: u64, write: bool) -> bool {
+        let end = at.saturating_add(len);
+        if self.inner.heaps.read().unwrap_or_else(|e| e.into_inner()).iter().any(|r| r.start <= at && end <= r.end) {
+            return true;
+        }
+        use windows::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION};
+        let mut m = MEMORY_BASIC_INFORMATION::default();
+        // SAFETY: a query, no access
+        if unsafe { VirtualQuery(Some(at as *const _), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
+            return false;
+        }
+        let writable = m.Protect.0 & 0xCC != 0; // READWRITE, WRITECOPY, EXECUTE_READWRITE, EXECUTE_WRITECOPY
+        let readable = writable || m.Protect.0 & 0x22 != 0; // READONLY, EXECUTE_READ
+        m.State.0 == 0x1000 && (if write { writable } else { readable }) && end <= m.BaseAddress as u64 + m.RegionSize as u64
     }
 
     /// 0xb8 CopyDescriptors `(ndst, *dst starts, *dst sizes, nsrc, *src starts, *src sizes,

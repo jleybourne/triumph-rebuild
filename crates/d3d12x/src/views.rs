@@ -214,6 +214,14 @@ pub trait HostDevice: Send + Sync {
     /// A host resource for a console description already turned host (`desc`); `None` with no
     /// GPU (the stand-in).
     fn resource(&self, desc: &D3D12_RESOURCE_DESC, heap: D3D12_HEAP_TYPE, flags: D3D12_HEAP_FLAGS, clear: Option<&D3D12_CLEAR_VALUE>) -> Result<Option<ID3D12Resource>, HRESULT>;
+    /// A host query heap; `None` with no GPU (the stand-in).
+    fn query_heap(&self, _desc: &D3D12_QUERY_HEAP_DESC) -> Result<Option<ID3D12QueryHeap>, HRESULT> {
+        Ok(None)
+    }
+    /// A host command signature (`root`: the host root signature it changes, if any); `None` with no GPU.
+    fn command_signature(&self, _desc: &D3D12_COMMAND_SIGNATURE_DESC, _root: Option<&ID3D12RootSignature>) -> Result<Option<ID3D12CommandSignature>, HRESULT> {
+        Ok(None)
+    }
     /// A host root signature from a serialized blob; `None` with no GPU (the stand-in).
     fn root_signature(&self, _blob: &[u8]) -> Result<Option<ID3D12RootSignature>, HRESULT> {
         Ok(None)
@@ -374,6 +382,18 @@ impl HostDevice for DeviceHost {
         let state = if heap == D3D12_HEAP_TYPE_UPLOAD { D3D12_RESOURCE_STATE_GENERIC_READ } else if heap == D3D12_HEAP_TYPE_READBACK { D3D12_RESOURCE_STATE_COPY_DEST } else { D3D12_RESOURCE_STATE_COMMON };
         unsafe { self.device.CreateCommittedResource(&D3D12_HEAP_PROPERTIES { Type: heap, ..Default::default() }, flags, desc, state, clear.map(|c| c as *const _), &mut r) }.map_err(hr)?;
         Ok(r)
+    }
+
+    fn query_heap(&self, desc: &D3D12_QUERY_HEAP_DESC) -> Result<Option<ID3D12QueryHeap>, HRESULT> {
+        let mut q: Option<ID3D12QueryHeap> = None;
+        unsafe { self.device.CreateQueryHeap(desc, &mut q) }.map_err(hr)?;
+        Ok(q)
+    }
+
+    fn command_signature(&self, desc: &D3D12_COMMAND_SIGNATURE_DESC, root: Option<&ID3D12RootSignature>) -> Result<Option<ID3D12CommandSignature>, HRESULT> {
+        let mut c: Option<ID3D12CommandSignature> = None;
+        unsafe { self.device.CreateCommandSignature(desc, root, &mut c) }.map_err(hr)?;
+        Ok(c)
     }
 
     fn root_signature(&self, blob: &[u8]) -> Result<Option<ID3D12RootSignature>, HRESULT> {

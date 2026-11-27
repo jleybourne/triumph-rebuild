@@ -98,6 +98,7 @@ pub mod host {
     pub const CLOSE: usize = 9;
     pub const RESET: usize = 10;
     pub const DRAW_INDEXED: usize = 13;
+    pub const DISPATCH: usize = 14;
     pub const COPY_BUFFER_REGION: usize = 15;
     pub const SET_PIPELINE_STATE: usize = 25;
     pub const RESOURCE_BARRIER: usize = 26;

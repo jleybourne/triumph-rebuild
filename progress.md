@@ -1,11 +1,11 @@
 # Progress
 
 ```
-work toward 30 fps   [███████████░░░░░░░░░]  56 %
+work toward 30 fps   [███████████░░░░░░░░░]  57 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694 counted (oracle match needed) · v0 set 2,834 / 2,881 translate and compile (pixel 1,791 / 1,798, vertex 926 / 951, compute 117 / 132) · all decode byte-exact
 runtime functions    [███████████████████░]  69 / 73 ours bound (xmem, modules, memory, process, files, audio, DirectStorage, xg); 624 more bind to the host directly
 launcher track       [██████████████░░░░░░]  5 / 7 steps (C1 registry, L1-L4 launcher merged; C2 and L5 left); does not count toward the fps %
-measured fps         none yet — the title passes device setup and its render setup; Build 5: pipelines next
+measured fps         none yet — the title creates its pipelines and loads content (7 GiB); Build 5: stream pipelines, Execute, Present next
 baseline to beat     7.6 fps · 131.3 ms · ~4,500 draws · 356 dropped   (the layer being replaced)
 target               30 fps · 33.3 ms · same draws · stated output resolution and upscaler mode
 updated              2026-11-27
@@ -24,12 +24,12 @@ second row and is the number that counts.
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
 | 3 | PE loader + console runtime | 15 | 100 % | 15.0 | loader, vfs, input merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides (32 / 73 ours); the title's code runs; files (22), audio, DirectStorage, xg built in lanes and merged, binding next |
 | 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 65 % | 9.75 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; **front end closed**: 25,694 programs decode byte-exact, oracle set complete (PRs #5, #10) |
-| 5 | D3D12.X device, lists, descriptors, present | 12 | 25 % | 3.0 | device, queues, fences, allocators, lists, resources, descriptors, DXGI, root signatures built; the title passes device and render setup; pipelines, Execute and Present next |
+| 5 | D3D12.X device, lists, descriptors, present | 12 | 35 % | 4.2 | device, queues, fences, allocators, lists, resources, descriptors, DXGI, root signatures, query heaps, command signatures, compute pipelines (pool + library) built; the title loads content; stream pipelines, Execute and Present next |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 30 % | 3.0 | DLSS (PR #4) and FSR 3.1.6 (PR #8) standalone on a synthetic scene, one conventions table; wiring to the title's pass todo |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **56.55 ≈ 56 %** | |
+| | **total** | **100** | | **57.75 ≈ 57 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -82,6 +82,24 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 (night, later) — Build 5: compute pipelines, query heaps, command signatures; the title loads content
+
+```
+[███████████░░░░░░░░░]  57 %   (56.55 → 57.75: Build 5 25 % → 35 %)
+title       1.2 s+ past the device: 95 compute pipelines, 6 stream pipelines asked for, 7.1 GiB of content loaded
+measured fps   none yet (next: a null lookup in a game system at exe+0xb5a5f8; stream pipelines 0x2b0)
+```
+
+- **Built:** compute pipelines (device 0x58, 0x1f0) through the pipeline library and pool (`runtime/src/pipeline.rs`);
+  a program the library lacks (the BVH builder's 80) still gets a valid object, and the lists drop its dispatches
+  instead of running them with the previous pipeline (`ListStats::skipped`, a bug fixed in `crates/xlist`).
+- **Built:** query heaps (0x138) and command signatures (0x148) in `crates/d3d12x`; ones the host refuses (a console
+  argument type 0x69) are valid objects with no host side.
+- **Fixed:** `clzero` (AMD only, absent on the Intel host) detoured per site to a stub that zeroes the line, tested
+  end to end on the host; descriptor copies into unmapped memory refused and named, not written.
+- **Rebuilt:** the program library in format 2 (2,837 programs, 82 root signatures, 0.8 s).
+- **Diagnostics:** host frames in crash reports named by module and symbol (`debug = "line-tables-only"`). 445 tests green.
 
 ### 2026-11-27 (night) — Build 5: the title passes its render setup; root signatures; the BVH builder starts
 
