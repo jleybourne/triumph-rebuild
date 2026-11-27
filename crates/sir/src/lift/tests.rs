@@ -112,7 +112,7 @@ fn what_is_not_built_yet_is_named_not_guessed() {
     let p = program(&[vop1("v_mov_b32", 1, V + 0), vec![0xE000_0000 | op(Encoding::Mubuf, "buffer_load_dword") << 18, 0]]);
     let l = lift(&p);
     assert_eq!(l.unsupported.len(), 1);
-    assert_eq!(l.unsupported[0].1, "buffer_load_dword");
+    assert_eq!(l.unsupported[0].1, "buffer_load_dword (descriptor not traced)");
     assert!(l.body.contains("// not translated: buffer_load_dword"));
 }
 
