@@ -19,6 +19,7 @@ Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives w
 | **shader-cf** | v1: structurize reducible control flow in `crates/sir` (handed over by the lead during Build 5) | `agent/shader-cf` | `D:\Developer	riumph-rebuild-cf` | running |
 | **pipelines** | root signatures and the hash-keyed pipeline library (`crates/pipelines`) | `agent/pipelines` | `D:\Developer	riumph-rebuild-pipelines` | running |
 | **cmdlist** | Build 5/6: the D3D12.X command list and allocator objects (`crates/xlist`), interface for the lead's device | `agent/cmdlist` | `D:\Developer	riumph-rebuild-cmdlist` | running |
+| **profiles** | built-in test profiles (hardware tiers + stress) in `crates/config` and the launcher; a matrix writer (owner request) | `agent/profiles` | `D:\Developer	riumph-rebuild-profiles` | running |
 
 
 ### Round 2 (from 2026-11-27 14:15)
