@@ -9,8 +9,8 @@
 //!   [0, mirrored)           console index i at host index i. Buffers: a raw SRV of the
 //!                           descriptor's bytes; textures: the title's view
 //!   null_index (P)          a null view: translated shaders clamp indices to P
-//!   (P, views)              alternate views: a buffer descriptor's own kind (CBV, typed SRV,
-//!                           UAV), at the index its shadow entry names
+//!   (P, views)              alternate views: a buffer descriptor's own kind (typed SRV, UAV;
+//!                           never a CBV: CBVs are only raw SRVs here), at the index its shadow entry names
 //! shadow table            per console index 16 bytes (stride, records, alternate, lead), t0 space101
 //! shader-visible samplers host heap of min(count, Limits::samplers), index for index
 //! CPU-only views, RTV, DSV host heap of count, index for index (the natural view)
@@ -269,7 +269,8 @@ impl Inner {
     pub(crate) fn plan(&self, w: &[u32; 8], heap: &HeapState) -> Plan {
         match Record::decode(w) {
             None => Plan::null(),
-            Some(Record::NullCbv) => Plan { primary: HostView::NullBuffer, alt: Some(HostView::NullCbv), shadow: [0; 4], natural: HostView::NullCbv },
+            // a null raw SRV in a shader-visible heap (the slot type stays SRV, as for every buffer)
+            Some(Record::NullCbv) => Plan { primary: HostView::NullBuffer, alt: None, shadow: [0; 4], natural: HostView::NullCbv },
             Some(Record::Null { uav, dimension }) => {
                 let v = if uav {
                     HostView::NullUav
@@ -323,7 +324,11 @@ impl Inner {
         let primary = HostView::raw_srv(r.resource, start / 4, dwords);
         let host_va = r.host_va + (va - r.console);
         let (shadow, alt) = match kind {
-            // a constant buffer view: 256-byte aligned on the host, at most 64 KiB visible
+            // a constant buffer view: only the raw SRV in a shader-visible heap, no alternate. Console descriptors
+            // are untyped (the title may read a CBV slot as a buffer or a buffer slot as constants) and the host
+            // wants one type per slot, so translated shaders read every heap buffer as raw (`rebuild_sir` lift
+            // `buffer_load`) and no CBV is ever in a shader-visible heap. The CBV itself (256-byte aligned on the
+            // host, at most 64 KiB) is the natural view, for CPU-only heaps.
             None => {
                 let cbv = if host_va % 256 == 0 {
                     HostView::Cbv { va: host_va, size: (len.max(1).next_multiple_of(256)).min(65536) as u32 }
@@ -331,7 +336,7 @@ impl Inner {
                     heap.stats.misaligned.fetch_add(1, Ordering::Relaxed);
                     HostView::NullCbv
                 };
-                ([1, len as u32, 0, lead], Some(cbv))
+                return Plan { primary, alt: None, shadow: [1, len as u32, 0, lead], natural: cbv };
             }
             Some((BufferKind::Raw { uav }, _)) => ([1, len as u32, 0, lead], uav.then(|| self.raw_uav(&r, start, dwords))),
             Some((BufferKind::Structured { uav, stride }, n)) => ([stride, n, 0, lead], uav.then(|| self.raw_uav(&r, start, dwords))),

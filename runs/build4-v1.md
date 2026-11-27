@@ -55,3 +55,34 @@ at most 4 DXC processes at once).
   - small: `v_med3_f16` (6), irreducible control flow (3), `image_sample_o` (2), `image_gather4_l` (2), d16
     `image_load` (2), `ds_write_b16_d16_hi` (2), `global_load_ushort` (2), 16-bit integer VALU (2),
     `s_setpc_b64` (1), `v_interp_p2_f32` of a packed input (1).
+
+## After merging master (#36 wave64, #38 shaderexec) and the no-CBV policy (2026-11-28)
+
+`REBUILD_SHADERS=D:\victory-data\shaders.rpf REBUILD_TRANSLATE_OUT=D:\victory-data\translate-next cargo run --release
+--bin translate -- v2` (every class, 4 DXC processes, 4,244 s; 1.6 GB, 38,946 files), then `REBUILD_PIPELINES_IN=
+D:\victory-data\translate-next REBUILD_PIPELINES_OUT=D:\victory-data\pipelines-next cargo run --release --bin
+pipelines -- build` (12,981 programs, 0 refused, 265 own root signatures, 417.2 MB, 5.5 s).
+
+```text
+                         pixel              vertex            compute
+agnostic              6,733 / 6,789      1,448 / 1,654       618 / 685      8,799 / 9,128 (unchanged)
+readfirstlane w32        16 / 47              —              212 / 480
+readfirstlane w64     2,599 / 3,266        223 / 536         249 / 302      (not provably uniform)
+wave-wide w32           268 / 959             —               87 / 939
+wave-wide w64           349 / 995            1 / 1           178 / 276
+all                   9,965 / 12,056     1,672 / 2,191     1,344 / 2,682    12,981 (was 9,415 on master)
+```
+
+**Heap buffers are never CBVs on the host.** A WARP run with GPU-based validation stopped at "#939 Dispatch,
+Descriptor type doesn't match shader register type: Descriptor Type in Heap: SRV, Register Type: CBV" (then WARP
+faults in its JIT; a card page-faults). Console descriptors are untyped: the title may read as constants a slot it
+filled with a buffer SRV, or the other way round, and the host needs one type per slot. So:
+
+- the lifter reads every heap-sourced buffer raw: `s_buffer_load_dword*` and MUBUF loads use `ByteAddressBuffer` at
+  the console index plus the shadow entry's lead (or the `RWByteAddressBuffer` alternate when the title's range is
+  a UAV), same dword addressing, register offsets included; the index stays an SGPR value (no
+  `NonUniformResourceIndex`), so the loads stay scalar. No `ConstantBuffer<SirCb>` is emitted any more;
+- d3d12x writes a CBV (and a null CBV) into a shader-visible view heap as its raw SRV only (R32_TYPELESS, RAW, over
+  the same bytes from the 16-byte aligned start, the lead in the shadow table), with no alternate: no CBV is ever in
+  a shader-visible heap. CopyDescriptors and byte copies re-plan from the record, so they keep this. CPU-only heaps
+  keep the CBV as the natural view.

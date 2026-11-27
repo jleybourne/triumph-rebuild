@@ -490,10 +490,12 @@ fn buffer_views_are_the_heaps_alternates_and_raw_reads_apply_the_lead() {
     // the CBV, UAV and typed views are at the shadow entry's alternate (`(stride, records, alternate, lead)`)
     let layout = vec![RootParam { root: RootType::Table, table_offset_dwords: 0, sgprs: 1, base_register: 0, user_data: 0, slot: 0 }];
     let cbv = vec![UsedResource { kind: ResourceType::Cbv, root: RootType::Table, table_offset_dwords: 0, lower_bound: 0, stride: 0, dwords: 4, user_data: 0, slot: 0 }];
+    // a CBV range of a table: read as the raw SRV at the console index all the same (never a CBV from the heap)
     let l = lifted(&[smem("s_load_dwordx4", 8, 0, 0), smem("s_buffer_load_dwordx2", 12, 8, 16)], &layout, &cbv);
     assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
-    assert!(l.body.contains("ConstantBuffer<SirCb> c = ResourceDescriptorHeap[sir_shadow.Load(s8 * 16u + 8u)];"), "{}", l.body);
-    assert!(l.body.contains("s12 = c.d[1].x;"), "{}", l.body);
+    assert!(l.body.contains("ByteAddressBuffer c = ResourceDescriptorHeap[s8]; uint sir_ld = sir_shadow.Load(s8 * 16u + 12u);"), "{}", l.body);
+    assert!(l.body.contains("s12 = c.Load(sir_ld + 16u);") && l.body.contains("s13 = c.Load(sir_ld + 20u);"), "{}", l.body);
+    assert!(!l.body.contains("ConstantBuffer") && !l.uses_cb, "{}", l.body);
     compile(&l, "cov_alt_cbv");
 
     let (layout, used) = table();
@@ -516,4 +518,25 @@ fn buffer_views_are_the_heaps_alternates_and_raw_reads_apply_the_lead() {
     assert!(b.contains("uint4 sh = sir_shadow.Load4(s8 * 16u); RWByteAddressBuffer b = ResourceDescriptorHeap[sh.z]; if (true) b.Store(sh.w + v0 + 0u + 0u, v6);"), "{b}");
     assert!(b.contains("uint a = sh.w + 0u + sir_i * sir_st + sir_o;"), "{b}");
     compile(&l, "cov_alt_raw");
+}
+
+#[test]
+fn heap_buffer_loads_are_never_cbvs() {
+    // GBV on WARP: "Descriptor Type in Heap: SRV, Register Type: CBV". Console descriptors are untyped, so a slot
+    // the title's root signature calls a CBV may hold a buffer SRV: every heap-sourced buffer load is a raw read,
+    // with a register offset and through MUBUF alike
+    let layout = vec![RootParam { root: RootType::Table, table_offset_dwords: 0, sgprs: 1, base_register: 0, user_data: 0, slot: 0 }];
+    let cbv = vec![UsedResource { kind: ResourceType::Cbv, root: RootType::Table, table_offset_dwords: 0, lower_bound: 0, stride: 0, dwords: 4, user_data: 0, slot: 0 }];
+    let reg = build(&e::SMEM, Encoding::Smem, "s_buffer_load_dwordx4", &[("sbase", 4), ("sdata", 12), ("offset", 8), ("soffset", 20)]);
+    let mubuf = build(&e::MUBUF, Encoding::Mubuf, "buffer_load_dwordx2", &[("offen", 1), ("vaddr", 0), ("vdata", 4), ("srsrc", 2), ("soffset", 128)]);
+    let l = lifted(&[sop1("s_mov_b32", 20, 160), smem("s_load_dwordx4", 8, 0, 0), smem("s_buffer_load_dword", 16, 8, 4), reg, mubuf], &layout, &cbv);
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let b = &l.body;
+    assert!(!b.contains("ConstantBuffer") && !l.uses_cb, "{b}");
+    assert!(l.desc_uses.iter().all(|u| u.view != res::View::Cbv), "{:?}", l.desc_uses);
+    assert!(b.contains("s16 = c.Load(sir_ld + 4u);"), "{b}");
+    assert!(b.contains("uint b = (s20 + 8u) >> 2;") && b.contains("s15 = c.Load(sir_ld + ((b + 3u) << 2));"), "{b}");
+    assert!(b.contains("ByteAddressBuffer b = ResourceDescriptorHeap[s8]; uint4 sh = sir_shadow.Load4(s8 * 16u); uint2 r = b.Load2(sh.w + v0 + 0u + 0u);"), "{b}");
+    assert!(!b.contains("NonUniformResourceIndex"), "uniform heap indices stay uniform: {b}");
+    compile(&l, "cov_never_cbv");
 }

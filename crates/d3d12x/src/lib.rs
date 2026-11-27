@@ -32,7 +32,7 @@
 //! (textures), so a record survives being copied as bytes. A shader-visible host heap mirrors
 //! each console index at the same index (SM 6.6 heap indexing, plan decision 5); a buffer
 //! descriptor's view at its index is a **raw SRV** (every buffer slot reads as a
-//! `ByteAddressBuffer`, agents/shader.md S7-5) and its own kind (CBV, typed, UAV) sits at an
+//! `ByteAddressBuffer`, agents/shader.md S7-5; a CBV is only that) and its own kind (typed, UAV) sits at an
 //! alternate index the shadow table names. The shadow table (plan decision 9) holds, per index,
 //! `(stride, records, alternate index, raw-view lead bytes)`.
 

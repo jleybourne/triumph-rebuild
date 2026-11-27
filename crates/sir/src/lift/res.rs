@@ -235,8 +235,12 @@ impl Lifter<'_> {
         Some(())
     }
 
-    /// `s_buffer_load_dword*` through a buffer descriptor from the heap: a constant buffer (a CBV in the
-    /// title's table) or a raw buffer (an SRV).
+    /// `s_buffer_load_dword*` through a buffer descriptor from the heap: always a raw read (`ByteAddressBuffer`
+    /// at the console index, or the `RWByteAddressBuffer` alternate when the title's range says UAV), never a
+    /// CBV. Console descriptors are untyped: the title may read as constants a slot it filled with a buffer SRV
+    /// (or the other way round), and the host needs one type per slot, so every buffer slot of a shader-visible
+    /// heap holds a raw SRV (`crates/d3d12x`, CBVs included). The index stays an SGPR value (no
+    /// `NonUniformResourceIndex`), so the loads stay scalar.
     fn buffer_load(&mut self, name: &str, base: u8, dst: u8, off: i32, reg: Option<String>) -> Option<()> {
         let n: u8 = match name {
             "s_buffer_load_dword" => 1,
@@ -252,40 +256,27 @@ impl Lifter<'_> {
         if desc.heap != Heap::Resource || off < 0 {
             return None;
         }
-        let bind = self.bind?;
-        // a constant buffer when its range is one (an SRV range of the same table is a raw buffer); with no known
-        // offset, when the table holds any constant buffer
-        let cbv = match self.desc_kind(base) {
-            Some(k) => k == ResourceType::Cbv,
-            None => bind.used.iter().any(|u| u.user_data == desc.user_data && u.kind == ResourceType::Cbv),
-        };
-        let uav = !cbv && self.desc_is_uav(base);
-        self.use_desc(base, if cbv { View::Cbv } else if uav { View::RwRaw } else { View::Raw }, 0);
+        // never a CBV: the slot holds a raw SRV on the host whatever the title's root signature says
+        let uav = self.desc_is_uav(base);
+        self.use_desc(base, if uav { View::RwRaw } else { View::Raw }, 0);
         let dw = off as u32 / 4;
         let _ = writeln!(self.out.body, "    {{");
-        // with a register offset the dword index is dynamic: c.d[i >> 2][i & 3]
+        // with a register offset the dword index is dynamic
         if let Some(r) = &reg {
             let _ = writeln!(self.out.body, "        uint b = ({r} + {}u) >> 2;", off);
         }
         self.out.uses_shadow = true;
-        if cbv {
-            self.out.uses_cb = true;
-            let _ = writeln!(self.out.body, "        ConstantBuffer<SirCb> c = ResourceDescriptorHeap[{}];", alternate(base));
-        } else {
-            // a UAV is read through its own view (the alternate: a raw UAV over the same 16-byte aligned start)
-            let (rw, at) = if uav { ("RW", alternate(base)) } else { ("", format!("s{base}")) };
-            let _ = writeln!(self.out.body, "        {rw}ByteAddressBuffer c = ResourceDescriptorHeap[{at}]; uint sir_ld = {};", lead(base));
-        }
+        // a UAV is read through its own view (the alternate: a raw UAV over the same 16-byte aligned start)
+        let (rw, at) = if uav { ("RW", alternate(base)) } else { ("", format!("s{base}")) };
+        let _ = writeln!(self.out.body, "        {rw}ByteAddressBuffer c = ResourceDescriptorHeap[{at}]; uint sir_ld = {};", lead(base));
         for k in 0..n {
             let s = dst + k;
             self.out.sgprs.insert(s);
             self.wrote(s);
             let i = dw + u32::from(k);
-            let e = match (&reg, cbv) {
-                (None, true) => format!("c.d[{}].{}", i / 4, ["x", "y", "z", "w"][i as usize % 4]),
-                (None, false) => format!("c.Load(sir_ld + {}u)", i * 4),
-                (Some(_), true) => format!("c.d[(b + {k}u) >> 2][(b + {k}u) & 3]"),
-                (Some(_), false) => format!("c.Load(sir_ld + ((b + {k}u) << 2))"),
+            let e = match &reg {
+                None => format!("c.Load(sir_ld + {}u)", i * 4),
+                Some(_) => format!("c.Load(sir_ld + ((b + {k}u) << 2))"),
             };
             let _ = writeln!(self.out.body, "        s{s} = {e};");
         }
@@ -360,15 +351,9 @@ impl Lifter<'_> {
         let soff = self.usrc(d, "soffset")?;
         let (idxen, offen) = (d.get("idxen")? == 1, d.get("offen")? == 1);
         let uav = store || self.desc_is_uav(rsrc);
-        // a load through a constant buffer's descriptor (the title's root signature says CBV) reads the host's CBV
-        let cbv = !store && self.desc_kind(rsrc) == Some(ResourceType::Cbv);
-        let view = if cbv {
-            View::Cbv
-        } else if uav {
-            View::RwRaw
-        } else {
-            View::Raw
-        };
+        // never a CBV (as `buffer_load`): a load through a descriptor the title's root signature calls a CBV reads
+        // the raw SRV at its index
+        let view = if uav { View::RwRaw } else { View::Raw };
         self.use_desc(rsrc, view, if idxen { (d.get("offset")? + u32::from(n) * 4).min(255) as u8 } else { 0 });
         let vaddr = d.get("vaddr")? as u16;
         let mut addr = format!("{}u + {soff}", d.get("offset")?);
@@ -408,19 +393,11 @@ impl Lifter<'_> {
             let _ = writeln!(self.out.body, "    {{{sh} RWByteAddressBuffer b = ResourceDescriptorHeap[sh.z]; if ({cond}) b.{st}({addr}, {value}); }}");
             return Some(());
         }
-        if cbv {
-            // dword k of the access at byte a: row a / 16, component a / 4 % 4
-            self.out.uses_cb = true;
-            let parts: Vec<String> = (0..n).map(|k| format!("c.d[(a + {}u) >> 4][((a + {}u) >> 2) & 3]", 4 * k, 4 * k)).collect();
-            let r = if n == 1 { parts[0].clone() } else { format!("uint{n}({})", parts.join(", ")) };
-            let _ = writeln!(self.out.body, "    {{{sh} ConstantBuffer<SirCb> c = ResourceDescriptorHeap[sh.z]; uint a = {addr}; uint{ty} r = {r};{guard}");
+        // a UAV is read through its own view, the alternate
+        if uav {
+            let _ = writeln!(self.out.body, "    {{{sh} RWByteAddressBuffer b = ResourceDescriptorHeap[sh.z]; uint{ty} r = b.{load}({addr});{guard}");
         } else {
-            // a UAV is read through its own view, the alternate
-            if uav {
-                let _ = writeln!(self.out.body, "    {{{sh} RWByteAddressBuffer b = ResourceDescriptorHeap[sh.z]; uint{ty} r = b.{load}({addr});{guard}");
-            } else {
-                let _ = writeln!(self.out.body, "    {{ ByteAddressBuffer b = ResourceDescriptorHeap[s{rsrc}];{sh} uint{ty} r = b.{load}({addr});{guard}");
-            }
+            let _ = writeln!(self.out.body, "    {{ ByteAddressBuffer b = ResourceDescriptorHeap[s{rsrc}];{sh} uint{ty} r = b.{load}({addr});{guard}");
         }
         for k in 0..n {
             let e = if n == 1 { "r".to_string() } else { format!("r.{}", ["x", "y", "z", "w"][k as usize]) };
