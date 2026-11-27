@@ -17,6 +17,8 @@
 mod sampler;
 #[path = "../crash.rs"]
 mod crash;
+#[path = "../watch.rs"]
+mod watch;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -288,6 +290,8 @@ fn main() {
     }
     crash::install(title.images.iter().map(|l| (l.name.clone(), l.base, l.image.size_of_image as u64)).collect());
     crash::on_fatal(device_report);
+    // REBUILD_WATCH: who writes an address (hardware watchpoint on every thread)
+    watch::install();
     // console CPU instructions the host lacks (clwb), patched where the title uses them; first in the handler line
     rebuild_runtime::cpu::install();
     // the title's code assumes its TLS block is slot 0 (an exe's): give it slot 0 before any thread runs

@@ -478,3 +478,29 @@ fn unwind_into(out: &mut Buf, c: &mut windows::Win32::System::Diagnostics::Debug
         unsafe { RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, f, c, &mut data, &mut frame, None) };
     }
 }
+
+/// One report line in a fixed buffer, written with one call (for other diagnostics, e.g. `watch.rs`).
+pub struct Line(Buf);
+
+impl Line {
+    pub fn new() -> Line {
+        Line(Buf { b: [0; 2048], n: 0 })
+    }
+    pub fn flush(&mut self) {
+        let _ = self.0.write_str("\n");
+        write_err(&self.0.b[..self.0.n]);
+        self.0.n = 0;
+    }
+}
+
+impl std::fmt::Write for Line {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.0.write_str(s)
+    }
+}
+
+/// The unwound call chain of `ctx` (a copy), `frames` deep, onto `out`.
+pub fn chain(out: &mut Line, ctx: &windows::Win32::System::Diagnostics::Debug::CONTEXT, frames: usize) {
+    let mut c = *ctx;
+    unwind_into(&mut out.0, &mut c, frames);
+}
