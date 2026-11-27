@@ -186,12 +186,27 @@ impl Lifter<'_> {
 
     /// Image sampling, loads and stores (2D, 2D array, 3D, 1D) through heap descriptors.
     pub(super) fn mimg(&mut self, name: &str, d: &Decoded) -> Option<()> {
-        if !d.nsa.is_empty() || d.get("a16")? == 1 || d.get("d16")? == 1 || d.get("tfe")? == 1 || d.get("lwe")? == 1 || d.get("unorm")? == 1 {
+        // unorm only changes how a sampler filters: loads, stores and atomics address texels by integer anyway
+        let sampled = name.starts_with("image_sample") || name.starts_with("image_gather");
+        for (flag, why) in [("a16", "16-bit address"), ("d16", "16-bit data"), ("tfe", "tfe"), ("lwe", "lwe"), ("unorm", "unnormalised")] {
+            if d.get(flag)? == 1 && (flag != "unorm" || sampled) {
+                self.why = Some(why.into());
+                return None;
+            }
+        }
+        // NSA: address k is vaddr for k = 0, else the k-th extra register byte (padding bytes are never read)
+        let nsa: Vec<u16> = d.nsa.iter().map(|&b| b as u16).collect();
+        let rsrc = (d.get("srsrc")? * 4) as u8;
+        let Some(res) = self.descs.get(&rsrc).copied() else {
+            self.why = Some("descriptor not traced".into());
+            return None;
+        };
+        if res.heap != Heap::Resource || res.dwords < 4 {
+            self.why = Some("not a resource descriptor".into());
             return None;
         }
-        let rsrc = (d.get("srsrc")? * 4) as u8;
-        let res = *self.descs.get(&rsrc)?;
-        if res.heap != Heap::Resource || res.dwords < 4 {
+        if matches!(d.get("dim")?, 3 | 6 | 7) {
+            self.why = Some(["", "", "", "cube", "", "", "msaa", "msaa array"][d.get("dim")? as usize].into());
             return None;
         }
         let (ty, rw, ncoord) = match d.get("dim")? {
@@ -206,8 +221,9 @@ impl Lifter<'_> {
         let vdata = d.get("vdata")? as u16;
         let dmask = d.get("dmask")? as u8;
         let addr = |l: &mut Self, k: u16| -> String {
-            l.out.vgprs.insert(vaddr + k);
-            format!("v{}", vaddr + k)
+            let r = if nsa.is_empty() || k == 0 { vaddr + k } else { nsa.get(k as usize - 1).copied().unwrap_or(vaddr + k) };
+            l.out.vgprs.insert(r);
+            format!("v{r}")
         };
         let fcoord = |l: &mut Self, first: u16| -> String {
             let parts: Vec<String> = (0..ncoord as u16).map(|k| format!("asfloat({})", addr(l, first + k))).collect();
@@ -222,8 +238,15 @@ impl Lifter<'_> {
         };
         let sampler = |l: &mut Self| -> Option<String> {
             let s = (d.get("ssamp")? * 4) as u8;
-            let sd = *l.descs.get(&s)?;
-            (sd.heap == Heap::Sampler).then(|| format!("sir_smp{s}"))
+            let Some(sd) = l.descs.get(&s).copied() else {
+                l.why = Some("sampler not traced".into());
+                return None;
+            };
+            if sd.heap != Heap::Sampler {
+                l.why = Some("sampler is no sampler descriptor".into());
+                return None;
+            }
+            Some(format!("sir_smp{s}"))
         };
         let result = match name {
             "image_sample" => {

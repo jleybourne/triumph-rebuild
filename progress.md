@@ -1,8 +1,8 @@
 # Progress
 
 ```
-work toward 30 fps   [█████████░░░░░░░░░░░]  47 %
-shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694 counted (oracle match needed) · 1,360 / 1,798 v0 pixel shaders translate and compile · all decode byte-exact
+work toward 30 fps   [██████████░░░░░░░░░░]  48 %
+shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694 counted (oracle match needed) · 1,468 / 1,798 v0 pixel shaders translate and compile · all decode byte-exact
 runtime functions    [███████████████████░]  69 / 73 ours bound (xmem, modules, memory, process, files, audio, DirectStorage, xg); 624 more bind to the host directly
 launcher track       [██████████████░░░░░░]  5 / 7 steps (C1 registry, L1-L4 launcher merged; C2 and L5 left); does not count toward the fps %
 measured fps         none yet — the title has not rendered a frame on this code
@@ -22,14 +22,14 @@ second row and is the number that counts.
 | 0 | three answers before more code | 10 | 70 % | 7.0 | (a) upload **done**; (b) translation **done**: 0.43 µs a draw; (c) blocked until the title renders (moved to Build 5) |
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
-| 3 | PE loader + console runtime | 15 | 85 % | 12.75 | loader, vfs, input merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides (32 / 73 ours); the title's code runs; files (22), audio, DirectStorage, xg built in lanes and merged, binding next |
-| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 40 % | 6.0 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; **front end closed**: 25,694 programs decode byte-exact, oracle set complete (PRs #5, #10) |
+| 3 | PE loader + console runtime | 15 | 88 % | 13.2 | loader, vfs, input merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides (32 / 73 ours); the title's code runs; files (22), audio, DirectStorage, xg built in lanes and merged, binding next |
+| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 42 % | 6.3 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; **front end closed**: 25,694 programs decode byte-exact, oracle set complete (PRs #5, #10) |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 30 % | 3.0 | DLSS (PR #4) and FSR 3.1.6 (PR #8) standalone on a synthetic scene, one conventions table; wiring to the title's pass todo |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **47.55 ≈ 47 %** | |
+| | **total** | **100** | | **48.3 ≈ 48 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -82,6 +82,38 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Runs can no longer take the machine down (root cause found); five lane PRs merged; 1,468 pixel shaders compile
+
+```
+[██████████░░░░░░░░░░]  48 %   (was 47 %: +0.45 Build 3, +0.3 Build 4)
+runtime     GDK runtime (xgameruntime.dll) is ours; CRT (13) and F5 (5) file functions bound; LoadLibraryExA overridden
+safety      title memory budget, job object, watchdog, preflight; graphics placement no longer spins in the kernel
+shaders     0 / 25,694 counted (oracle match needed); v0 pixel shaders: 1,468 / 1,798 translated and compiled by DXC
+measured fps   none yet
+```
+
+- **Fixed (machine safety):** `runtitle` runs had to be ended by rebooting the PC, three times. Two causes, both ours:
+  1. Physical pages were pagefile sections committed in full, with no cap. The title asks for its whole console
+     budget, the system ran out of commit, and no program could start. Now a hard budget
+     (`crates/runtime/src/budget.rs`, min(12 GiB, RAM/3)), a job object around the run (killed on exit, own
+     commit capped), a lock-free watchdog, and a refusal to start when the system lacks commit.
+  2. **Root cause of the unkillable process:** graphics reservations were placed with `VirtualAlloc2` address
+     requirements plus write-watch. Into a 4 GiB window with no room, that call spins in the kernel instead of
+     failing; the thread cannot be terminated, so neither can the process. Now we find the gap with
+     `VirtualQuery` and ask for that exact address (`xmem::host::free_gap`). Measured with the new `exitprobe`
+     (no title, each pattern in a capped child): the 17th 256 MiB reservation spun for minutes before; after,
+     1 to 64 GiB all place, teardown ~5 ms each. This was also why the title looked like it waited at startup.
+- **Merged:** lane PRs #14 (launcher idle, U6), #15 (shader S6 `oraclediff`), #16 (files F4-F5), #17 (our XMA2
+  decoder, within 1 LSB of FFmpeg on all 1,818 streams), #18 (GDK runtime: task queues, XAsync, 11 interfaces).
+- **Built (Build 3):** `xgameruntime.dll` is served by `rebuild-gdk`. The title's GDK stub loads it with
+  `LoadLibraryExA`, which was not overridden, so it got the PC's own GDK runtime. The CRT file functions (13) and
+  F5 (5) are bound.
+- **Built (Build 4):** NSA image addressing, and `unorm` ignored where it has no effect (loads, stores, atomics).
+  Refusals now name the form. **1,468 of 1,798 v0 pixel shaders translate and compile (81.6 %, was 1,360).**
+  Next: immediate samplers (158 programs: the sampler is baked into the code as constants).
+- **Open:** the files test `f5_…match_the_host` gives 46 vs 45 since the reboot (host-side difference; for the
+  files lane). The title is not run again without the owner's OK.
 
 ### 2026-11-27 — Runtime bound to the merged lanes; settings never replaced; shader translation started: 427 pixel shaders compile
 

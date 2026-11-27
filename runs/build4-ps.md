@@ -33,6 +33,12 @@ translate and compile.** The rest are cube maps, 16-bit interpolation, NSA and 1
 | 16-bit interpolation (`v_interp_p1ll_f16`) | 6 |
 | `v_cmp_class_f32` | 1 |
 
+**Update, same day: NSA and unorm.** NSA image addressing (address registers named one by one) and `unorm` on
+loads, stores and atomics (it only changes filtering) are translated, and refusals name the form.
+**1,468 of 1,798 (81.6 %) now translate and compile.** The largest block left is immediate samplers (158
+programs): the sampler's descriptor is baked into the code as constants, and the root layout lists it as
+`ImmediateSampler`.
+
 **Not yet proven correct:** these compile, but a program counts toward the 25,694 only when the execution
 check matches the oracle's output (tasks.md, Build 4). Next: resource tracing (descriptor loads from root
 parameters, decision 5), which unblocks 1,364 of the remaining 1,371.
