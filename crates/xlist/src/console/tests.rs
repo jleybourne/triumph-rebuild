@@ -55,7 +55,7 @@ const MEM_HOST: u64 = 0x7_0000_0000;
 
 impl PipelineSource for TestHost {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
-        (console != BAD).then_some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: 0x5160 as Raw, compute: false, user: None })
+        (console != BAD).then_some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: 0x5160 as Raw, compute: false, user: None, topology: 0 })
     }
 }
 
@@ -632,8 +632,8 @@ impl PipelineSource for SeamHost {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
         let (g, c) = seam_maps();
         match console {
-            SEAM_GFX | SEAM_OTHER_GFX => Some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: LIB_GFX_ROOT, compute: false, user: Some(g) }),
-            SEAM_CS => Some(HostPipeline { pso: 0x8000_6C00 as Raw, root_signature: LIB_CS_ROOT, compute: true, user: Some(c) }),
+            SEAM_GFX | SEAM_OTHER_GFX => Some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: LIB_GFX_ROOT, compute: false, user: Some(g), topology: 0 }),
+            SEAM_CS => Some(HostPipeline { pso: 0x8000_6C00 as Raw, root_signature: LIB_CS_ROOT, compute: true, user: Some(c), topology: 0 }),
             _ => None,
         }
     }
@@ -851,7 +851,7 @@ impl BenchHost {
 impl PipelineSource for BenchHost {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
         let i = self.pipelines.get(console as u64)?;
-        Some(HostPipeline { pso: self.pso[i as usize] as Raw, root_signature: self.root as Raw, compute: false, user: self.user })
+        Some(HostPipeline { pso: self.pso[i as usize] as Raw, root_signature: self.root as Raw, compute: false, user: self.user, topology: 0 })
     }
 }
 

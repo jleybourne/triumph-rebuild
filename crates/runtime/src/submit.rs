@@ -90,6 +90,11 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
             for w in &seg.waits {
                 wait(&mut batch, w);
             }
+            // a list the host refused at Close: executing it would remove the device
+            if seg.list.bad.load(Ordering::Relaxed) {
+                BAD.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
             // a list still running from an earlier submission: wait for it (the console allows the re-execution, a
             // host queue refuses it, and a card can hang on it)
             let last = seg.list.executed_at.load(Ordering::Acquire);
@@ -118,6 +123,8 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
 
 /// Re-executions of a host list that had to wait for its earlier run.
 pub static REEXECUTED: AtomicU64 = AtomicU64::new(0);
+/// Host lists not executed because their Close failed.
+pub static BAD: AtomicU64 = AtomicU64::new(0);
 
 /// Wait (at most 2 s) until the queue's progress fence reaches `value`.
 fn wait_done(q: &Queue, value: u64) {

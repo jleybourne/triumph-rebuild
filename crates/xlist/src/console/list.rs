@@ -34,6 +34,8 @@ pub struct HostList {
     /// submission: a host list may not run again before that execution is done (the console lets titles do it).
     pub executed_on: std::sync::atomic::AtomicUsize,
     pub executed_at: std::sync::atomic::AtomicU64,
+    /// Its host Close failed (a call the host refused while recording): executing it would remove the device.
+    pub bad: std::sync::atomic::AtomicBool,
 }
 
 impl HostList {
@@ -46,6 +48,7 @@ impl HostList {
             list,
             executed_on: std::sync::atomic::AtomicUsize::new(0),
             executed_at: std::sync::atomic::AtomicU64::new(0),
+            bad: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -121,6 +124,8 @@ struct Shadow {
     console_pipeline: Raw,
     /// the console pipeline set last has no host pipeline: draws and dispatches are dropped until one does
     pso_missing: bool,
+    /// the bound PSO's topology type (0: not known)
+    pso_topology: u8,
     pso: Raw,
     /// the side (0 graphics, 1 compute) of the pipeline set last: what ExecuteIndirect runs
     pso_side: usize,
@@ -170,6 +175,7 @@ impl Shadow {
         Shadow {
             console_pipeline: NULL,
             pso_missing: false,
+            pso_topology: 0,
             pso: NULL,
             pso_side: 0,
             root: [NULL; 2],
@@ -377,6 +383,7 @@ impl ListState {
             return;
         };
         self.sh.pso_missing = false;
+        self.sh.pso_topology = p.topology;
         let k = p.compute as usize;
         self.sh.pso_side = k;
         if self.sh.user[k] != p.user {
@@ -395,11 +402,18 @@ impl ListState {
     /// Before a draw (`k` 0) or dispatch (`k` 1): if the title's root arguments, the pipeline, the heaps or the
     /// host list changed since the last one, write the bound translated pipeline's user data and shadow table
     /// in the library's layout. Only stages whose words changed are written. No lock, no allocation.
+    /// False when the pipeline's programs read a shadow table and no bound heap has one: its root SRV would be
+    /// address 0 (WARP faults on the read, a card page-faults and hangs), so the work is dropped (counted).
     #[inline]
-    fn bind_library(&mut self, k: usize) {
+    fn bind_library(&mut self, k: usize) -> bool {
         if self.sh.user_dirty[k] {
             self.write_library(k);
         }
+        if self.sh.user[k].is_some() && self.sh.shadow_va[k] == 0 {
+            NO_SHADOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return false;
+        }
+        true
     }
 
     fn write_library(&mut self, k: usize) {
@@ -516,12 +530,27 @@ impl ListState {
         }
         self.open = false;
         let hr = call!(self.Close());
+        // a list the host refused is never executed (the submit skips it); the title sees the console's S_OK
+        let failed = hr.is_err();
+        if let Some(seg) = self.segments.last() {
+            seg.list.bad.store(failed, std::sync::atomic::Ordering::Relaxed);
+        }
+        if failed {
+            CLOSE_FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         // the host allocator it recorded into is free for another list now
         let me = self as *const Self as usize;
         if let Some(a) = self.allocator() {
             a.release(me);
         }
-        hr
+        if failed { S_OK } else { hr }
+    }
+
+    /// A draw's topology outside the bound PSO's type: the host refuses it, so it is dropped.
+    #[inline]
+    fn topology_mismatch(&self) -> bool {
+        let want = self.sh.pso_topology;
+        want != 0 && self.sh.topology.is_some_and(|t| topology_type(t) != want)
     }
 
     /// Cut the list at a memory wait: the work so far is one host list, the rest another that
@@ -986,11 +1015,14 @@ pub mod skip {
 
 unsafe extern "system" fn draw_instanced(this: Raw, vertices: u32, instances: u32, first_vertex: u32, first_instance: u32) {
     let s = enter(this);
-    if s.sh.pso_missing || skip::on(skip::DRAW) {
+    if s.sh.pso_missing || skip::on(skip::DRAW) || s.topology_mismatch() {
         s.stats.skipped += 1;
         return;
     }
-    s.bind_library(0);
+    if !s.bind_library(0) {
+        s.stats.skipped += 1;
+        return;
+    }
     s.work();
     s.stats.draws += 1;
     call!(s.DrawInstanced(vertices, instances, first_vertex, first_instance));
@@ -998,11 +1030,14 @@ unsafe extern "system" fn draw_instanced(this: Raw, vertices: u32, instances: u3
 
 unsafe extern "system" fn draw_indexed(this: Raw, indices: u32, instances: u32, first_index: u32, base_vertex: i32, first_instance: u32) {
     let s = enter(this);
-    if s.sh.pso_missing || skip::on(skip::DRAW) {
+    if s.sh.pso_missing || skip::on(skip::DRAW) || s.topology_mismatch() {
         s.stats.skipped += 1;
         return;
     }
-    s.bind_library(0);
+    if !s.bind_library(0) {
+        s.stats.skipped += 1;
+        return;
+    }
     s.work();
     s.stats.draws += 1;
     call!(s.DrawIndexedInstanced(indices, instances, first_index, base_vertex, first_instance));
@@ -1015,7 +1050,10 @@ unsafe extern "system" fn dispatch(this: Raw, x: u32, y: u32, z: u32) {
         s.stats.skipped += 1;
         return;
     }
-    s.bind_library(1);
+    if !s.bind_library(1) {
+        s.stats.skipped += 1;
+        return;
+    }
     s.work();
     s.stats.dispatches += 1;
     call!(s.Dispatch(x, y, z));
@@ -1033,7 +1071,10 @@ unsafe extern "system" fn dispatch_mesh(this: Raw, x: u32, y: u32, z: u32) {
         s.stats.skipped += 1;
         return;
     }
-    s.bind_library(0);
+    if !s.bind_library(0) {
+        s.stats.skipped += 1;
+        return;
+    }
     s.work();
     s.stats.dispatches += 1;
     match &s.current().l6 {
@@ -1049,7 +1090,10 @@ unsafe extern "system" fn execute_indirect(this: Raw, signature: Raw, max: u32, 
         s.stats.skipped += 1;
         return;
     }
-    s.bind_library(s.sh.pso_side);
+    if !s.bind_library(s.sh.pso_side) {
+        s.stats.skipped += 1;
+        return;
+    }
     s.work();
     s.stats.draws += 1;
     let Some(sig) = s.host.command_signature(signature) else {
@@ -1120,6 +1164,23 @@ unsafe extern "system" fn discard(this: Raw, resource: Raw, region: *const D3D12
 }
 
 // ---- fixed-function state ----
+
+/// Draws and dispatches dropped: a library pipeline with no shadow table bound.
+pub static NO_SHADOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Host lists whose Close the host refused (never executed).
+pub static CLOSE_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The PSO topology type of a `D3D_PRIMITIVE_TOPOLOGY` (0 when undefined).
+fn topology_type(t: i32) -> u8 {
+    match t {
+        1 => 1,
+        2 | 3 | 10 | 11 => 2,
+        4 | 5 | 12 | 13 => 3,
+        33..=64 => 4,
+        _ => 0,
+    }
+}
 
 unsafe extern "system" fn topology(this: Raw, t: i32) {
     let s = enter(this);
