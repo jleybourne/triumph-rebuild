@@ -202,19 +202,30 @@ fn ps_report(walk: &census::Walk) {
                         continue;
                     };
                     let stage = rebuild_sir::lift::PsStage { inputs, input_addr: *input_addr };
-                    let l = rebuild_sir::lift::lift_stage(&insts, rebuild_sir::lift::Stage::Ps(stage));
+                    let bind = rebuild_sir::lift::Bindings { hw: p.native.stage, layout: &p.native.layout, used: &p.native.used };
+                    let l = rebuild_sir::lift::lift_stage(&insts, rebuild_sir::lift::Stage::Ps(stage), Some(bind));
                     let stage = rebuild_sir::lift::PsStage { inputs, input_addr: *input_addr };
                     let (Ok(isg1), Ok(osg1)) = (signature::parse(&p.isg1), signature::parse(&p.osg1)) else {
                         bump("signature unreadable".into());
                         continue;
                     };
-                    let src = match rebuild_sir::lift::ps_program(&l, &stage, &isg1, &osg1) {
+                    let src = match rebuild_sir::lift::ps_program(&l, &stage, Some(&bind), &isg1, &osg1) {
                         Ok(s) => s,
                         Err(e) => {
+                            // REBUILD_TRANSLATE_DUMP=<text>: write refused programs whose reason contains it
+                            if let Ok(want) = std::env::var("REBUILD_TRANSLATE_DUMP") {
+                                if e.contains(&want) {
+                                    let txt = format!(
+                                        "{e}\nlayout {:#?}\nused {:#?}\n--- lifted\n{}",
+                                        p.native.layout, p.native.used, l.body
+                                    );
+                                    let _ = std::fs::write(out.join(format!("{}.fail.txt", p.hash)), txt);
+                                }
+                            }
                             let key = if e.starts_with("untranslated") {
                                 e
-                            } else if e.starts_with("reads user data") {
-                                "reads user data (root parameters)".to_string()
+                            } else if e.contains("which is no user data") {
+                                "reads an SGPR that is no user data".to_string()
                             } else {
                                 format!("io: {e}")
                             };

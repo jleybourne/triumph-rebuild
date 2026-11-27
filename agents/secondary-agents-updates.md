@@ -152,7 +152,7 @@ From **gdk** (details in `agents/gdk.md` and `agents/gdk-slots.csv`, PR #18):
 71. Wiring: point `GetProcAddress(xgameruntime, name)` at `runtime::get_proc` (it answers the 6 names); `LoadLibraryExA("xgameruntime.dll")` needs a stand-in handle; add `rebuild_gdk::discovery::lines()` to the Build 3 discovery list.
 72. **Seven interfaces in the exe's table aren't served yet:** game save, local storage, game UI, HDR, shell, capture and speech. `QueryApiImpl` refuses and logs each. The fork served them, so **the title may expect game saves at start-up**. The lane proposes a **G5** for these before the first start-up run.
 73. Workspace 238 → 280 tests green, 0 warnings; the crate's tests passed 30/30 repeat runs, which caught and fixed a real block-reuse race.
-74. **The game folder is changing, and it's not a lane:** since ~14:27 a new versioned subfolder (a second, newer copy of the title's package, multi-GB files still growing at 14:40) is being written under `game_dir`, and one top-level data file under `data\ttdb\ui` changed at 14:19. No lane writes there. Every whole-folder "hash unchanged" check will fail until the folder settles; the owner has been asked.
+74. **The game folder is changing; the owner says it is their own download** (14:50): a newer copy of the title is being written into a subfolder under `game_dir` (since ~14:27, multi-GB files still growing). No lane writes there. Until it finishes, any whole-folder "hash unchanged" check will fail for that reason alone, so scope such checks to the files a test actually opens, or re-baseline once the download completes. The lead should say which copy lanes target once it lands.
 
 From the **coordinator** (launcher follow-up, PR #14):
 63. **The launcher was not idle**: it requested a frame every 16 ms, so it drew at 60 fps even in the background beside a running game. It's fixed in PR #14: a scene clock that only runs when the window is focused and visible with no game running, `repaint_after()` (idle waits for input; motion at 30 fps; a running game's log read 4x a second, 1x minimised), and minimise on launch with restore on exit (`REBUILD_LAUNCHER_STAY_OPEN=1` keeps it open). **Measured: 4.5 % of one core in the foreground while drifting, 0.0 % minimised, 86–87 MB.** U6 (Add tile fit) is in the same PR.
@@ -175,6 +175,7 @@ From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f)
 
 | time | event |
 |:--|:--|
+| 14:50 | Owner: the game-folder writes are their own download. Item 74 updated. |
 | 14:45 | **gdk** done: PR #18 open (G1–G4; G5 proposed for 7 unserved interfaces). **All round-2 lanes have handed back.** A newer copy of the title is being written into the game folder (not a lane); owner asked. |
 | 14:40 | **audio A5** done: PR #17 open (our own XMA2 decoder, ±1 LSB on all 1,818 streams, ~1,200× real time); vendored LGPL-derived tables flagged for the lead. |
 | 14:35 | **files F4–F5** done: PR #16 open (CRT 92/92, F5 46/46 against the host). |

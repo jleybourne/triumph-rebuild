@@ -210,17 +210,27 @@ fn as_type(comp: u32, e: &str) -> String {
 
 /// A whole pixel shader: inputs and outputs named by the container's signatures, the system values the
 /// input VGPRs carry, the lifted body. `Err` names what is missing.
-pub fn ps_program(l: &Lifted, ps: &PsStage, isg1: &[Element], osg1: &[Element]) -> Result<String, String> {
+pub fn ps_program(l: &Lifted, ps: &PsStage, bind: Option<&super::Bindings>, isg1: &[Element], osg1: &[Element]) -> Result<String, String> {
     if !l.unsupported.is_empty() {
         return Err(format!("untranslated: {}", l.unsupported[0].1));
     }
-    if let Some(s) = l.live_in.iter().next() {
-        return Err(format!("reads user data s{s} (root parameters not built yet)"));
+    // user SGPRs read before any write are root constants at b0; anything else read uninitialised is refused
+    let mut user_init = String::new();
+    for s in &l.live_in {
+        let k = bind.and_then(|b| b.user_dword(*s)).ok_or(format!("reads s{s}, which is no user data"))?;
+        if bind.is_some_and(|b| b.is_heap_base(*s)) {
+            let _ = writeln!(user_init, "    s{s} = 0u; // heap base: descriptors are indexed from the heap's start");
+            continue;
+        }
+        let _ = writeln!(user_init, "    s{s} = sir_ud[{}].{};", k / 4, ["x", "y", "z", "w"][k as usize % 4]);
     }
     if l.io.conflicts > 0 {
         return Err("an input read with two interpolation modes".into());
     }
     let mut s = String::from(super::PRELUDE);
+    if !user_init.is_empty() {
+        s.push_str("cbuffer SirUserData : register(b0, space0) { uint4 sir_ud[16]; };\n");
+    }
     // inputs: the rows read, plus position and front face if their VGPRs are used
     let vg = ps_vgprs(ps.input_addr);
     s.push_str("struct In {\n");
@@ -275,6 +285,7 @@ pub fn ps_program(l: &Lifted, ps: &PsStage, isg1: &[Element], osg1: &[Element]) 
     }
     s.push_str("};\nOut main(In i) {\n");
     s.push_str(&super::declarations(l));
+    s.push_str(&user_init);
     for t in l.io.exports.keys() {
         let _ = writeln!(s, "    uint4 o{t} = 0;");
     }
@@ -325,7 +336,7 @@ mod tests {
         let mut l = Lifted::default();
         l.live_in.insert(2);
         let ps = PsStage { inputs: &[], input_addr: 0 };
-        let e = ps_program(&l, &ps, &[], &[]).unwrap_err();
-        assert!(e.contains("user data s2"), "{e}");
+        let e = ps_program(&l, &ps, None, &[], &[]).unwrap_err();
+        assert!(e.contains("s2, which is no user data"), "{e}");
     }
 }

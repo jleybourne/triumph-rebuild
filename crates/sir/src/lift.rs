@@ -12,7 +12,7 @@
 //! modelled yet (named in `notes`). `v_fma_f32` / `v_fmac_f32` become `mad`, which DXIL lowers to a fused
 //! multiply-add (HLSL's `fma` is double-only, and doubles are slow on consumer GPUs).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use rebuild_shader::gfx10::enc::{self, Decoded, Src};
@@ -38,6 +38,8 @@ pub struct Lifted {
     /// inputs. A program with any is not complete until root parameters are built.
     pub live_in: BTreeSet<u8>,
     written: BTreeSet<u8>,
+    /// A constant buffer is read through the heap (`SirCb`).
+    pub uses_cb: bool,
 }
 
 /// Helper functions the statements call, emitted once per program.
@@ -57,6 +59,7 @@ uint sir_pkrtz(float a, float b) { return sir_f16_rtz(a) | (sir_f16_rtz(b) << 16
 // float -> int, saturating, NaN -> 0 (as the console)
 int sir_f2i(float x) { return isnan(x) ? 0 : (x >= 2147483647.0f ? 2147483647 : (x <= -2147483648.0f ? (int)0x80000000 : (int)x)); }
 uint sir_f2u(float x) { return isnan(x) ? 0 : (x >= 4294967295.0f ? 0xffffffff : (x <= 0.0f ? 0 : (uint)x)); }
+struct SirCb { uint4 d[4096]; };
 uint sir_bfe_u(uint v, uint off, uint w) { off &= 31; w &= 31; return w == 0 ? 0 : (v >> off) & ((1u << w) - 1); }
 int sir_bfe_i(int v, uint off, uint w) { off &= 31; w &= 31; return w == 0 ? 0 : (v << (32 - off - w)) >> (32 - w); }
 "#;
@@ -87,11 +90,22 @@ fn inline_bits(code: u16) -> String {
 }
 
 pub mod io;
+pub mod res;
 pub use io::{ps_program, PsStage, Stage};
+pub use res::Bindings;
 
 struct Lifter<'a> {
     out: Lifted,
     stage: Stage<'a>,
+    bind: Option<Bindings<'a>>,
+    /// SGPRs holding a loaded descriptor's heap index (its first dword)
+    descs: BTreeMap<u8, res::Desc>,
+    /// the other dwords of loaded descriptors (not data on the host)
+    desc_words: BTreeSet<u8>,
+    /// why the last instruction was refused, when a reason is known
+    why: Option<String>,
+    /// SGPRs whose value is derived from a descriptor table's offset (table's user-data dword)
+    table_of: BTreeMap<u8, u8>,
 }
 
 /// What an operand reads, as a `uint` expression; `None` if not translated yet.
@@ -99,6 +113,9 @@ impl Lifter<'_> {
     fn src(&mut self, code: u32, literal: Option<u32>) -> Option<String> {
         Some(match enc::src(code) {
             Src::Sgpr(n) => {
+                if self.descs.contains_key(&n) || self.desc_words.contains(&n) {
+                    return None; // a descriptor word read as data
+                }
                 self.out.sgprs.insert(n);
                 if !self.out.written.contains(&n) {
                     self.out.live_in.insert(n);
@@ -195,6 +212,8 @@ impl Lifter<'_> {
             Src::Sgpr(s) => {
                 self.out.sgprs.insert(s);
                 self.out.written.insert(s);
+                self.descs.remove(&s);
+                self.desc_words.remove(&s);
                 let _ = writeln!(self.out.body, "    s{s} = {expr};");
             }
             Src::M0 => {
@@ -220,6 +239,8 @@ impl Lifter<'_> {
             Encoding::Sopp => self.sopp(name),
             Encoding::Sop1 | Encoding::Sop2 | Encoding::Sopc | Encoding::Sopk => self.salu(name, &d),
             Encoding::Vintrp => self.interp(name, &d),
+            Encoding::Smem => self.smem(name, &d),
+            Encoding::Mimg => self.mimg(name, &d),
             Encoding::Exp => self.export(&d),
             Encoding::Vop1 | Encoding::Vop2 | Encoding::Vop3 | Encoding::Vopc => {
                 if d.extra.is_some() {
@@ -240,6 +261,52 @@ impl Lifter<'_> {
     }
 
     fn salu(&mut self, name: &str, d: &Decoded) -> Option<()> {
+        // which table (if any) the sources derive from: the destination derives from it too
+        let table = [d.get("ssrc0"), d.get("ssrc1")].into_iter().flatten().find_map(|c| match enc::src(c) {
+            Src::Sgpr(n) => self.table_origin(n),
+            _ => None,
+        });
+        let r = self.salu_inner(name, d);
+        if r.is_some() {
+            if let Some(Src::Sgpr(dst)) = d.get("sdst").map(enc::src) {
+                match table {
+                    Some(t) => {
+                        self.table_of.insert(dst, t);
+                    }
+                    None => {
+                        self.table_of.remove(&dst);
+                    }
+                }
+            }
+        }
+        r
+    }
+
+    /// The descriptor table or heap a value derives from (its user-data dword): the parameter's own user
+    /// SGPR (unwritten), or a value computed from one.
+    fn table_origin(&self, n: u8) -> Option<u8> {
+        if let Some(t) = self.table_of.get(&n) {
+            return Some(*t);
+        }
+        let b = self.bind?;
+        if self.out.written.contains(&n) {
+            return None;
+        }
+        b.layout
+            .iter()
+            .find(|p| {
+                b.hw.user_sgpr(p.user_data) == n
+                    && matches!(
+                        p.root,
+                        rebuild_shader::native::RootType::Table
+                            | rebuild_shader::native::RootType::ResourceHeap
+                            | rebuild_shader::native::RootType::SamplerHeap
+                    )
+            })
+            .map(|p| p.user_data)
+    }
+
+    fn salu_inner(&mut self, name: &str, d: &Decoded) -> Option<()> {
         let sdst = d.get("sdst");
         let a = |l: &mut Self| l.usrc(d, "ssrc0");
         let b = |l: &mut Self| l.usrc(d, "ssrc1");
@@ -720,15 +787,20 @@ fn fcmp(op: &str, a: &str, b: &str) -> Option<String> {
 
 /// Translates a straight-line program's instructions (no stage inputs or outputs).
 pub fn lift(insts: &[Instruction]) -> Lifted {
-    lift_stage(insts, Stage::None)
+    lift_stage(insts, Stage::None, None)
 }
 
-/// Translates a straight-line program of a given stage.
-pub fn lift_stage(insts: &[Instruction], stage: Stage) -> Lifted {
-    let mut l = Lifter { out: Lifted::default(), stage };
+/// Translates a straight-line program of a given stage, with its root parameters if known.
+pub fn lift_stage<'a>(insts: &[Instruction], stage: Stage<'a>, bind: Option<Bindings<'a>>) -> Lifted {
+    let mut l = Lifter { out: Lifted::default(), stage, bind, descs: BTreeMap::new(), desc_words: BTreeSet::new(), why: None, table_of: BTreeMap::new() };
     for i in insts {
+        l.why = None;
         if l.inst(i).is_none() {
-            l.out.unsupported.push((i.offset, i.name().unwrap_or("?").to_string()));
+            let n = i.name().unwrap_or("?").to_string();
+            l.out.unsupported.push((i.offset, match l.why.take() {
+                Some(w) => format!("{n} ({w})"),
+                None => n,
+            }));
             let _ = writeln!(l.out.body, "    // not translated: {}", i.name().unwrap_or("?"));
         }
     }

@@ -15,7 +15,15 @@
 - A program that reads user data (an SGPR read before any write: root constants, descriptor addresses) is
   refused, never run with zeros. None of the compiled ones reads any.
 
-**Measured on the v0 pixel shaders (1,798):**
+**Update, same day: resources.** User data arrives as root constants at `b0`. Descriptor loads from tables
+and from SM 6.6 heap parameters become heap indices (`ResourceDescriptorHeap[]`/`SamplerDescriptorHeap[]`),
+traced through the scalar arithmetic that computes them, register offsets included. `s_buffer_load` reads
+constant buffers or raw buffers, and `image_sample/_lz/_l/_b`, `image_load`, `image_store` and
+`image_gather4_lz` (1D, 2D, 3D, arrays) go through the heap. **1,360 of 1,798 v0 pixel shaders (75.6 %) now
+translate and compile.** The rest are cube maps, 16-bit interpolation, NSA and 16-bit image forms,
+`s_brev_b32`, `ds_swizzle` and a few others (`build4-ps.txt`).
+
+**First measurement, before resources (1,798 programs):**
 
 | result | programs |
 |:--|--:|

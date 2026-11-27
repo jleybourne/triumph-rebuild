@@ -1,8 +1,23 @@
 translate ps — v0 pixel shaders, lifted with IO and compiled by DXC (ps_6_6, -O3)
-programs  1798 · compiled 427 (23.7 %)
+programs  1798 · compiled 1360 (75.6 %)
 
   not compiled, by first reason          programs
-  untranslated: s_load_dwordx8                785
-  untranslated: s_load_dwordx4                579
-  untranslated: v_interp_p1ll_f16               6
+  untranslated: image_sample                  175
+  untranslated: v_interp_p1ll_f16              62
+  untranslated: s_brev_b32                     56
+  untranslated: image_sample_lz                44
+  untranslated: image_store                    44
+  untranslated: image_load                     15
+  reads an SGPR that is no user data            9
+  untranslated: ds_swizzle_b32                  9
+  untranslated: image_sample_l                  7
+  untranslated: v_cubema_f32                    6
+  untranslated: s_cselect_b64                   3
+  untranslated: buffer_load_dwordx3             1
+  untranslated: buffer_load_dwordx4             1
+  untranslated: buffer_store_dword              1
+  untranslated: image_atomic_or                 1
+  untranslated: image_gather4_lz                1
+  untranslated: s_lshl_b32                      1
+  untranslated: s_lshr_b32                      1
   untranslated: v_cmp_class_f32                 1
