@@ -38,7 +38,7 @@ impl Drop for Scratch {
     }
 }
 
-/// Deterministic bytes that compress about 2:1 (runs of a few values mixed with noise).
+/// Deterministic bytes that compress about 1.3:1 (runs of a few values mixed with noise).
 pub(crate) fn data(seed: u64, len: usize) -> Vec<u8> {
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let mut out = Vec::with_capacity(len);
@@ -502,4 +502,67 @@ fn d3_zlib_round_trip() {
     bad[100] ^= 0xff;
     assert!(inflate(&bad, &mut out).is_err());
     assert_eq!(inflate(b"\x00\x01garbage", &mut out), Err(InflateError::Corrupt));
+}
+
+#[cfg(windows)]
+mod write_watch {
+    use super::*;
+
+    const MEM_COMMIT: u32 = 0x1000;
+    const MEM_RESERVE: u32 = 0x2000;
+    const MEM_RELEASE: u32 = 0x8000;
+    const MEM_WRITE_WATCH: u32 = 0x20_0000;
+    const PAGE_READWRITE: u32 = 4;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn VirtualAlloc(addr: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
+        fn VirtualFree(addr: *mut c_void, size: usize, kind: u32) -> i32;
+        fn GetWriteWatch(flags: u32, base: *mut c_void, size: usize, addrs: *mut *mut c_void, count: *mut usize, gran: *mut u32) -> u32;
+    }
+
+    /// Pages of `[base, base + size)` written since the last call (flag 1 resets the watch).
+    fn written(base: *mut c_void, size: usize) -> usize {
+        let mut addrs = vec![std::ptr::null_mut(); size / 4096];
+        let (mut count, mut gran) = (addrs.len(), 0u32);
+        // SAFETY: a write-watched region we allocated; the array holds `count` entries.
+        let r = unsafe { GetWriteWatch(1, base, size, addrs.as_mut_ptr(), &mut count, &mut gran) };
+        assert_eq!(r, 0);
+        count
+    }
+
+    /// For the lead (agents/dstorage.md, item 3): does write-watch see what each kind of read writes?
+    #[test]
+    fn worker_writes_are_seen_by_write_watch() {
+        let s = Scratch::new("watch");
+        let body = data(21, 256 << 10);
+        let z = deflate(&body, 6);
+        std::fs::write(s.0.join("base/w.bin"), &body).unwrap();
+        std::fs::write(s.0.join("base/w.z"), &z).unwrap();
+        let f = setup(&s, 2, None);
+        let t = Title { factory: f.as_ptr() };
+        let (raw, packed) = (t.open("G:\\w.bin").unwrap(), t.open("G:\\w.z").unwrap());
+        let size = 1 << 20;
+        // SAFETY: a fresh reservation, freed below.
+        let base = unsafe { VirtualAlloc(std::ptr::null_mut(), size, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE) };
+        assert!(!base.is_null());
+        let q = t.queue(64, 0);
+        let array = t.status(2);
+        let mut seen = Vec::new();
+        for (i, (file, options, len)) in [(raw, 0, body.len()), (packed, ZLIB, z.len())].into_iter().enumerate() {
+            written(base, size);
+            enqueue(q, &read(options, base.cast(), body.len(), file, 0, len));
+            enqueue_status(q, array, i as u32);
+            submit(q);
+            assert_eq!(wait(array, i as u32), S_OK);
+            // SAFETY: the read above filled this many bytes.
+            assert!(unsafe { std::slice::from_raw_parts(base.cast::<u8>(), body.len()) } == &body[..]);
+            seen.push(written(base, size));
+        }
+        println!("write-watch pages seen of 64: plain read (ReadFile) {}, zlib {}", seen[0], seen[1]);
+        assert_eq!(seen, [64, 64], "4 KiB pages recorded for a 256 KiB destination");
+        close(q);
+        // SAFETY: allocated above.
+        unsafe { VirtualFree(base, 0, MEM_RELEASE) };
+    }
 }

@@ -11,7 +11,7 @@ use rebuild_dstorage::zlib::{deflate, inflate};
 use rebuild_dstorage::{Request, ZLIB};
 use rebuild_vfs::{ModSet, VfsBuilder};
 
-/// Same generator as the tests: about 2:1 under zlib.
+/// Same generator as the tests: about 1.3:1 under zlib (measured).
 fn data(seed: u64, len: usize) -> Vec<u8> {
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let mut out = Vec::with_capacity(len);
