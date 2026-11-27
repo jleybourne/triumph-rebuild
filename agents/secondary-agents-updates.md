@@ -12,7 +12,7 @@ Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives w
 |:--|:--|:--|:--|:--|:--|
 | **loader** | Build 3a (L1–L4), then L5 | `agent/loader` | `D:\Developer\triumph-rebuild-loader` | ✅ L1–L4 **merged** (#1); ✅ L5 **PR open** | [#7](https://github.com/jleybourne/triumph-rebuild/pull/7) |
 | **shader** | Build 4 front end (S1–S5) | `agent/shader`, `agent/shader-s5` | `D:\Developer\triumph-rebuild-shader` | ✅ **S1–S5 closed**: PR [#5](https://github.com/jleybourne/triumph-rebuild/pull/5) (S1–S4), PR [#10](https://github.com/jleybourne/triumph-rebuild/pull/10) (S5, stacked on #5: **merge #5 first**) | lane finished |
-| **launcher** | Triumph Launcher (U1–U5, library, per-game settings) | `agent/launcher` | `D:\Developer\triumph-rebuild-launcher` | 🔄 pass 3b good (font fixed: Phosphor had shadowed Latin letters; grain removed; hero, cards, smoke test; 148 tests; 42321bc). Last polish (hairline, title-bar scrim, reorder arrows, card alignment), then PR | 14:05 |
+| **launcher** | Triumph Launcher (U1–U5, library, per-game settings) | `agent/launcher` | `D:\Developer\triumph-rebuild-launcher` | ✅ **PR open** after 4 design passes (pass-4 screenshots in `D:\victory-data\launcher-shots\pass-4\`); 156 workspace tests | [#13](https://github.com/jleybourne/triumph-rebuild/pull/13) |
 | **vfs** | overlay file system (V1–V4) | `agent/vfs` | `D:\Developer\triumph-rebuild-vfs` | ✅ **merged** by the lead | [#3](https://github.com/jleybourne/triumph-rebuild/pull/3) (2 commits) |
 | **upscale** | DLSS and FSR backends, standalone (P1–P5) | `agent/upscale` → `agent/upscale-fsr` | `D:\Developer\triumph-rebuild-upscale` | ✅ P1, P2, P4, P5 **merged** (#4); ✅ **P3 FSR 3.1.6 done, PR open** | [#8](https://github.com/jleybourne/triumph-rebuild/pull/8) |
 | **input** | controller and keyboard (I1–I3) | `agent/input` | `D:\Developer\triumph-rebuild-input` | ✅ **merged** by the lead | [#2](https://github.com/jleybourne/triumph-rebuild/pull/2) (2 commits) |
@@ -126,6 +126,14 @@ From **files** (details in `agents/files.md`, PR #12):
 56. Wiring: `rebuild_winfiles::install(Files::new(vfs, r"G:\"))`, then `override_export(name)` in `HostResolver`'s override arm; read `discoveries()` with `modules::misses()`.
 57. vfs gaps: delete-on-close and delete or rename through a handle leave the index stale; directory attributes and a directory case change below the overlay are refused and logged; `CREATE_ALWAYS` over a base file drops its attributes.
 
+From **launcher** (details in the PR #13 body and `agents/launcher.md`):
+58. The PR body carries the per-game config layout and **8 registry and config proposals** for `crates/config` (per-game settings, never replaced; see items 23–25).
+59. One known nit: on the dashed Add tile, the subtitle is slightly wider than the dashed outline at 1280x800.
+
+60. **Config, which matters for the owner's "settings never replaced" rule:** `Config::parse` drops unknown keys, and `Config::set` stores nothing for a value equal to the default, so **a later change of default silently moves that user's value**. The launcher works around both; the layer's `crates/config` should keep explicit values and unknown keys and add a `schema` key.
+61. Proposed registry entries: `title.settings_source` (the title's `settings.xml` lives in its storage folder, not the game folder), `diagnostics.frame_log_path` (today `REBUILD_FRAME_LOG`), a per-setting `settings.xml` element name, and help text for `display.height` and `display.window`; plus supported titles listed in config rather than code.
+62. Smaller: `rebuild.exe` ignores `--config` until C2; the VRAM check uses a provisional 8 GiB until the owner sets the minimum spec; `crates/config/src/lib.rs:349` checks the same thing twice. System check on this PC: 8/8 pass (RTX 4070 Ti, driver 610.88, 11.7 GiB, tiled tier 4, SM 6.8, GPU upload heaps, DXC 10.0.26100).
+
 From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f):
 6. Lane `launcher` U5 says "launch the proofs (`gputest --bare`)", but section 2 says helpers never run `gputest`. The launcher lane was told to build U5's launch path against a fake child process in tests, and to run no `gputest` itself. Please say which you meant.
 7. Lane `upscale` P3 needs AMD's FidelityFX SDK. If it isn't already on disk, getting it is a download. The lane was told not to download without your say, and to do P1, P2, P4 and P5 first. For DLSS it was pointed at the Streamline SDK zip already in `D:\tools\dlss\download` (production `bin/x64`, extracted outside git) and the user-supplied `nvngx_dlss.dll` in `D:\tools\dlss`.
@@ -144,6 +152,7 @@ From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f)
 
 | time | event |
 |:--|:--|
+| 14:10 | **launcher** done: PR #13 open. **All 12 helper jobs have handed back**: 4 merged, PRs #5–#13 open for the lead. |
 | 14:15 | **files** done: PR #12 open (145/145 match the host). |
 | 14:12 | **audio** done: PR #11 open; XMA decoder choice flagged. |
 | 14:08 | **shader** done: S1–S5 closed; PR #5 (S1–S4) and PR #10 (S5, stacked: merge #5 first). |
