@@ -14,16 +14,16 @@ explicit OK for that run.** Test memory patterns with `exitprobe` (no title, cap
 ## Where things stand (one screen)
 
 ```
-progress    48 % toward 30 fps (progress.md)       measured fps: none yet (no title frame)
+progress    49 % toward 30 fps (progress.md)       measured fps: none yet (no title frame)
 built       Builds 0 (a, b), 1, 2 closed; Build 3 ~88 %; Build 4 core proven; Build 7 DLSS + FSR standalone
 title       loads and runs its entry; the startup "wait" was likely our graphics placement spinning in the
             kernel (fixed in 2a2af01); not re-run yet (needs the owner's OK)
 runtime     GDK runtime (xgameruntime.dll) ours via LoadLibraryExA override; files 32 + CRT 13 bound
 lanes       round 1 and round 2 all merged (#1-#18); no lane running
 tests       311 green (one files F5 host-comparison test 46 vs 45 since the reboot: for the files lane)
-translate   `translate ps` over D:\victory-data\shaders.rpf: 1,748 / 1,798 v0 pixel shaders compile (97.2 %);
+translate   `translate ps` over D:\victory-data\shaders.rpf: 1,782 / 1,798 v0 pixel shaders compile (99.1 %);
             immediate samplers decode to static samplers (sir::sampler, space100: Build 5 must add them to
-            the root signature); next: the last 50 (samplers 14, a16 images 11, ds_swizzle 9, cube 6), then vertex shaders
+            the root signature); next: cube maps (6) and ten single forms, then vertex shaders
 ```
 
 ## Who you are and how the owner works

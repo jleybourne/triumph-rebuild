@@ -218,6 +218,28 @@ impl Lifter<'_> {
         Some(())
     }
 
+    /// `ds_swizzle_b32`: a lane reads another lane's value. Quad mode (offset bit 15): lane `i` of each quad
+    /// reads the lane the 2-bit field `i` names, as four `QuadReadLaneAt` with constant lanes. Bitmask mode:
+    /// lane `((id & and) | or) ^ xor` within each 32 lanes, as `WaveReadLaneAt`.
+    fn swizzle(&mut self, d: &Decoded) -> Option<()> {
+        let offset = d.get("offset0")? | d.get("offset1")? << 8;
+        let (src, dst) = (d.get("addr")? as u16, d.get("vdst")? as u16);
+        self.out.vgprs.insert(src);
+        let e = if offset & 0x8000 != 0 {
+            let q: Vec<String> = (0..4).map(|k| format!("QuadReadLaneAt(v{src}, {})", offset >> (2 * k) & 3)).collect();
+            format!("{{ uint q[4] = {{ {} }}; r = q[WaveGetLaneIndex() & 3]; }}", q.join(", "))
+        } else {
+            let (and, or, xor) = (offset & 0x1f, offset >> 5 & 0x1f, offset >> 10 & 0x1f);
+            self.out.notes.insert("ds_swizzle bitmask mode: WaveReadLaneAt with a per-lane index");
+            format!("{{ uint id = WaveGetLaneIndex(); r = WaveReadLaneAt(v{src}, (id & ~31u) | ((((id & 31u) & {and}u) | {or}u) ^ {xor}u)); }}")
+        };
+        // every lane takes part in the read; only active lanes write
+        self.line(format!("{{ uint r; {e}"));
+        self.vwrite_raw(dst, "r".into());
+        self.line("}".into());
+        Some(())
+    }
+
     fn usrc(&mut self, d: &Decoded, field: &str) -> Option<String> {
         let code = d.get(field)?;
         self.src(code, d.literal)
@@ -236,6 +258,9 @@ impl Lifter<'_> {
 
     fn mask_name(&mut self, n: u8) -> String {
         self.out.masks.insert(n);
+        // the pair holds a lane mask from here on (or is read as one): not a known constant any more
+        self.consts.remove(&n);
+        self.consts.remove(&(n + 1));
         if n == 106 { "vcc".into() } else { format!("m{n}") }
     }
 
@@ -318,6 +343,7 @@ impl Lifter<'_> {
             Encoding::Mimg => self.mimg(name, &d),
             Encoding::Exp => self.export(&d),
             Encoding::Vop3p => self.vop3p(name, &d),
+            Encoding::Ds if name == "ds_swizzle_b32" => self.swizzle(&d),
             Encoding::Vop1 | Encoding::Vop2 | Encoding::Vop3 | Encoding::Vopc => {
                 if d.extra.is_some() {
                     return None; // SDWA / DPP: not yet

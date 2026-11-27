@@ -196,8 +196,11 @@ impl Lifter<'_> {
     pub(super) fn mimg(&mut self, name: &str, d: &Decoded) -> Option<()> {
         // unorm only changes how a sampler filters: loads, stores and atomics address texels by integer anyway
         let sampled = name.starts_with("image_sample") || name.starts_with("image_gather");
+        // a16: float addresses packed two fp16 per register (sampling with no bias only, so far)
+        let a16 = d.get("a16")? == 1;
+        let a16_ok = matches!(name, "image_sample" | "image_sample_lz" | "image_sample_l");
         for (flag, why) in [("a16", "16-bit address"), ("d16", "16-bit data"), ("tfe", "tfe"), ("lwe", "lwe"), ("unorm", "unnormalised")] {
-            if d.get(flag)? == 1 && (flag != "unorm" || sampled) {
+            if d.get(flag)? == 1 && (flag != "unorm" || sampled) && (flag != "a16" || !a16_ok) {
                 self.why = Some(why.into());
                 return None;
             }
@@ -233,8 +236,16 @@ impl Lifter<'_> {
             l.out.vgprs.insert(r);
             format!("v{r}")
         };
+        // address component j as a float: a dword, or with a16 the half j % 2 of register j / 2
+        let fcomp = |l: &mut Self, j: u16| -> String {
+            if a16 {
+                format!("f16tof32({} >> {}u)", addr(l, j / 2), 16 * (j % 2))
+            } else {
+                format!("asfloat({})", addr(l, j))
+            }
+        };
         let fcoord = |l: &mut Self, first: u16| -> String {
-            let parts: Vec<String> = (0..ncoord as u16).map(|k| format!("asfloat({})", addr(l, first + k))).collect();
+            let parts: Vec<String> = (0..ncoord as u16).map(|k| fcomp(l, first + k)).collect();
             format!("float{}({})", ncoord, parts.join(", ")).replace("float1(", "(")
         };
         let icoord = |l: &mut Self, extra_mip: bool| -> String {
@@ -249,7 +260,7 @@ impl Lifter<'_> {
             let Some(sd) = l.descs.get(&s).copied() else {
                 // an immediate sampler: the four words are constants the code wrote
                 let words: Option<Vec<u32>> = (0..4u8).map(|k| l.consts.get(&(s + k)).copied()).collect();
-                let Some(w) = words.filter(|_| (0..4u8).all(|k| !l.out.masks.contains(&(s + k)))) else {
+                let Some(w) = words else {
                     l.why = Some("sampler not traced".into());
                     return None;
                 };
@@ -281,7 +292,7 @@ impl Lifter<'_> {
             "image_sample_l" => {
                 let s = sampler(self)?;
                 let c = fcoord(self, 0);
-                format!("t.SampleLevel({s}, {c}, asfloat({}))", addr(self, ncoord as u16))
+                format!("t.SampleLevel({s}, {c}, {})", fcomp(self, ncoord as u16))
             }
             "image_sample_b" => {
                 let s = sampler(self)?;

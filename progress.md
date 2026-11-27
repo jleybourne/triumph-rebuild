@@ -1,8 +1,8 @@
 # Progress
 
 ```
-work toward 30 fps   [██████████░░░░░░░░░░]  48 %
-shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694 counted (oracle match needed) · 1,748 / 1,798 v0 pixel shaders translate and compile · all decode byte-exact
+work toward 30 fps   [██████████░░░░░░░░░░]  49 %
+shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694 counted (oracle match needed) · 1,782 / 1,798 v0 pixel shaders translate and compile · all decode byte-exact
 runtime functions    [███████████████████░]  69 / 73 ours bound (xmem, modules, memory, process, files, audio, DirectStorage, xg); 624 more bind to the host directly
 launcher track       [██████████████░░░░░░]  5 / 7 steps (C1 registry, L1-L4 launcher merged; C2 and L5 left); does not count toward the fps %
 measured fps         none yet — the title has not rendered a frame on this code
@@ -23,13 +23,13 @@ second row and is the number that counts.
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
 | 3 | PE loader + console runtime | 15 | 88 % | 13.2 | loader, vfs, input merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides (32 / 73 ours); the title's code runs; files (22), audio, DirectStorage, xg built in lanes and merged, binding next |
-| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 46 % | 6.9 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; **front end closed**: 25,694 programs decode byte-exact, oracle set complete (PRs #5, #10) |
+| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 47 % | 7.05 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; **front end closed**: 25,694 programs decode byte-exact, oracle set complete (PRs #5, #10) |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 30 % | 3.0 | DLSS (PR #4) and FSR 3.1.6 (PR #8) standalone on a synthetic scene, one conventions table; wiring to the title's pass todo |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **48.9 ≈ 48 %** | |
+| | **total** | **100** | | **49.05 ≈ 49 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -82,6 +82,20 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — 1,782 of 1,798 v0 pixel shaders compile (99.1 %): 16-bit addresses, lane swizzles
+
+```
+[██████████░░░░░░░░░░]  49 %   (48.9 → 49.05: +0.15 Build 4)
+shaders     0 / 25,694 counted (oracle match needed); v0 pixel shaders: 1,782 / 1,798 translated and compiled by DXC
+measured fps   none yet
+```
+
+- **Built (Build 4):** `a16` sampling addresses (two fp16 per register, LOD included); `ds_swizzle_b32` (quad mode
+  as four `QuadReadLaneAt` with constant lanes, bitmask mode as `WaveReadLaneAt`); a lane-mask write now ends a
+  register's known constant at that point (it was refused program-wide before, which lost 14 immediate samplers).
+- **Measured:** 1,748 → 1,759 → 1,773 → **1,782 of 1,798** ([`runs/build4-ps.md`](runs/build4-ps.md)). Left (16): cube
+  maps (6), `s_cselect_b64` (3), shifts on special operands (3), buffer loads and stores (3), `image_atomic_or` (1).
 
 ### 2026-11-27 — 1,748 of 1,798 v0 pixel shaders compile (97.2 %): 16-bit interpolation and mixed-precision FMA
 
