@@ -29,6 +29,8 @@
 
 pub mod host;
 
+pub mod crt;
+mod extra;
 mod find;
 
 use std::ffi::c_void;
@@ -37,6 +39,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use host::{HANDLE, INVALID_FILE_ATTRIBUTES, INVALID_HANDLE_VALUE};
 use rebuild_vfs::{ConsolePath, Disposition, Error as VfsError, Layer, OpenOptions, Vfs};
 
+pub use extra::{CopyFile2, CreateHardLinkW, CreateSymbolicLinkW, SetFileInformationByHandle, WerRegisterFile, ERROR_PRIVILEGE_NOT_HELD};
 pub use find::{open_searches, FindClose, FindFirstFileA, FindFirstFileExA, FindFirstFileExW, FindFirstFileW, FindNextFileA, FindNextFileW};
 
 // ---- Win32 constants ---------------------------------------------------------------------------
@@ -321,18 +324,28 @@ impl Files {
             Err(VfsError::NotFound | VfsError::PathNotFound) => None,
             Err(e) => return Err(self.fail(function, &path, e)),
         };
+        // the host refuses to write or overwrite a read-only file; copy-up would clear the bit
+        if let Some(r) = existed.as_ref().filter(|r| !r.is_dir) {
+            if write || matches!(disposition, CREATE_ALWAYS | TRUNCATE_EXISTING) {
+                let a = unsafe { host::GetFileAttributesW(host::host_path(&r.host).as_ptr()) };
+                if a != INVALID_FILE_ATTRIBUTES && a & FILE_ATTRIBUTE_READONLY != 0 {
+                    return Err(ERROR_ACCESS_DENIED);
+                }
+            }
+        }
         if let Some(r) = existed.as_ref().filter(|r| r.is_dir) {
             return match disposition {
-                OPEN_EXISTING | OPEN_ALWAYS if r.layer == Layer::Overlay || !write => {
-                    let h = open(&host::host_path(&r.host));
+                OPEN_EXISTING | OPEN_ALWAYS => {
+                    // a write handle to a directory below the overlay gets the overlay's copy of it
+                    let host = if write && r.layer != Layer::Overlay { self.materialize(function, &path, r)? } else { r.host.clone() };
+                    let h = open(&host::host_path(&host));
                     if h != INVALID_HANDLE_VALUE {
+                        if flags & FILE_FLAG_DELETE_ON_CLOSE != 0 {
+                            let _ = self.vfs.delete_pending(&path);
+                        }
                         set_last_error(if disposition == OPEN_ALWAYS { ERROR_ALREADY_EXISTS } else { 0 });
                     }
                     Ok(h)
-                }
-                OPEN_EXISTING | OPEN_ALWAYS => {
-                    discover(function, &path, "write access to a directory below the overlay");
-                    Err(ERROR_ACCESS_DENIED)
                 }
                 _ => Err(ERROR_ACCESS_DENIED),
             };
@@ -355,6 +368,10 @@ impl Files {
         let handle = open(&host);
         if handle == INVALID_HANDLE_VALUE {
             return Ok(handle);
+        }
+        if flags & FILE_FLAG_DELETE_ON_CLOSE != 0 {
+            // the host deletes the overlay file at the last close; vfs settles it then
+            let _ = self.vfs.delete_pending(&path);
         }
         let attrs = attributes & CREATE_ATTRIBUTES;
         if existed.is_none() && attrs & !FILE_ATTRIBUTE_ARCHIVE != 0 {
@@ -571,14 +588,23 @@ impl Files {
         Ok(1)
     }
 
+    /// Makes a directory below the overlay exist in the overlay, with the attributes it has below;
+    /// returns its overlay host path. The base keeps its own.
+    fn materialize(&self, function: &'static str, path: &str, below: &rebuild_vfs::Resolved) -> Result<std::path::PathBuf, u32> {
+        let attrs = unsafe { host::GetFileAttributesW(host::host_path(&below.host).as_ptr()) };
+        let host = self.vfs.materialize_dir(path).map_err(|e| self.fail(function, path, e))?;
+        if attrs != INVALID_FILE_ATTRIBUTES {
+            unsafe { host::SetFileAttributesW(host::host_path(&host).as_ptr(), attrs & !FILE_ATTRIBUTE_DIRECTORY) };
+        }
+        Ok(host)
+    }
+
     fn set_attributes(&self, function: &'static str, raw: &str, attrs: u32) -> Result<i32, u32> {
         let path = self.path(function, raw)?;
         let mut r = self.vfs.resolve(&path).map_err(|e| self.fail(function, &path, e))?;
-        if r.layer != Layer::Overlay {
-            if r.is_dir {
-                discover(function, &path, "attributes of a directory below the overlay");
-                return Err(ERROR_ACCESS_DENIED);
-            }
+        if r.layer != Layer::Overlay && r.is_dir {
+            r.host = self.materialize(function, &path, &r)?;
+        } else if r.layer != Layer::Overlay {
             // copy up first: the base is never written
             let h = self.vfs.open(&path, OpenOptions::write(Disposition::OpenExisting)).map_err(|e| self.fail(function, &path, e))?;
             let _ = self.vfs.close(h);
@@ -755,8 +781,9 @@ pub unsafe extern "system" fn GetTempPathW(len: u32, buf: *mut u16) -> u32 {
 
 // ---- binding --------------------------------------------------------------------------------------------
 
-/// Every function this crate implements, by the name the title imports. The first 22 are the
-/// `files` entries of `crates/runtime` `OVERRIDES`; the last five are proposed additions.
+/// Every Win32 function this crate implements, by the name the title imports. The first 22 are the
+/// `files` entries of `crates/runtime` `OVERRIDES`; then proposed additions. The CRT ones are
+/// [`crt::CRT_FUNCTIONS`]; [`override_export`] answers for both.
 pub const FUNCTIONS: &[&str] = &[
     "CreateFileW",
     "CreateFile2",
@@ -786,6 +813,12 @@ pub const FUNCTIONS: &[&str] = &[
     "FindClose",
     "SetFileAttributesW",
     "GetTempPathW",
+    // F5 (round 2)
+    "CopyFile2",
+    "CreateHardLinkW",
+    "CreateSymbolicLinkW",
+    "WerRegisterFile",
+    "SetFileInformationByHandle",
 ];
 
 /// The address of our implementation of `name`, for the binding resolver.
@@ -818,7 +851,12 @@ pub fn override_export(name: &str) -> Option<u64> {
         "FindClose" => FindClose as *const (),
         "SetFileAttributesW" => SetFileAttributesW as *const (),
         "GetTempPathW" => GetTempPathW as *const (),
-        _ => return None,
+        "CopyFile2" => CopyFile2 as *const (),
+        "CreateHardLinkW" => CreateHardLinkW as *const (),
+        "CreateSymbolicLinkW" => CreateSymbolicLinkW as *const (),
+        "WerRegisterFile" => WerRegisterFile as *const (),
+        "SetFileInformationByHandle" => SetFileInformationByHandle as *const (),
+        other => return crt::crt_export(other),
     };
     Some(f as usize as u64)
 }

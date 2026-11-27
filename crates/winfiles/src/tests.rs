@@ -186,12 +186,16 @@ fn f1_create_file_reads_the_layers_and_writes_only_the_overlay() {
         assert_ne!(h, INVALID_HANDLE_VALUE);
         host::CloseHandle(h);
         assert_eq!(fs::read(s.0.join(r"overlay\G\files\dir\y.txt")).unwrap(), b"mod y, longer");
-        // a directory below the overlay: read is fine with backup semantics, write is refused
+        // a directory below the overlay: read opens it where it is; write gets the overlay's copy (F5)
         let h = CreateFileW(w(r"G:\dir").as_ptr(), GENERIC_READ, 7, std::ptr::null(), OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, std::ptr::null_mut());
         assert_ne!(h, INVALID_HANDLE_VALUE);
         host::CloseHandle(h);
+        assert!(!s.0.join(r"overlay\G\files\Data").exists());
         let h = CreateFileW(w(r"G:\Data").as_ptr(), GENERIC_WRITE, 7, std::ptr::null(), OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, std::ptr::null_mut());
-        assert_eq!((h, last()), (INVALID_HANDLE_VALUE, ERROR_ACCESS_DENIED));
+        assert_ne!(h, INVALID_HANDLE_VALUE);
+        host::CloseHandle(h);
+        assert!(s.0.join(r"overlay\G\files\Data").is_dir(), "materialized in the overlay");
+        assert_eq!(names_w(r"G:\Data\*").unwrap(), [".", "..", "Big.RPF"], "its files still merge from below");
     }
     assert_eq!((hash_tree(&base), hash_tree(&m)), (hb, hm), "base and mod unchanged");
 }
@@ -769,3 +773,5 @@ fn f2_side_by_side_with_the_host() {
     println!("f2: {} outcomes compared with the host, 0 differ", ours.len());
     assert_eq!(hash_tree(&base), before, "the base folder is unchanged after the whole script");
 }
+
+mod round2;
