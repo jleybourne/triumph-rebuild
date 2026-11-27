@@ -95,7 +95,7 @@ file).
 | # | task | closes when |
 |:--:|:--|:--|
 | S1 | read `shaders.rpf` and every shader container in it (DXBC/DXIL with the Xbox `XDAT` additions; the GFX10 code is zlib-compressed inside). Vendoring the fork's `victory-formats` / `victory-shader::dxbc,dxil` parsers is allowed (section 3) | `census` lists **25,694** programs by hash |
-| S2 | census row per program: hash, stage, GFX10 code size, instruction count, uses wave64 (yes/no), uses DPP / LDS / scratch / 16-bit, **and the wave class** (`agnostic` or `wave-wide`, by the rules in `crates/sir/src/classify.rs`: any reduction, ballot, readlane, readfirstlane of a non-uniform value, DPP/swizzle beyond a quad, or a lane id seen beyond its quad bits) | `agents/shader-census.csv` (hashes and counts only); totals match the fork's (25,694 programs; 1,433 in a world frame; 4.64M instructions) where comparable |
+| S2 | census row per program: hash, stage, GFX10 code size, instruction count, uses wave64 (yes/no), uses DPP / LDS / scratch / 16-bit, **and the wave class** (`agnostic` or `wave-wide`, by the rules in `crates/sir/src/classify.rs`: any reduction, ballot, readlane, readfirstlane of a non-uniform value, DPP/swizzle beyond a quad, or a lane id seen beyond its quad bits) | `agents/shader-census.csv` (hashes and counts only); totals match the fork's (25,694 programs; 1,433 in a world frame; 43.95M console instructions, the fork's 40.56M without hints) where comparable |
 | S3 | GFX10 (RDNA2) decoder: every encoding the corpus uses (SOP1/2/C/K/P, SMEM, VOP1/2/3/3P/C, DPP, SDWA, DS, MUBUF, MTBUF, MIMG, FLAT/GLOBAL/SCRATCH, EXP). Vendoring the fork's `gfx10` opcode tables is allowed | **byte-exact re-encode** of every instruction in all 25,694 programs; 0 unknown opcodes, or a named list |
 | S4 | per-program feature summary for the lead: register counts, branch structure (structured or not), wave-uniform vs per-lane branch share, and the count of wave ops inside divergent branches (these become predication) | a section in `agents/shader.md` |
 
@@ -225,6 +225,51 @@ New crate `crates/input` (package `rebuild-input`). No GPU.
 | I2 | **menu isolation** (the fork's `docs/design/debug-menu.md` A1): while the menu is open the title sees a neutral pad and no keys; on close, neutral until every key and button is up; rumble stopped on open | unit tests: open, hold, close-while-held, all-up |
 | I3 | which GameInput functions the title imports (lane `loader`'s `agents/loader-imports.csv`, once merged) mapped onto `PadState` | a table in `agents/input.md` |
 
+### Round 2 (2026-11-27, the second lead session)
+
+Every round-1 lane has handed back and is merged. Lanes `loader`, `vfs`, `input`, `upscale`, `dstorage` and `xg`
+have no new work: stop them. The rules of sections 1-4 are unchanged. Each task ends in a test or a number.
+
+#### New lane `gdk` — the GDK runtime behind `xgameruntime.dll` (Build 3 piece)
+
+New crate `crates/gdk` (package `rebuild-gdk`). No GPU, no title code. Loader L5 found that the title takes 6 entries
+from `xgameruntime.dll` by name (`InitializeApiImpl`, `InitializeApiImplEx`, `InitializeApiImplEx2`,
+`UninitializeApiImpl`, `QueryApiImpl`, `XErrorReport`) and reaches every GDK area through objects `QueryApiImpl`
+returns. The fork's `victory-hle` GDK modules and its notes are the reference (read, don't copy). This is likely
+what the title's startup waits on.
+
+| # | task | closes when |
+|:--:|:--|:--|
+| G1 | the entry points' arguments and results, every interface the title asks `QueryApiImpl` for (by GUID), and each interface's vtable slots, from the fork's design and run logs | a table in `agents/gdk.md`; unknowns marked, never guessed |
+| G2 | **XTaskQueue and XAsync** as host code with the console's structure layouts: queues, work and completion ports, dispatch modes (thread pool, manual, immediate, serialized), `XAsyncBlock` lifetime, cancellation, `XAsyncGetStatus` waits. **No call blocks the caller beyond what the GDK documents** | tests: ordering, manual dispatch, callbacks on the right port, cancel, terminate with pending work |
+| G3 | **XGame, XUser, XStore/XPackage, XSystem**: one signed-in local user (gamertag from config), the title owned and fully installed, no network (network calls fail with the GDK's offline error, cleanly). Each call the fork logged is answered | unit tests per function; an unknown call is logged as discovery |
+| G4 | a table `(interface, slot) → Rust function` the lead wires into `QueryApiImpl`, with each function's console argument layout documented | the table, and a test that every listed slot resolves |
+
+#### Lane `audio` — A5, the XMA decoder
+
+| # | task | closes when |
+|:--:|:--|:--|
+| A5 | **our own XMA2 decoder** behind `FrameDecoder`. FFmpeg's `wmaprodec.c` and the fork's `xma.rs` are design references only (read, don't copy: a codec carries performance). Test streams are read at test time from the title's folder through `REBUILD_GAME_DIR`, never committed | output equals a reference decode within ±1 LSB (FFmpeg if `ffmpeg.exe` is already on disk; if not, say so and the lead decides), and a speed number: real-time factor for one stereo stream on one thread (aim ≥ 50×) |
+
+#### Lane `files` — F4 and F5
+
+| # | task | closes when |
+|:--:|:--|:--|
+| F4 | the **CRT file functions** the title imports (check `agents/loader-imports.csv`: `fopen`, `_wfopen`, `_open`, `_wopen`, `_wstat64`, `remove`, `_wrename`, `_wchdir`, `_wgetcwd`, …): open through our `CreateFileW`, then `_open_osfhandle` / `_fdopen`, so CRT file I/O sees the overlay | a side-by-side test against the host CRT, like F2 |
+| F5 | `CopyFile2`, `CreateHardLinkW`, `CreateSymbolicLinkW` (into the overlay, or refused with the host's error), `WerRegisterFile` (succeeds, logged); and the vfs gaps from item 57: delete-on-close, rename or delete through a handle (`SetFileInformationByHandle`), directory attributes. Editing `crates/vfs` is allowed for this | tests; the base folder hash is unchanged |
+
+#### Lane `shader` — S6, the oracle diff tool (not translation)
+
+| # | task | closes when |
+|:--:|:--|:--|
+| S6 | `oraclediff`: given our DXIL for a hash and the oracle's (`D:\victory-data\rebuild-oracle`), compare what must match: input and output signatures, resource bindings and spaces, thread-group size, wave-size attribute, and a per-category instruction histogram (memory, wave ops, control flow). Report per hash to a CSV outside git. **No GPU**: the lead adds the execution check | the oracle against itself gives 0 diffs over 25,694; injected mutations (a binding moved, a signature element dropped, a wave op removed) are each caught |
+
+#### Lane `launcher` — U6
+
+| # | task | closes when |
+|:--:|:--|:--|
+| U6 | the dashed Add tile's subtitle fits its outline at 1280x800 (item 59). Then stop until the lead's C2 (launch through `--config`) and the `crates/config` changes in section 10 land | a screenshot outside git |
+
 ## 6. Handing back
 
 1. Keep `agents/<lane>.md` in your branch: what you built, the numbers, what's left. Use the same voice
@@ -246,9 +291,9 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, end of the first lead session: the title's own code runs (16/16 DLL entries, exe entry 60 s); claude-max-handoff.md is the final handoff
-progress  43 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
-tests     121 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 14, input 16, vfs 18, runtime 14, upscale 11)
+updated   2026-11-27, second lead session: all 11 helper PRs merged (#1-#13); round 2 of the lanes in section 5
+progress  46 % (progress.md) · shaders 0 / 25,694 counted (all decode byte-exact; they count once translations match the oracle)
+tests     238 green (4 ignored), 0 warnings: cargo test --release
 ```
 
 | build | state | where | proof |
@@ -264,7 +309,7 @@ tests     121 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlis
 | 6 list translation | 🔄 core built | `crates/xlist` | Build 0 (b) |
 | 7 upscaler | ⏳ (plan decision 5 corrected) | — | — |
 | 8 pacing · 9 AMD testers | ⏳ | — | — |
-| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | merged: `loader` (#1), `input` (#2), `vfs` (#3), `upscale` P1/P2/P4/P5 (#4). Running: `shader`, `launcher`. **To start: `audio`, `dstorage`, `files`, `xg`, loader L5, upscale P3 (FSR, SDK approved)** | their pull requests |
+| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | merged: all of round 1 (#1-#13). **Round 2 (section 5): new lane `gdk` (G1-G4), `audio` A5, `files` F4-F5, `shader` S6, `launcher` U6** | their pull requests |
 | launcher track | 🔄 C1 registry built; launcher app in lane `launcher` | `crates/config`, [design](docs/design/launcher.md) | 6 unit tests |
 
 ## 9. Taking over as lead
@@ -319,6 +364,29 @@ If the owner hands you the whole job, you are the lead. **Start with [`claude-ma
 - Whether to push the fork's local `dlss-hook` branch (commit `ee0b94a3`) so the docs can link to it.
 
 ## 10. The lead's answers to "For the lead" (newest first)
+
+**2026-11-27, second lead session, to items 26-62** (`agents/secondary-agents-updates.md`). PRs #5-#13 are all merged.
+
+- `dstorage` 26-27: agreed. The lead binds `DStorageGetFactory` and writes `Pages` over `runtime::physical` with a
+  retry for pages the title hasn't made yet. 28, BCPack: **an owner decision**, as the lane said. Until then
+  `E_NOTIMPL`, counted.
+- `loader` 30-32: agreed. `GetProcAddress` answers by name for `xgameruntime` (6), `gameplatformservices` (3),
+  `WinHttpWebSocket*` (6) and `icu` (14). A load of `amd_fidelityfx_framegeneration_xbox.dll` fails cleanly. The GDK
+  areas behind `QueryApiImpl` are the new lane `gdk`.
+- `upscale` 33-37: agreed. The lead adds `upscaler.fidelityfx_dir` beside `upscaler.dlss_dll` and
+  `upscaler.streamline_dir`. FSR 4: **prefer the highest FSR the driver offers** (FSR 4 on RDNA 4), with 3.1 as
+  the fallback. Lane finished.
+- `xg` 38-42: agreed. The lead binds the 13-slot vtable, slot 0x30 returning 0 outside the texture; GPU
+  detiling from `Layout::tables` is Build 5. Metadata planes stay unsized until a run shows they matter. Lane finished.
+- `shader` 43-46: the doc fix is taken. S2's "4.64M instructions" is DXIL over the 1,433 world programs, not the
+  corpus's 43.95M console instructions. Next: S6 (above). Translation stays the lead's.
+- `audio` 47: **decided: our own XMA decoder (A5)**, not vendored, because it carries performance. 48: agreed:
+  A4's output is for audio the layer mixes itself. 49: fine. 51: noted; each unknown is settled by a run.
+- `files` 53: the lead binds all 22, the 5 extra first. 54-55, 57: F4 and F5 (above).
+- `launcher` 58, 61: the per-game layout and the registry proposals are accepted; the lead adds them to
+  `crates/config`. 60: agreed and important for the owner's rule: `crates/config` will **keep explicit values even
+  when equal to the default, keep unknown keys, and gain a `schema` key**. 62: the double check at
+  `crates/config/src/lib.rs:349` is the lead's to fix. U6 (above).
 
 **2026-11-27, to lane `upscale` (PR #4, merged):** the FidelityFX SDK download is approved (see item 7 below):
 pinned version, official GPUOpen GitHub release, extracted outside git, SHA-256 recorded. Then do P3, and confirm the

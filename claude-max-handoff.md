@@ -1,20 +1,21 @@
 # claude-max-handoff.md — the lead's working state, for the session that takes over
 
-Updated by the lead every step. **This is the final handoff from the first lead session (2026-11-27).**
+Updated by the lead every step. Second lead session (2026-11-27), on the owner's other account, same PC.
 Read this first, then `secondary-agent.md` §8-10 (project state, the owner's rules and step order, answers to
 helpers).
 
 ## Where things stand (one screen)
 
 ```
-progress    42 % toward 30 fps (progress.md)       measured fps: none yet (no title frame)
+progress    46 % toward 30 fps (progress.md)       measured fps: none yet (no title frame)
 built       Builds 0 (a, b), 1, 2 closed; Build 3 ~70 %; Build 4 core proven; Build 7 DLSS standalone
 title       its 17 images load through the Windows loader; 16/16 DLL entry points run; its exe's entry
             point RUNS for 60 s without a crash, but waits before its first render call
 runtime     32 / 73 of our functions built; 624 more bind straight to the host
-shaders     core proven on the card (lane model, live masks, memory, f16, HLSL → DXC); 0 / 25,694 programs
-            yet, waiting for lane `shader`'s decoder
-tests       121+ green, 0 warnings (cargo test --release)
+shaders     core proven on the card; lane shader merged: 25,694 programs decode byte-exact, oracle set
+            complete; 0 / 25,694 translated yet
+lanes       round 1 all merged (#1-#13); round 2 handed out: gdk G1-G4, audio A5, files F4-F5, shader S6, launcher U6
+tests       238 green, 4 ignored, 0 warnings (cargo test --release)
 ```
 
 ## Who you are and how the owner works
@@ -77,9 +78,14 @@ The owner's rules, in their own words:
      and the frame line. Then Build 0 (c), the title's GPU time.
 3. **Shaders:** when lane `shader` merges (S1-S5: census, GFX10 decoder, oracle set), do section 9 step 3 of
    `secondary-agent.md`: GFX10 → `sir` (CFG, SSA, structurize), agnostic programs first, and start the shader bar.
-4. Merge helper PRs as they arrive, and bind what they built in `crates/runtime`:
-   - lane `files` → its functions into `modules::override_export` (or a new override table)
-   - lanes `audio`, `dstorage`, `xg` → `exports::console_export`
+0. **Now (before step 1): bind the merged crates in `crates/runtime`** (all built and merged, none bound):
+   - `rebuild_winfiles`: all 22 overrides (`install(Files::new(vfs, r"G:\"))`, `override_export(name)` in
+     `HostResolver`), with the 5 extra (`FindNextFileW/A`, `FindClose`, `SetFileAttributesW`, `GetTempPathW`)
+   - `rebuild_audio` (19), `rebuild_dstorage` (`DStorageGetFactory`, `Pages` over `physical` with a retry),
+     `rebuild_xg` (13-slot vtable, slot 0x30 → 0 outside) → `exports::console_export`
+   - `crates/config`: keep explicit values and unknown keys, add `schema`, the launcher's registry entries
+     (`secondary-agent.md` §10)
+4. Merge round-2 helper PRs as they arrive (gdk, audio A5, files F4-F5, shader S6, launcher U6) and bind them.
 
 ## Open threads
 

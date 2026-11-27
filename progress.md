@@ -1,8 +1,8 @@
 # Progress
 
 ```
-work toward 30 fps   [█████████░░░░░░░░░░░]  43 %
-shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (fork reference: 25,694 translated, 7 pipelines refused)
+work toward 30 fps   [█████████░░░░░░░░░░░]  46 %
+shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (all 25,694 decoded byte-exact; oracle complete; fork reference: 25,694 translated, 7 pipelines refused)
 runtime functions    [█████████░░░░░░░░░░░]  32 / 73 ours built (xmem, modules, memory, process); 624 more bind to the host directly
 launcher track       [███░░░░░░░░░░░░░░░░░]  1 / 7 steps (C1 settings registry; the mods tab's file system is merged); does not count toward the fps %
 measured fps         none yet — the title has not rendered a frame on this code
@@ -22,14 +22,14 @@ second row and is the number that counts.
 | 0 | three answers before more code | 10 | 70 % | 7.0 | (a) upload **done**; (b) translation **done**: 0.43 µs a draw; (c) blocked until the title renders (moved to Build 5) |
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
-| 3 | PE loader + console runtime | 15 | 75 % | 11.25 | loader (PR #1), files (PR #3), input (PR #2) merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides built (32 / 73 ours); files, audio, DirectStorage in lanes |
-| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 25 % | 3.75 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; decoder in lane `shader` |
+| 3 | PE loader + console runtime | 15 | 80 % | 12.0 | loader, vfs, input merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides (32 / 73 ours); the title's code runs; files (22), audio, DirectStorage, xg built in lanes and merged, binding next |
+| 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 35 % | 5.25 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; **front end closed**: 25,694 programs decode byte-exact, oracle set complete (PRs #5, #10) |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
-| 7 | upscaler: DLSS + FSR | 10 | 20 % | 2.0 | DLSS standalone through Streamline on a synthetic scene (PR #4); FSR waits for the SDK; wiring to the title's pass todo |
+| 7 | upscaler: DLSS + FSR | 10 | 30 % | 3.0 | DLSS (PR #4) and FSR 3.1.6 (PR #8) standalone on a synthetic scene, one conventions table; wiring to the title's pass todo |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **42.8 ≈ 43 %** | |
+| | **total** | **100** | | **46.05 ≈ 46 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -82,6 +82,28 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Second lead session: all 11 helper PRs merged (shader decoder, FSR, files, audio, DirectStorage, xg, launcher); round 2 of the lanes
+
+```
+[█████████░░░░░░░░░░░]  46 %   (was 43 %: +0.75 Build 3, +1.5 Build 4, +1.0 Build 7)
+runtime     32 / 73 of our functions bound; files (22), audio (19), DirectStorage (1) and xg (2) built in lanes, binding next
+shaders     0 / 25,694 counted; all 25,694 decoded byte-exact (43.95M instructions) and the oracle set is complete
+measured fps   none yet
+```
+
+- **Merged** PRs #5-#13: `shader` S1-S5 (census, GFX10 decoder, oracle set), `upscale` P3 (FSR 3.1.6 beside DLSS),
+  `loader` L5 (76 run-time lookup names), `dstorage` D1-D4, `xg` X1-X4, `audio` A1-A4, `files` F1-F3, `launcher`
+  U1-U5. Every diff checked for game bytes, the game path and vendor binaries first (only the OFL Inter fonts,
+  credited). `CREDITS.md` is one table plus a fonts-and-libraries section.
+- **Measured:** `cargo test --release` **238 green, 4 ignored, 0 warnings** (was 121).
+- **Decided:** XMA is decoded by our own decoder (audio A5), not vendored, because it carries performance. A new lane
+  `gdk` builds XTaskQueue, XAsync, XGame, XUser and XStore behind `xgameruntime!QueryApiImpl`. The CRT file
+  functions get overrides (files F4). The shader lane builds the oracle diff tool (S6). Answers to items 26-62
+  are in `secondary-agent.md` section 10.
+- **What moved the %:** Build 3 75 → 80 % (files, audio and DirectStorage built; binding is next). Build 4
+  25 → 35 % (the front end is closed: every program decodes byte-exact). Build 7 20 → 30 % (FSR works standalone).
+- **Next:** bind the merged crates in `crates/runtime`, then the stack sampler (handoff step 1).
 
 ### 2026-11-27 — The title's own code runs: 16/16 DLL entry points, the exe's entry for 60 s; final handoff of this session
 
