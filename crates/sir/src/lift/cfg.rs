@@ -617,7 +617,7 @@ impl Emit<'_, '_, '_> {
     /// The state on entry to block `b`: the meet over its predecessors' exits (this pass's, or the last
     /// pass's for a back edge).
     fn entry(&self, b: usize) -> Result<FlowState, String> {
-        let mut st = (b == 0).then(FlowState::default);
+        let mut st = (b == 0).then(|| FlowState { narrowed: self.l.entry_narrowed, ..FlowState::default() });
         for &p in &self.g.preds[b] {
             if let Some(ps) = self.cur[p].as_ref().or(self.prev[p].as_ref()) {
                 st = Some(match st {
@@ -634,10 +634,10 @@ impl Emit<'_, '_, '_> {
         match cond {
             Cond::Scc0 => "!scc".into(),
             Cond::Scc1 => "scc".into(),
-            Cond::Vccz => format!("!WaveActiveAnyTrue({})", self.l.mask_name(106)),
-            Cond::Vccnz => format!("WaveActiveAnyTrue({})", self.l.mask_name(106)),
-            Cond::Execz => "!WaveActiveAnyTrue(ex)".into(),
-            Cond::Execnz => "WaveActiveAnyTrue(ex)".into(),
+            Cond::Vccz => format!("!{}", self.l.any_lane(106)),
+            Cond::Vccnz => self.l.any_lane(106),
+            Cond::Execz => format!("!{}", self.l.any_lane(126)),
+            Cond::Execnz => self.l.any_lane(126),
         }
     }
 
@@ -733,7 +733,7 @@ pub(super) fn lift(mut l: Lifter<'_>, insts: &[Instruction]) -> Lifted {
     let mut exits: Vec<Option<FlowState>> = vec![None; blocks.len()];
     let mut masks = BTreeSet::new();
     for _ in 0..16 {
-        l.out = Lifted { masks: masks.clone(), ..Lifted::default() };
+        l.out = Lifted { masks: masks.clone(), wave: l.wave, exec_narrowed: l.entry_narrowed, ..Lifted::default() };
         let mut e = Emit { l: &mut l, insts, blocks: &blocks, g: &g, live: &live, prev: &exits, cur: vec![None; blocks.len()], text: String::new() };
         if jumps {
             e.text.push_str("    uint sir_to = 0u;\n");

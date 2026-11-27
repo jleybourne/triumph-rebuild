@@ -101,6 +101,15 @@ fn main() {
                 println!();
             }
         }
+        // every program of every wave class (rebuild_sir::lift::wave), split by class
+        "v2" => {
+            // `v2 [ps] [vs] [cs]`: those stages only
+            let picked: Vec<String> = std::env::args().skip(2).collect();
+            for k in ["ps", "vs", "cs"].into_iter().filter(|k| picked.is_empty() || picked.iter().any(|p| p == k)) {
+                ps_report_classes(&walk, k);
+                println!();
+            }
+        }
         m => {
             eprintln!("translate: unknown mode {m}");
             std::process::exit(2);
@@ -178,6 +187,15 @@ fn lift_report(picked: &[(HwStage, BTreeSet<&'static str>, Vec<String>, usize)])
 /// `ps` (pixel shaders) or `vs` (vertex shaders that run as the hardware VS): lift with IO, assemble, compile.
 /// `v1`: every agnostic program of the stage, with control flow, through `lift_program`.
 fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
+    ps_report_with(walk, kind, v1, false)
+}
+
+/// `v2`: every program of the stage, any wave class, through the wave mapping its class asks for.
+fn ps_report_classes(walk: &census::Walk, kind: &str) {
+    ps_report_with(walk, kind, true, true)
+}
+
+fn ps_report_with(walk: &census::Walk, kind: &str, v1: bool, all: bool) {
     let vs = kind == "vs";
     use rebuild_pipelines::sidecar;
     use rebuild_pipelines::translate::{self, Refused};
@@ -194,8 +212,13 @@ fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
     let single = [AtomicUsize::new(0), AtomicUsize::new(0)];
     let multi = [AtomicUsize::new(0), AtomicUsize::new(0)];
     let failures: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+    // v2: per wave class, (programs, compiled), and the refusals by class and first reason
+    let classes: Mutex<BTreeMap<&'static str, (usize, usize)>> = Mutex::new(BTreeMap::new());
+    let workers: usize = std::env::var("REBUILD_TRANSLATE_WORKERS").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
+    // REBUILD_TRANSLATE_ONLY=<class>: only programs of that wave class (v2)
+    let only = std::env::var("REBUILD_TRANSLATE_ONLY").ok();
     std::thread::scope(|s| {
-        for _ in 0..8 {
+        for _ in 0..workers {
             s.spawn(|| {
                 let mut f = Findings::default();
                 loop {
@@ -211,13 +234,35 @@ fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
                         continue;
                     }
                     let row = features::analyse(&p.native, &mut f);
-                    if (row.blocks != 1 && !v1) || row.class() != WaveClass::Agnostic || row.decode_error.is_some() {
+                    if (row.blocks != 1 && !v1) || (row.class() != WaveClass::Agnostic && !all) || row.decode_error.is_some() {
                         continue;
                     }
+                    let class = match (row.class(), p.native.wave64) {
+                        (WaveClass::Agnostic, _) => "agnostic",
+                        (WaveClass::ReadFirstLane, false) => "readfirstlane w32",
+                        (WaveClass::ReadFirstLane, true) => "readfirstlane w64",
+                        (WaveClass::WaveWide, false) => "wave-wide w32",
+                        (WaveClass::WaveWide, true) => "wave-wide w64",
+                    };
+                    if only.as_deref().is_some_and(|o| o != class) {
+                        continue;
+                    }
+                    let class = if all {
+                        let insts = gfx10::decode(&p.native.patched_code()).unwrap_or_default();
+                        let w = translate::wave_of(&p.native, &insts);
+                        match (class, w.name()) {
+                            ("readfirstlane w64", "agnostic") => "readfirstlane w64 (uniform)",
+                            ("readfirstlane w64", _) => "readfirstlane w64 (varying)",
+                            (c, _) => c,
+                        }
+                    } else {
+                        class
+                    };
+                    classes.lock().unwrap().entry(class).or_default().0 += 1;
                     total.fetch_add(1, Ordering::Relaxed);
                     let split = if row.blocks == 1 { &single } else { &multi };
                     split[0].fetch_add(1, Ordering::Relaxed);
-                    let bump = |k: String| *tally.lock().unwrap().entry(k).or_default() += 1;
+                    let bump = |k: String| *tally.lock().unwrap().entry(if all { format!("[{class}] {k}") } else { k }).or_default() += 1;
                     // the same lift and assembly the runtime runs on demand (rebuild_pipelines::translate)
                     let h = match translate::lift_hlsl(&p.native, &p.isg1, &p.osg1, v1) {
                         Ok(h) => h,
@@ -234,6 +279,15 @@ fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
                                         "{e}\nlayout {:#?}\nused {:#?}\ninputs {:?}\nisg1 {:?}\n--- lifted\n{}",
                                         p.native.layout, p.native.used, p.native.io, isg1, body
                                     );
+                                    let mut txt = txt;
+                                    // the instructions, as named fields
+                                    for i in gfx10::decode(&p.native.patched_code()).unwrap_or_default() {
+                                        let d = gfx10::enc::decode(&i);
+                                        let fields: Vec<String> = d.layout.fields.iter().zip(&d.values).map(|(f, v)| format!("{}={v}", f.name)).collect();
+                                        let extra = d.extra.as_ref().map(|(l, v)| l.fields.iter().zip(v).map(|(f, v)| format!("{}={v:#x}", f.name)).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+                                        txt.push_str(&format!("
+{:05x} {} {} {extra} {:?}", i.offset, i.name().unwrap_or("?"), fields.join(" "), d.literal));
+                                    }
                                     let _ = std::fs::write(out.join(format!("{}.fail.txt", p.hash)), txt);
                                 }
                             }
@@ -257,6 +311,7 @@ fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
                     std::fs::write(out.join(format!("{}.{ext}.samplers", p.hash)), sidecar::encode(&h.samplers)).expect("write samplers");
                     match translate::compile_file(&dxc, h.stage, &hl, &obj) {
                         Ok(()) => {
+                            classes.lock().unwrap().entry(class).or_default().1 += 1;
                             compiled.fetch_add(1, Ordering::Relaxed);
                             split[1].fetch_add(1, Ordering::Relaxed);
                         }
@@ -270,7 +325,12 @@ fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
         }
     });
     let (n, ok) = (total.load(Ordering::Relaxed), compiled.load(Ordering::Relaxed));
-    if v1 {
+    if all {
+        println!("translate v2 {kind} — every program, every wave class, compiled by DXC ({kind}_6_6, -O3)");
+        for (c, (a, b)) in classes.into_inner().unwrap() {
+            println!("  {c:<30} {b} / {a} ({:.1} %)", 100.0 * b as f64 / a.max(1) as f64);
+        }
+    } else if v1 {
         println!("translate v1 {kind} — every agnostic program, control flow structured, compiled by DXC ({kind}_6_6, -O3)");
         for (what, x) in [("one block (v0)", &single), ("several blocks", &multi)] {
             let (a, b) = (x[0].load(Ordering::Relaxed), x[1].load(Ordering::Relaxed));
@@ -287,7 +347,7 @@ fn ps_report(walk: &census::Walk, kind: &str, v1: bool) {
     let mut v: Vec<_> = tally.into_inner().unwrap().into_iter().collect();
     v.sort_by(|a, b| b.1.cmp(&a.1));
     println!("\n  not compiled, by first reason          programs");
-    for (k, c) in v.iter().take(30) {
+    for (k, c) in v.iter().take(if all { 60 } else { 30 }) {
         println!("  {k:<40} {c:>6}");
     }
     let f = failures.into_inner().unwrap();
