@@ -50,7 +50,10 @@ Order and decisions are `plan.md`'s; overall progress is in [`progress.md`](prog
 |---|---|---|
 | done | PE loader (`crates/loader`, lane `loader`, PR #1): headers, sections, relocations, imports by name/ordinal, delay-load, exports, TLS, `.pdata`; map at base, bind through a resolver | 4,523 / 4,523 System32 PE32+ images parsed, 0 errors; 200k random corruptions, no panic; dbghelp.dll mapped beside the Windows loader: 9,912 relocations, 0 wrong |
 | done | import census of the title (lane `loader`) | 18 images, 93 DLLs, 962 functions; the title's own DLLs supply 265; **GDK discovery list: 697 functions in 86 DLLs** (`agents/loader-imports.csv`); game folder hash unchanged |
-| todo | kernel: threads, events, waits, timers, TLS, module queries | title's startup path runs |
+| done | runtime census (`crates/runtime`, `runtimecensus`): **624 of 697 imports (89.5 %) bind straight to the host**; 34 overrides (files 15, modules 16, memory 2, process 1); 39 console-only in 7 DLLs | [`runs/build3-runtime-census.md`](runs/build3-runtime-census.md) |
+| todo | `xmem` (13): the title's allocator onto watched regions (CPU-written) and tiles (GPU-owned), by its attributes | the title's allocations land where Builds 1-2 expect them |
+| todo | overrides: files through `vfs` (15), modules with discovery logging (16), memory (2), process (1) | each with a unit test against the host's own behaviour |
+| todo | console audio `acphal`/`xapu`/`chad` (19): helper lane `audio` · DirectStorage `xcrdapi` (1): helper lane `dstorage` | their lanes' closing tests |
 | done | files (`crates/vfs`, lane `vfs`, PR #3): console paths → host, read-only package, write overlay, mods as ordered layers with conflicts | 18 tests; game folder hash unchanged (`v2_game_folder_unchanged`); 10,000-file open+read +3.3 µs over the OS floor |
 | todo | wire the drives (decided): `G:` = the game package, read-only; the title's storage drive gets its own root; **`T:` starts empty every run** (as on the console) | the title opens its data through `vfs` |
 | todo | GDK discovery loop: name every unimplemented call instead of faulting, **including every `GetProcAddress` miss** (no image imports `XGame*`/`XUser*` directly, so the title reaches them by name at run time) | a run lists what is missing; the list shrinks to zero |

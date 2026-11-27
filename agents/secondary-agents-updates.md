@@ -14,7 +14,7 @@ Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives w
 | **shader** | Build 4 front end (S1–S5) | `agent/shader` | `D:\Developer\triumph-rebuild-shader` | 🔄 S1–S4 committed on its branch (1 commit, "25,694 programs"), working on S5; no PR yet | 13:02 (S1–S4 commit: 25,694 programs, 43.95M instructions) |
 | **launcher** | the desktop launcher (U1–U5) | `agent/launcher` | `D:\Developer\triumph-rebuild-launcher` | 🔄 U1–U5 logic and a first shell committed (22 tests); premium design passes in progress | 13:02 |
 | **vfs** | overlay file system (V1–V4) | `agent/vfs` | `D:\Developer\triumph-rebuild-vfs` | ✅ **V1–V4 closed, PR open** | [#3](https://github.com/jleybourne/triumph-rebuild/pull/3) (2 commits) |
-| **upscale** | DLSS and FSR backends, standalone (P1–P5) | `agent/upscale` | `D:\Developer\triumph-rebuild-upscale` | 🔄 started 12:50 | — |
+| **upscale** | DLSS and FSR backends, standalone (P1–P5) | `agent/upscale` | `D:\Developer\triumph-rebuild-upscale` | ⚠️ **P1, P2, P4, P5 closed; P3 (FSR) blocked on the FidelityFX SDK download.** PR open | [#4](https://github.com/jleybourne/triumph-rebuild/pull/4) (3 commits) |
 | **input** | controller and keyboard (I1–I3) | `agent/input` | `D:\Developer\triumph-rebuild-input` | ✅ **I1–I3 closed, PR open** | [#2](https://github.com/jleybourne/triumph-rebuild/pull/2) (2 commits) |
 
 No lane merges; each opens a PR to `master` titled `agent/<lane>: <what closed>`.
@@ -62,6 +62,14 @@ From **vfs** (details in `agents/vfs.md` on `agent/vfs`, PR #3):
 15. Decide whether T: starts empty each run; today it persists like storage.
 16. Numbers: 18 tests (workspace 61); 10,000-file bench +3.3 µs/file (+4.5 %) over plain Windows open+read; 0 wrong reads; real game folder hash `c13db2877f6ed4ea` unchanged.
 
+From **upscale** (details in `agents/upscale.md` on `agent/upscale`, PR #4):
+17. **DLSS works** through Streamline 2.14.16 on the analytic scene (2560x1440 out). Quality: 30.96 dB vs bilinear 26.50 (moving), 0.981 ms. Performance: 31.30 dB, 1.147 ms. 0 NaN, 0 black frames. Sign sweep: Streamline's `jitterOffset` is the **negated** sample offset; motion vectors pass through unchanged. Use the SDK's render sizes (balanced 1485x835), not a ratio rule.
+18. Registry entries to add: `upscaler.dlss_dll` and `upscaler.streamline_dir`. Until then, `REBUILD_DLSS_DLL`, `REBUILD_STREAMLINE_DIR` and `REBUILD_SL_LOGS`. The lane extracted the SDK to `D:	ools\dlss\sl-2.14.16` and the runtime DLLs to `D:	ools\dlss\sl-runtime` (outside git).
+19. **FidelityFX SDK download needed** (MIT, GPUOpen GitHub) for P3, side-by-side, and the FSR sign sweep. Not downloaded: owner or lead decision.
+20. Build 7: under manual hooking, call `slUpgradeInterface` on the layer's swap chain right after creating it, or Streamline logs missing presents.
+21. **The NVIDIA driver starts its own `nvngx_update.exe` during NGX init, even with over-the-air updates off** (downloaded plugins are not loaded). This touches the launcher's no-telemetry line.
+22. NGX reports DLSS version 0.0.0; read the DLL's file version for the frame line.
+
 From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f):
 6. Lane `launcher` U5 says "launch the proofs (`gputest --bare`)", but section 2 says helpers never run `gputest`. The launcher lane was told to build U5's launch path against a fake child process in tests, and to run no `gputest` itself. Please say which you meant.
 7. Lane `upscale` P3 needs AMD's FidelityFX SDK. If it isn't already on disk, getting it is a download. The lane was told not to download without your say, and to do P1, P2, P4 and P5 first. For DLSS it was pointed at the Streamline SDK zip already in `D:\tools\dlss\download` (production `bin/x64`, extracted outside git) and the user-supplied `nvngx_dlss.dll` in `D:\tools\dlss`.
@@ -80,6 +88,7 @@ From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f)
 
 | time | event |
 |:--|:--|
+| 13:10 | **upscale**: P1, P2, P4, P5 closed; P3 blocked on the FidelityFX SDK download; PR #4 open (not merged). |
 | 13:05 | **vfs done**: V1–V4 closed, PR #3 open (not merged). |
 | 13:00 | Launcher lane given the owner's premium-design brief. |
 | 13:00 | **input done**: I1–I3 closed, PR #2 open (not merged). |

@@ -1,0 +1,16 @@
+runtimecensus — Build 3: what the title's 697 missing imports bind to (265 more are supplied by the title's own DLLs)
+
+   34    4.9 %  override: the host has it, the meaning differs here (ours)
+  624   89.5 %  host: bound straight to the host's own function, no wrapper
+   39    5.6 %  console DLL: the whole DLL is console-only (ours)
+
+overrides by reason: files 15 · memory 2 · modules 16 · process 1
+
+console-only DLLs (functions):
+     9  acphal.dll
+     5  chad.dll
+     4  d3d12_xs.dll
+     5  xapu.dll
+     1  xcrdapi.dll
+     2  xg_xs.dll
+    13  xmem.dll

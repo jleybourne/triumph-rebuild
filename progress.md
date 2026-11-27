@@ -1,7 +1,7 @@
 # Progress
 
 ```
-work toward 30 fps   [███████░░░░░░░░░░░░░]  36 %
+work toward 30 fps   [███████░░░░░░░░░░░░░]  37 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (fork reference: 25,694 translated, 7 pipelines refused)
 launcher track       [███░░░░░░░░░░░░░░░░░]  1 / 7 steps (C1 settings registry; the mods tab's file system is merged); does not count toward the fps %
 measured fps         none yet — the title has not rendered a frame on this code
@@ -21,14 +21,14 @@ second row and is the number that counts.
 | 0 | three answers before more code | 10 | 70 % | 7.0 | (a) upload **done**; (b) translation **done**: 0.43 µs a draw; (c) blocked until the title renders (moved to Build 5) |
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
-| 3 | PE loader + console runtime | 15 | 45 % | 6.75 | PE loader + import census (PR #1), file system with overlay and mods (PR #3), input with menu isolation (PR #2) merged; kernel, wiring and the discovery loop todo |
+| 3 | PE loader + console runtime | 15 | 50 % | 7.5 | PE loader + import census (PR #1), file system with overlay and mods (PR #3), input with menu isolation (PR #2) merged; kernel, wiring and the discovery loop todo |
 | 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 25 % | 3.75 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; decoder in lane `shader` |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 0 % | 0 | plan corrected: the upscale pass is found by bindings; lowering the internal resolution is its own task |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **36.3 ≈ 36 %** | |
+| | **total** | **100** | | **37.05 ≈ 37 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -81,6 +81,24 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — Build 3: 89.5 % of the title's imports bind straight to the host
+
+```
+[███████░░░░░░░░░░░░░]  37 %   (was 36 %: +0.75 Build 3 runtime census)
+shaders     0 / 25,694
+measured fps   none yet
+```
+
+- **Built** `crates/runtime`: a three-tier resolver (override / host / console-only) behind the loader's
+  `Resolver` trait. Also `runtimecensus`, which looks every import up on the real host.
+- **Measured:** of the 697 imports the title's own DLLs don't supply, **624 (89.5 %) bind straight to the
+  host** with no wrapper, 34 are overrides (files 15, modules 16, memory 2, process 1), and 39 are
+  console-only in 7 DLLs. [`runs/build3-runtime-census.md`](runs/build3-runtime-census.md)
+- **Decided:** the runtime is 73 functions, not a kernel. Threads, synchronisation, timers, TLS, the C
+  runtime, sockets and HTTP stay the host's. Audio (19) and DirectStorage (1) become helper lanes; `xmem`,
+  the overrides and D3D12.X are mine.
+- **Next:** `xmem` onto Builds 1-2's memory, then the file and module overrides.
 
 ### 2026-11-27 — Lanes `input` and `vfs` merged: the file system and input for Build 3
 

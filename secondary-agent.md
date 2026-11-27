@@ -26,7 +26,7 @@ Read, in this order: `README.md`, `plan.md` (the six decisions), `tasks.md` (you
 ```powershell
 cd D:\Developer\triumph-rebuild
 git fetch origin
-git worktree add ..\triumph-rebuild-<lane> -b agent/<lane> origin/master    # <lane> = loader, shader, launcher, vfs, upscale or input
+git worktree add ..\triumph-rebuild-<lane> -b agent/<lane> origin/master    # <lane> = shader, launcher, upscale, audio or dstorage (loader, vfs, input: merged)
 cd ..\triumph-rebuild-<lane>
 cargo test --release                                                         # must be green before you change anything
 ```
@@ -131,6 +131,39 @@ New crate `crates/vfs` (package `rebuild-vfs`). Pure Rust, no GPU, no title code
 | V3 | **mods**: ordered layers between overlay and base (`mods/<name>/`, later wins); `conflicts()` lists every path more than one enabled mod provides, and which wins | unit tests: order, enable/disable, conflicts |
 | V4 | a file-handle API the runtime will call (open, read at offset, size, enumerate a directory, close), with no global state | tests; a benchmark of open+read on 10,000 small files (number in `agents/vfs.md`) |
 
+### Lane `audio` — the console's audio hardware (Build 3 piece)
+
+New crate `crates/audio` (package `rebuild-audio`). No GPU. Read `runs/build3-runtime-census.md` first. The
+title imports 19 functions from three console-only DLLs: `acphal.dll` (`AcpHalCreate`,
+`AcpHalAllocateShapeContexts`, `AcpHalReleaseShapeContexts`, `ApuAlloc`, `ApuFree`, `ApuCreateHeap`,
+`ApuIsVirtualAddressValid`, `ApuMapApuAddress`, `ApuMapVirtualAddress`), `xapu.dll` (`XApuConnect`,
+`XApuDisconnect`, `XApuEnqueueCommand`, `XApuDequeueResult`, `XApuGetResultCount`) and `chad.dll`
+(`XDspActivate`, `XDspDeactivate`, `XDspConnectWithMaximumStreamLimit`, `XDspDisconnect`, `XDspSubmitCommand`).
+The fork's `victory-hle` audio and APU modules are the reference for what they do (read, don't copy).
+
+| # | task | closes when |
+|:--:|:--|:--|
+| A1 | what each function does and what the title passes (from the fork's design and any run logs it has), in `agents/audio.md` | every one of the 19 has a stated meaning, or is marked unknown |
+| A2 | the APU memory functions (`ApuAlloc` / `ApuFree` / `ApuCreateHeap` / `Apu*Address`) over ordinary host memory, address round trips exact | unit tests |
+| A3 | the command queues (`XApu*`, `XDsp*`) as host-side queues; the decode work they carry (XMA / Opus / shape contexts) on the CPU through a host decoder where one exists (an MIT/BSD Opus decoder is fine; none is committed with title data) | a decode test on synthetic input; results dequeued in order |
+| A4 | output to the host through WASAPI, in a thread of its own; no audio work on the title's threads | a test tone plays; no call blocks longer than 1 ms (measured) |
+
+Signatures are the lead's to bind (`crates/runtime` resolves imports); expose plain Rust functions with the
+console argument layout documented, and the lead wires them.
+
+### Lane `dstorage` — DirectStorage (Build 3 piece)
+
+New crate `crates/dstorage` (package `rebuild-dstorage`). No GPU at first. The title imports one function,
+`xcrdapi.dll!DStorageGetFactory`. The fork found its requests use **zlib** and **BCPack**, and that BCPack output
+is in the console's tiled texture layout (`docs/design/gpu-textures.md` on the fork).
+
+| # | task | closes when |
+|:--:|:--|:--|
+| D1 | the console DirectStorage factory, queue and request layouts the title uses (from the fork's design and run logs), in `agents/dstorage.md` | each interface method the title calls is named, by vtable slot |
+| D2 | requests served from files through `crates/vfs` (merged), on worker threads; completion through a fence or status array the title polls | ordered completion test on synthetic files |
+| D3 | zlib decompression (a Rust crate under MIT/Apache/zlib is fine) | round-trip and throughput number in `agents/dstorage.md` |
+| D4 | BCPack: what it is and whether it can be decoded on the CPU or must be on the GPU; the fork's notes first | a written answer with evidence; a decoder only if it is plain code with no performance cost on the GPU side |
+
 ### Lane `upscale` — the DLSS and FSR backends, standalone (Build 7 piece)
 
 New crate `crates/upscale` (package `rebuild-upscale`), plus a binary `apps/rebuild/src/bin/upscaletest.rs`.
@@ -175,9 +208,9 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, after merging lanes input (PR #2) and vfs (PR #3)
-progress  36 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
-tests     95 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 13, input 16, vfs 18)
+updated   2026-11-27, after the runtime census (89.5 % of imports bind to the host); lanes audio and dstorage added
+progress  37 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
+tests     97 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 13, input 16, vfs 18, runtime 2)
 ```
 
 | build | state | where | proof |
@@ -193,7 +226,7 @@ tests     95 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist
 | 6 list translation | 🔄 core built | `crates/xlist` | Build 0 (b) |
 | 7 upscaler | ⏳ (plan decision 5 corrected) | — | — |
 | 8 pacing · 9 AMD testers | ⏳ | — | — |
-| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | running from 12:40: `agent/loader`, `agent/shader` (S5 added). Written, to start: `agent/launcher`, `agent/vfs`, `agent/upscale`, `agent/input` | their pull requests |
+| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | merged: `loader` (#1), `input` (#2), `vfs` (#3). Running: `shader`, `launcher`, `upscale`. **New, to start: `audio`, `dstorage`** | their pull requests |
 | launcher track | 🔄 C1 registry built; launcher app in lane `launcher` | `crates/config`, [design](docs/design/launcher.md) | 6 unit tests |
 
 ## 9. Taking over as lead
@@ -234,7 +267,7 @@ If the owner hands you the whole job, you are the lead. Read `README.md`, `plan.
 | 2 | ✅ `sir`: memory lowering and native 16-bit (done: 342 loads + 331 stores through tiled windows and 650 half ops exact on the card) | — |
 | 3 | merge lane `shader` (S1-S4), then GFX10 → `sir`: CFG, SSA, structurize; agnostic programs first | census column "emitted"; the shader bar in `progress.md` starts moving |
 | 4 | oracle diff harness against the fork's translations, per hash | programs count toward 25,694 only when they match |
-| 5 | ✅ lane `loader` merged. Build 3's second half: kernel (threads, events, waits, timers, TLS), files with a write overlay, the GDK discovery loop from `agents/loader-imports.csv` **plus every `GetProcAddress` miss** | the title's startup path runs to its first render call |
+| 5 | ✅ lanes `loader`, `vfs`, `input` merged; ✅ runtime census (89.5 % host). Build 3's second half, now 73 functions: kernel (threads, events, waits, timers, TLS), files with a write overlay, the GDK discovery loop from `agents/loader-imports.csv` **plus every `GetProcAddress` miss** | the title's startup path runs to its first render call |
 | 6 | Build 5: D3D12.X device, lists via `crates/xlist`, descriptor heaps with a dirty list, present, **the frame line**; then Build 0 (c) (per-list timestamps, RT on and off) and direct read vs ring per resource | a non-black frame; the first measured fps |
 | 7 | Build 7: find the title's upscale pass by bindings; lower the internal resolution through tiles; DLSS (Streamline) and FSR (FidelityFX SDK) | correct picture at a lower internal resolution |
 | 8 | Build 8 pacing → **30 fps on NVIDIA**; Build 9 AMD testers | the frame line |

@@ -5,6 +5,7 @@ with the raw output beside it. Machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB, PC
 
 | | run | answer | raw |
 |:--:|:--|:--|:--|
+| ✅ | [Build 3 — what the title's imports bind to](build3-runtime-census.md) | 624 of 697 imports (89.5 %) bind straight to the host; 34 overrides; 39 console-only in 7 DLLs | [runtimecensus](build3-runtime-census.txt) |
 | ✅ | [Build 4 — the shader core on the card](build4-sirtest.md) | IR → HLSL → DXC → GPU: 300 runs exact on every lane; per-lane `WaveReadLaneAt` exact | [sirtest](build4-sirtest.txt) |
 | ✅ | [Build 2 — labels into title memory](build2-labels.md) | title memory opens as a GPU heap; GPU labels seen 65 µs before the fence; 200/200 in order | [gputest --labels](build2-labels.txt) |
 | ✅ | [Build 2 — the upload ring](build2-ring.md) | submit thread 32 µs a frame; 34 MB / 342k runs land in 19.4 ms; verified after 60 frames | [gputest --ring](build2-ring.txt) |

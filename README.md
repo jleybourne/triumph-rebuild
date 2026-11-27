@@ -4,7 +4,7 @@
 built around the right memory model from the first line, aiming at 30 frames a second.</b></p>
 
 <p align="center">
-  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-36%25-yellow?style=for-the-badge"></a>
+  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-37%25-yellow?style=for-the-badge"></a>
   <a href="progress.md"><img alt="frame" src="https://img.shields.io/badge/title%20frame-not%20yet-lightgrey?style=for-the-badge"></a>
   <a href="tasks.md"><img alt="shaders" src="https://img.shields.io/badge/shaders-0%20%2F%2025%2C694-lightgrey?style=for-the-badge"></a>
   <a href="plan.md"><img alt="target" src="https://img.shields.io/badge/target-30%20fps-blue?style=for-the-badge"></a>
@@ -14,11 +14,11 @@ built around the right memory model from the first line, aiming at 30 frames a s
   <a href="https://www.rust-lang.org"><img alt="Rust" src="https://img.shields.io/badge/Rust-1.100-000000?logo=rust"></a>
   <a href="https://learn.microsoft.com/windows/win32/direct3d12/directx-12-programming-guide"><img alt="Direct3D 12" src="https://img.shields.io/badge/Direct3D-12-0078D4"></a>
   <a href="HANDOFF.md"><img alt="GPU" src="https://img.shields.io/badge/tested%20on-RTX%204070%20Ti-76B900?logo=nvidia"></a>
-  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-95%20green-brightgreen"></a>
+  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-97%20green-brightgreen"></a>
   <a href="LICENSE"><img alt="licence" src="https://img.shields.io/badge/licence-GPL--3.0--only-blue"></a>
 </p>
 
-<p align="center"><a href="progress.md"><b>Progress <code>[███████░░░░░░░░░░░░░]</code> 36 %</b></a><br>
+<p align="center"><a href="progress.md"><b>Progress <code>[███████░░░░░░░░░░░░░]</code> 37 %</b></a><br>
 <sub>work toward 30 fps, weighted by build step · no title frame measured yet</sub></p>
 
 <table align="center">
@@ -58,7 +58,7 @@ Measured on one machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB RAM, PCIe 3.0, Win
 | **Shaders** | 0 / 25,694; core proven on the card: IR → HLSL → DXC → GPU exact, wave64 on wave32 exact ([run](runs/build4-sirtest.md)) | 25,694, wave32, 0 refused |
 | **Launcher** | settings registry built (18 options, validated); desktop launcher in progress ([design](docs/design/launcher.md)) | launcher, mods, profiles, in-game menu |
 | **Upscaler** | not started; plan corrected (the title's upscale pass is found by bindings) | DLSS on NVIDIA, FSR on AMD |
-| **Tests** | 95 green (`uma` 24, `xlist` 5, `sir` 13, `config` 6, `loader` 13, `input` 16, `vfs` 18) | |
+| **Tests** | 97 green (`uma` 24, `xlist` 5, `sir` 13, `config` 6, `loader` 13, `input` 16, `vfs` 18, `runtime` 2) | |
 
 Every result is reported as **fps · ms · draws · dropped** together, with resolution and upscaler mode.
 A faster frame that draws less of the scene is not a win.
@@ -132,6 +132,10 @@ Full status with outcomes: **[tasks](tasks.md)** · **[progress](progress.md)**.
 
 ## 🔎 Recent findings
 
+- **89.5 % of the title's imports bind straight to Windows.** The title is native x86-64, so 624 of the 697
+  functions it needs are the host's own. Only 73 are ours: memory, files, modules, D3D12.X, audio and
+  DirectStorage.
+
 - **Shaders read the title's memory at its own addresses.** Loads and stores lower to a window descriptor and
   a 32-bit offset, with no page directory, and are exact on the card through real tiled windows. Native half
   precision is bit-exact too.
@@ -167,7 +171,7 @@ Full status with outcomes: **[tasks](tasks.md)** · **[progress](progress.md)**.
 Requirements: Windows 10/11 x64, a Direct3D 12 GPU with tiled resources tier 2 or higher, and Rust.
 
 ```powershell
-cargo test --release                                  # 95 tests, no GPU or game data needed
+cargo test --release                                  # 97 tests, no GPU or game data needed
 cargo run --release --bin gputest                     # the GPU writes, the CPU reads, no copy
 cargo run --release --bin gputest -- --bare           # control: never blame the machine
 cargo run --release --bin gputest -- --tiled          # Build 1: tiles, console addresses, sharing
@@ -192,6 +196,7 @@ crates/config     every option, declared once: the launcher, the layer and the i
 crates/loader     PE32+ parser, map at base, bind through a resolver; the title's import census (apps/rebuild/src/bin/imports.rs)
 crates/vfs        console paths → host: read-only package, write overlay, mods as ordered layers
 crates/input      XInput pads, keyboard stand-in pad, in-game menu input isolation
+crates/runtime    what the title's imports bind to: host, override or console-only
 apps/rebuild      the launcher, gputest, uploadbench, listbench
 runs/             every measurement: a write-up and the raw output beside it
 ```
