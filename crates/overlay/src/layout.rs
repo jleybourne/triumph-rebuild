@@ -164,9 +164,15 @@ fn readout(p: &mut Painter, st: &Stats, size: (u32, u32)) -> [f32; 4] {
     let x = (size.0 as f32 - p.px(t::MARGIN) - w).max(0.0).round();
     let y = p.px(t::MARGIN).min((size.1 as f32 - h).max(0.0));
     let r = [x, y, w.min(size.0 as f32 - x), h.min(size.1 as f32 - y)];
+    // a soft shadow so the readout reads over a bright frame, then the pill and its line
+    let s = p.px(t::HUD_SHADOW_SPREAD);
+    p.rect(r[0] - s, r[1] - s, r[2] + 2.0 * s, r[3] + 2.0 * s, t::SHADOW, p.px(t::HUD_RADIUS) + s);
     p.rect(r[0], r[1], r[2], r[3], t::HUD, p.px(t::HUD_RADIUS));
     p.text(x + pad, y + pad, &line, t::TEXT);
-    r
+    // the reported rect spans the shadow too, clamped to the target
+    let px0 = (r[0] - s).max(0.0);
+    let py0 = (r[1] - s).max(0.0);
+    [px0, py0, (r[0] + r[2] + s - px0).min(size.0 as f32 - px0), (r[1] + r[3] + s - py0).min(size.1 as f32 - py0)]
 }
 
 fn panel(p: &mut Painter, menu: &Menu, st: &Stats, size: (u32, u32), key_name: &str) -> [f32; 4] {
@@ -179,7 +185,11 @@ fn panel(p: &mut Painter, menu: &Menu, st: &Stats, size: (u32, u32), key_name: &
     let inner = (w - 2.0 * pad).max(1.0);
     let row_h = p.px(t::ROW_H).max(p.font.line as f32 + 2.0);
     let (left, right) = (x0 + pad, x0 + w - pad);
-    // the panel goes under everything: drawn first, its height known at the end
+    // the shadow halo and the panel go under everything: drawn first (behind), their size known at the end.
+    // two concentric low-alpha rounded rects fake a soft drop shadow so the panel reads over any bright frame.
+    let shadow_at = p.quads.len();
+    p.rect(x0, y0, w, 1.0, t::SHADOW, 0.0);
+    p.rect(x0, y0, w, 1.0, t::SHADOW, 0.0);
     let panel_at = p.quads.len();
     p.rect(x0, y0, w, 1.0, t::PANEL, 0.0);
 
@@ -187,7 +197,11 @@ fn panel(p: &mut Painter, menu: &Menu, st: &Stats, size: (u32, u32), key_name: &
     let header_h = p.px(t::HEADER_H).max(row_h);
     p.rect(x0, y0, w, header_h, t::HEADER, p.px(t::RADIUS));
     p.rect(x0, y0 + header_h - p.px(t::RADIUS), w, p.px(t::RADIUS), t::HEADER, 0.0);
-    p.row_text(left, y0, header_h, "Triumph rebuild", t::TITLE);
+    // the brand mark: a short accent bar anchoring the title (the title shifts right to clear it)
+    let bar_w = p.px(t::STRIPE_W).max(2.0);
+    let bar_h = (header_h * 0.46).round();
+    p.rect(left, y0 + ((header_h - bar_h) / 2.0).round(), bar_w, bar_h, t::ACCENT, bar_w * 0.5);
+    p.row_text(left + bar_w + pad * 0.55, y0, header_h, "Triumph rebuild", t::TITLE);
     let hint = format!("{key_name} to close");
     p.row_text_right(right, y0, header_h, &p.font.fit(&hint, (inner / 2.0) as u32), t::DIM);
     let mut y = y0 + header_h + pad / 2.0;
@@ -206,7 +220,10 @@ fn panel(p: &mut Painter, menu: &Menu, st: &Stats, size: (u32, u32), key_name: &
         p.row_text(x + pad / 2.0, y, tab_h, label, if on { t::TITLE } else { t::DIM });
         x += tw + pad / 2.0;
     }
-    y += tab_h + pad / 2.0;
+    // a hairline between the tab strip and the content below it
+    let tabs_bottom = y + tab_h;
+    p.rect(left, (tabs_bottom + pad * 0.25).round(), inner, p.px(1.0).max(1.0), t::TAB_ON, 0.0);
+    y = tabs_bottom + pad / 2.0;
 
     // rows
     let rows: Vec<(String, String, bool, bool)> = match menu.page() {
@@ -233,7 +250,8 @@ fn panel(p: &mut Painter, menu: &Menu, st: &Stats, size: (u32, u32), key_name: &
         let on = selected == Some(i);
         if on {
             p.rect(x0 + pad / 2.0, y, w - pad, row_h, t::SELECTED, p.px(t::ROW_RADIUS));
-            p.rect(x0 + pad / 2.0, y + row_h * 0.2, p.px(t::STRIPE_W).max(2.0), row_h * 0.6, t::ACCENT, 0.0);
+            let stripe_w = p.px(t::STRIPE_W).max(2.0);
+            p.rect(x0 + pad / 2.0, y + row_h * 0.18, stripe_w, row_h * 0.64, t::ACCENT, stripe_w * 0.5);
         }
         let label_color = if !enabled { t::DISABLED } else if on { t::TITLE } else { t::TEXT };
         let label_w = (inner as u32).saturating_sub(p.font.measure(value).min(value_w) + p.px(12.0) as u32);
@@ -270,10 +288,18 @@ fn panel(p: &mut Painter, menu: &Menu, st: &Stats, size: (u32, u32), key_name: &
 
     let h = (y - y0).min(sh - y0).max(1.0);
     p.quads[panel_at] = Quad { rect: [x0, y0, w, h], atlas: [SOLID, 0], color: t::PANEL, radius: p.px(t::RADIUS) };
-    // nothing past the panel's foot (a very short target)
-    let bottom = y0 + h;
+    // the soft shadow, now that the height is known: an outer reach and a darker inner ring, both behind the panel
+    let s = p.px(t::SHADOW_SPREAD);
+    let r = p.px(t::RADIUS);
+    p.quads[shadow_at] = Quad { rect: [x0 - s, y0 - s, w + 2.0 * s, h + 2.0 * s], atlas: [SOLID, 0], color: t::SHADOW, radius: r + s };
+    p.quads[shadow_at + 1] = Quad { rect: [x0 - s / 2.0, y0 - s / 2.0, w + s, h + s], atlas: [SOLID, 0], color: t::SHADOW, radius: r + s / 2.0 };
+    // nothing past the shadow's foot (a very short target); content all sits above the panel's foot
+    let bottom = y0 + h + s;
     p.quads.retain(|q| q.rect[1] + q.rect[3] <= bottom + 0.5);
-    [x0, y0, w, h]
+    // the reported panel spans the shadow too, clamped to the target (every quad lies inside it)
+    let px0 = (x0 - s).max(0.0);
+    let py0 = (y0 - s).max(0.0);
+    [px0, py0, (x0 + w + s - px0).min(sw - px0), (y0 + h + s - py0).min(sh - py0)]
 }
 
 #[cfg(test)]
