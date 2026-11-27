@@ -199,3 +199,9 @@ Design: [`docs/design/launcher.md`](docs/design/launcher.md). Its own bar in `pr
 - One change per measurement; batches cannot be attributed.
 - Never report fps without draws, dropped, output resolution and upscaler mode beside it.
 - If a run shows a device removal, close it with the control (`gputest --bare`) before blaming anything.
+
+## Owner request (2026-11-27): user-set hardware limits for testing
+
+Let people test their own hardware by imposing limits on the app: RAM (job object commit cap + the title budget,
+`crates/runtime/src/budget.rs`), VRAM (budget on our heaps / tiles), CPU cores (job object CPU set / affinity, worker
+pool size), maybe GPU time. Settings in `crates/config` and the launcher; applied before the title starts. Not started.

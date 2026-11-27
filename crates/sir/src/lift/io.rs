@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use rebuild_shader::gfx10::enc::{self, Decoded, Src};
-use rebuild_shader::native::PsInput;
+use rebuild_shader::native::{PsInput, VsInput, VsOutput};
 use rebuild_shader::signature::Element;
 
 use super::{Lifted, Lifter};
@@ -101,12 +101,21 @@ pub struct PsStage<'a> {
     pub input_addr: u32,
 }
 
+/// What the lifter needs to know about a vertex shader (one that runs as the hardware VS).
+pub struct VsStage<'a> {
+    /// The attributes the fetch subroutine loads: channel k of each into its VGPR + k.
+    pub inputs: &'a [VsInput],
+    /// `exp param<n>`: the output row each parameter is.
+    pub outputs: &'a [VsOutput],
+}
+
 /// Which stage the lifted program is (its inputs and outputs).
 #[derive(Default)]
 pub enum Stage<'a> {
     #[default]
     None,
     Ps(PsStage<'a>),
+    Vs(VsStage<'a>),
 }
 
 /// What the stage's inputs and outputs need, gathered while lifting.
@@ -114,8 +123,10 @@ pub enum Stage<'a> {
 pub struct StageUse {
     /// pixel input row → (channels read, interpolation)
     pub inputs: BTreeMap<u8, (u8, Interp)>,
-    /// export target → channels written (0-7 mrt, 8 mrtz)
+    /// export target → channels written (pixel: 0-7 mrt, 8 mrtz; vertex: 12 pos0, 32 + n param n)
     pub exports: BTreeMap<u8, u8>,
+    /// vertex: attribute rows the fetch loads (row → channels)
+    pub attributes: BTreeMap<u8, u8>,
     /// lanes inactive at the final export are discarded
     pub discard: bool,
     /// the same input row read with two interpolation modes (not translated)
@@ -196,13 +207,61 @@ impl Lifter<'_> {
         Some(())
     }
 
+    /// `s_swappc_b64` in a vertex shader: the call into the fetch subroutine. It loads channel k of each
+    /// attribute into its VGPR + k; on the host the input assembler hands them over, so the call becomes
+    /// those loads. The return address it writes is never used as data.
+    pub(super) fn fetch(&mut self, d: &Decoded) -> Option<()> {
+        let Stage::Vs(vs) = &self.stage else { return None };
+        let inputs: Vec<VsInput> = vs.inputs.to_vec();
+        for i in inputs {
+            *self.out.io.attributes.entry(i.row).or_default() |= i.mask;
+            for c in 0..4u8 {
+                if i.mask >> c & 1 == 1 {
+                    self.vwrite_raw(u16::from(i.vgpr + c), format!("@vin{}.{c}@", i.row));
+                }
+            }
+        }
+        if let Src::Sgpr(s) = enc::src(d.get("sdst")?) {
+            self.swrite(u32::from(s), "0u".into())?;
+            self.swrite(u32::from(s) + 1, "0u".into())?;
+        }
+        Some(())
+    }
+
     pub(super) fn export(&mut self, d: &Decoded) -> Option<()> {
-        let Stage::Ps(_) = &self.stage else { return None };
         let target = d.get("target")? as u8;
         let (en, done) = (d.get("en")? as u8, d.get("done")? == 1);
         if d.get("compr")? == 1 {
             return None; // the export patch makes them 32-bit; a compressed one left is not expected
         }
+        if let Stage::Vs(vs) = &self.stage {
+            // pos0 (12) and the parameters (32 + n); pos1-3 (point size, clip distances) next
+            if target != 12 && !(32..64).contains(&target) {
+                self.why = Some(format!("export target {target}"));
+                return None;
+            }
+            if target >= 32 {
+                let Some(o) = vs.outputs.iter().find(|o| o.param == target - 32).copied() else {
+                    self.why = Some("a parameter no output names".into());
+                    return None;
+                };
+                if o.fp16 {
+                    self.why = Some(if o.pack2 { "packed fp16 output" } else { "fp16 output" }.into());
+                    return None;
+                }
+            }
+            *self.out.io.exports.entry(target).or_default() |= en;
+            for c in 0..4u8 {
+                if en >> c & 1 == 1 {
+                    let v = d.get(["vsrc0", "vsrc1", "vsrc2", "vsrc3"][c as usize])? as u16;
+                    self.out.vgprs.insert(v);
+                    let ch = ["x", "y", "z", "w"][c as usize];
+                    self.line(format!("o{target}.{ch} = v{v};"));
+                }
+            }
+            return Some(());
+        }
+        let Stage::Ps(_) = &self.stage else { return None };
         match target {
             0..=8 => {
                 if done && self.out.exec_narrowed {
@@ -352,6 +411,97 @@ pub fn ps_program(l: &Lifted, ps: &PsStage, bind: Option<&super::Bindings>, isg1
             _ => continue, // barycentrics are consumed by v_interp; the rest are not used by v0 programs
         };
         let _ = writeln!(s, "    v{k} = {e};");
+    }
+    s.push_str(&body);
+    s.push_str("    Out r = (Out)0;\n");
+    s.push_str(&returns);
+    s.push_str("    return r;\n}\n");
+    Ok(s)
+}
+
+/// A whole vertex shader: attributes by the input signature (what the fetch loaded), the vertex and instance
+/// ids (v0, v3), the position and the parameters by the output signature.
+pub fn vs_program(l: &Lifted, vs: &VsStage, bind: Option<&super::Bindings>, isg1: &[Element], osg1: &[Element]) -> Result<String, String> {
+    if !l.unsupported.is_empty() {
+        return Err(format!("untranslated: {}", l.unsupported[0].1));
+    }
+    let mut user_init = String::new();
+    for s in &l.live_in {
+        let k = bind.and_then(|b| b.user_dword(*s)).ok_or(format!("reads s{s}, which is no user data"))?;
+        if bind.is_some_and(|b| b.is_heap_base(*s)) {
+            let _ = writeln!(user_init, "    s{s} = 0u; // heap base: descriptors are indexed from the heap's start");
+            continue;
+        }
+        let _ = writeln!(user_init, "    s{s} = sir_ud[{}].{};", k / 4, ["x", "y", "z", "w"][k as usize % 4]);
+    }
+    let mut s = String::from(super::PRELUDE);
+    for k in 0..l.immediate_samplers.len() {
+        let _ = writeln!(s, "SamplerState sir_imm{k} : register(s{k}, space{});", super::IMMEDIATE_SAMPLER_SPACE);
+    }
+    if !user_init.is_empty() {
+        s.push_str("cbuffer SirUserData : register(b0, space0) { uint4 sir_ud[16]; };\n");
+    }
+    let mut body = l.body.clone();
+    s.push_str("struct In {\n");
+    for row in l.io.attributes.keys() {
+        let on_row: Vec<&Element> = isg1.iter().filter(|e| e.register == u32::from(*row) && e.system == 0).collect();
+        for e in &on_row {
+            let first = e.mask.trailing_zeros() as u8;
+            let n = e.mask.count_ones() as usize;
+            let _ = writeln!(s, "    {} a{row}_{first} : {}{};", hlsl_type(e.comp, n), e.name, e.index);
+            for c in 0..4u8 {
+                if e.mask >> c & 1 == 1 {
+                    let field = if n == 1 { String::new() } else { format!(".{}", ["x", "y", "z", "w"][(c - first) as usize]) };
+                    body = body.replace(&format!("@vin{row}.{c}@"), &format!("asuint(i.a{row}_{first}{field})"));
+                }
+            }
+        }
+        // a channel the format does not supply: the fetch's default (0, and 1.0 for w)
+        for c in 0..4u8 {
+            body = body.replace(&format!("@vin{row}.{c}@"), if c == 3 { "0x3f800000u" } else { "0u" });
+        }
+    }
+    let (vid, iid) = (l.vgprs.contains(&0), l.vgprs.contains(&3));
+    if vid {
+        s.push_str("    uint vid : SV_VertexID;\n");
+    }
+    if iid {
+        s.push_str("    uint iid : SV_InstanceID;\n");
+    }
+    s.push_str("};\nstruct Out {\n");
+    let mut returns = String::new();
+    for target in l.io.exports.keys() {
+        if *target == 12 {
+            s.push_str("    float4 pos : SV_Position;\n");
+            returns.push_str("    r.pos = asfloat(o12);\n");
+            continue;
+        }
+        let param = target - 32;
+        let row = vs.outputs.iter().find(|o| o.param == param).map(|o| o.row).ok_or("a parameter no output names")?;
+        let on_row: Vec<&Element> = osg1.iter().filter(|e| e.register == u32::from(row) && e.system == 0).collect();
+        if on_row.is_empty() {
+            return Err(format!("no OSG1 element for row {row}"));
+        }
+        for e in &on_row {
+            let first = e.mask.trailing_zeros() as u8;
+            let n = e.mask.count_ones() as usize;
+            let _ = writeln!(s, "    {} p{row}_{first} : {}{};", hlsl_type(e.comp, n), e.name, e.index);
+            let chans: Vec<&str> = (0..4u8).filter(|c| e.mask >> c & 1 == 1).map(|c| ["x", "y", "z", "w"][c as usize]).collect();
+            let src = format!("o{target}.{}", chans.join(""));
+            let _ = writeln!(returns, "    r.p{row}_{first} = {};", as_type(e.comp, &src));
+        }
+    }
+    s.push_str("};\nOut main(In i) {\n");
+    s.push_str(&super::declarations(l));
+    s.push_str(&user_init);
+    for t in l.io.exports.keys() {
+        let _ = writeln!(s, "    uint4 o{t} = 0;");
+    }
+    if vid {
+        s.push_str("    v0 = i.vid;\n");
+    }
+    if iid {
+        s.push_str("    v3 = i.iid;\n");
     }
     s.push_str(&body);
     s.push_str("    Out r = (Out)0;\n");

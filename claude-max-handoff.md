@@ -133,3 +133,11 @@ The owner's rules, in their own words:
 | tools | `apps/rebuild/src/bin/`: `runtitle`, `maptitle`, `runtimecensus`, `gputest`, `sirtest`, `uploadbench`, `listbench` |
 | helper status (coordinator's) | `agents/secondary-agents-updates.md` |
 | Claude memory for this project | `C:\Users\Jayde\.claude\projects\D--Developer-triumph-rebuild\memory\` |
+
+## In flight (2026-11-27, usage limit)
+
+- Vertex shaders: `sir` has `Stage::Vs(VsStage)`, the fetch call (`s_swappc_b64` -> attribute loads), `s_getpc_b64`,
+  VS exports (pos0, param n; fp16 outputs refused with a reason) and `vs_program` (v0 = SV_VertexID, v3 = SV_InstanceID,
+  per the fork's io.rs). Builds; NOT yet wired into `translate` (add a `vs` mode like `ps_report`, compile `vs_6_6`).
+- Owner request: user-set RAM / VRAM / CPU-core limits for testing (tasks.md, end).
+- The title has not been run since the kernel-spin fix (2a2af01); ask the owner before any run.

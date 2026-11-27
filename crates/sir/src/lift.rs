@@ -120,7 +120,7 @@ fn inline_bits(code: u16) -> String {
 
 pub mod io;
 pub mod res;
-pub use io::{ps_program, PsStage, Stage};
+pub use io::{ps_program, vs_program, PsStage, Stage, VsStage};
 pub use res::Bindings;
 
 struct Lifter<'a> {
@@ -351,6 +351,13 @@ impl Lifter<'_> {
         let d = enc::decode(i);
         match i.encoding {
             Encoding::Sopp => self.sopp(name),
+            Encoding::Sop1 if name == "s_swappc_b64" => self.fetch(&d),
+            Encoding::Sop1 if name == "s_getpc_b64" && matches!(self.stage, Stage::Vs(_)) => {
+                // only ever the base of the fetch subroutine's address
+                let s = d.get("sdst")?;
+                self.swrite(s, "0u".into())?;
+                self.swrite(s + 1, "0u".into())
+            }
             Encoding::Sop1 | Encoding::Sop2 | Encoding::Sopc | Encoding::Sopk => self.salu(name, &d),
             Encoding::Vintrp => self.interp(name, &d),
             Encoding::Smem => self.smem(name, &d),
