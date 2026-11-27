@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! REBUILD_SHADERS=D:\victory-data\shaders.rpf cargo run --release --bin execcheck -- [--stage cs|ps|vs|all]
-//!     [--only <hash>] [--limit N] [--debug] [--out <dir>]
+//!     [--only <hash>[,<hash>...] | @<file of hashes>] [--limit N] [--debug] [--gis] [--card] [--out <dir>]
 //! ```
 //!
 //! - Programs: every agnostic VS/PS/CS the translator takes (`rebuild_sir::lift::lift_program`), compiled with
@@ -87,19 +87,19 @@ pub struct Skip {
 }
 
 /// Lifts, emits and compiles (DXC only when the HLSL changed) every agnostic program of the stages asked for.
-fn prepare(walk: &census::Walk, stages: &[&'static str], out: &Path, only: Option<&str>) -> (Vec<Prog>, Vec<Skip>) {
+fn prepare(walk: &census::Walk, stages: &[&'static str], out: &Path, only: Option<&BTreeSet<String>>) -> (Vec<Prog>, Vec<Skip>) {
     let dxc = dxc().expect("dxc.exe (Windows SDK) or REBUILD_DXC");
     let next = AtomicUsize::new(0);
     let progs = Mutex::new(Vec::new());
     let skips = Mutex::new(Vec::new());
     std::thread::scope(|s| {
-        for _ in 0..workers() {
+        for _ in 0..workers().min(rebuild_pipelines::translate::MAX_DXC) {
             s.spawn(|| {
                 let mut f = Findings::default();
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(p) = walk.programs.get(i) else { break };
-                    if only.is_some_and(|h| h != p.hash) {
+                    if only.is_some_and(|set| !set.contains(&p.hash)) {
                         continue;
                     }
                     let kind = match (&p.native.io, p.native.stage) {
@@ -142,7 +142,21 @@ fn translate(p: &census::Program, kind: &'static str, dxc: &Path, out: &Path) ->
     if !same {
         std::fs::write(&hl, &h.src).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(&obj);
-        tr::compile_file(dxc, h.stage, &hl, &obj).map_err(|_| "not compiled: dxc error".to_string())?;
+        if flag("--gis") {
+            // the experiment: our HLSL with IEEE strictness (-Gis), to name what DXC's default float freedom changes
+            let r = std::process::Command::new(dxc)
+                .args(["-T", &format!("{}_6_6", h.stage.name()), "-Gis"])
+                .args(tr::DXC_ARGS)
+                .arg(&obj)
+                .arg(&hl)
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !r.status.success() {
+                return Err("not compiled: dxc error".into());
+            }
+        } else {
+            tr::compile_file(dxc, h.stage, &hl, &obj).map_err(|_| "not compiled: dxc error".to_string())?;
+        }
     }
     let dxil = std::fs::read(&obj).map_err(|e| e.to_string())?;
     let threads = match &p.native.io {
@@ -179,6 +193,8 @@ pub struct Oracle {
     pub statics: Vec<[u32; 10]>,
     /// root CBVs, SRVs, UAVs and root-indexed views the oracle binds outside the heap
     pub root_views: usize,
+    /// `[WaveSize]` of the oracle (0: none)
+    pub wave: u32,
 }
 
 fn oracle(dir: &Path, hash: &str) -> Result<Oracle, String> {
@@ -215,7 +231,12 @@ fn oracle(dir: &Path, hash: &str) -> Result<Oracle, String> {
         at += n;
     }
     root_views += word(&mut at)? as usize;
-    Ok(Oracle { dxil, statics, root_views })
+    // the wave size the oracle demands ([WaveSize]: PSV0 runtime info, minimum expected lane count)
+    let wave = rebuild_shader::Container::parse(&dxil)
+        .ok()
+        .and_then(|c| c.part(rebuild_shader::FourCC::PSV0).and_then(|p| p.data.get(20..24).map(|w| u32::from_le_bytes(w.try_into().unwrap()))))
+        .unwrap_or(0);
+    Ok(Oracle { dxil, statics, root_views, wave })
 }
 
 /// The result of one program.
@@ -291,12 +312,15 @@ fn main() {
         Some("all") => vec!["cs", "ps", "vs"],
         _ => vec!["cs"],
     };
-    let only = arg("--only");
+    let only: Option<BTreeSet<String>> = arg("--only").map(|v| match v.strip_prefix('@') {
+        Some(f) => std::fs::read_to_string(f).unwrap_or_default().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
+        None => v.split(',').map(str::to_string).collect(),
+    });
     let csv = out.join("exec.csv");
 
     let data = std::fs::read(&path).expect("read the shaders.rpf copy");
     let walk = census::walk(&data, workers());
-    let (mut progs, skips) = prepare(&walk, &stages, &out, only.as_deref());
+    let (mut progs, skips) = prepare(&walk, &stages, &out, only.as_ref());
     drop(walk);
     drop(data);
     if flag("--card") {

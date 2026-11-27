@@ -417,7 +417,11 @@ impl Diff {
     /// The verdict and its named reason.
     pub fn verdict(&self) -> (&'static str, String) {
         if self.differ == 0 {
-            return if self.changed == 0 { ("vacuous", "no output word written".into()) } else { ("match", String::new()) };
+            return match (self.words, self.changed) {
+                (0, _) => ("vacuous", "no outputs to compare (the program writes nothing)".into()),
+                (_, 0) => ("vacuous", "no output word written".into()),
+                _ => ("match", String::new()),
+            };
         }
         let other = self.differ - self.nan_payload - self.signed_zero - self.nan_mismatch;
         let reason = if other == 0 && self.nan_mismatch == 0 && self.signed_zero == 0 {
@@ -448,6 +452,9 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
         }
     };
     let row = |verdict: &'static str, reason: String, detail: String| Row { hash: p.hash.clone(), stage: p.stage, single: p.single, verdict, reason, detail };
+    if o.wave > 32 {
+        return row("untested", format!("the oracle needs wave size {} (no adapter here runs it)", o.wave), String::new());
+    }
     if o.root_views > 0 {
         return row("untested", "the oracle binds root views".into(), String::new());
     }
