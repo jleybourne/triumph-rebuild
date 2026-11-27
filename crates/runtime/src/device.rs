@@ -474,6 +474,8 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
     static CREATING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _one = CREATING.lock().unwrap_or_else(|e| e.into_inner());
     if DEVICE.get().is_none() {
+        // Streamline (DLSS behind the title's FidelityFX calls) must start before the device exists
+        rebuild_ffx::backends::prepare_dlss();
         let mut host: Option<ID3D12Device> = None;
         if let Err(e) = unsafe { D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_1, &mut host) } {
             eprintln!("device: the host D3D12 device failed: {e}");
@@ -497,6 +499,7 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
             }
         };
         let resources_ref = resources.clone();
+        rebuild_ffx::host::install_xbox(resources.clone(), &host);
         // pipelines: the program library and the creation pool (workers start now)
         crate::pipeline::start(&host);
         let _ = LIST_HOST.set(std::sync::Arc::new(rebuild_d3d12x::Host { resources: resources.clone(), pipelines: Pipelines }));

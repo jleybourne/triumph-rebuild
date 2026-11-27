@@ -16,6 +16,7 @@ rebuild-d3d12x = { path = "../d3d12x" }
 rebuild-xlist = { path = "../xlist" }
 rebuild-pipelines = { path = "../pipelines" }
 rebuild-shader = { path = "../shader" }
+rebuild-ffx = { path = "../ffx" }
 png = "0.17"
 
 [target.'cfg(windows)'.dependencies]

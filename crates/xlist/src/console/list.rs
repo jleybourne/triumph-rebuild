@@ -522,6 +522,26 @@ pub fn host_list<'a>(list: Raw) -> Option<&'a ID3D12GraphicsCommandList> {
     }
 }
 
+/// After commands recorded into the list's current host list from outside the translator (the
+/// FidelityFX upscale, `crates/ffx`, binds its own descriptor heaps, root signature and pipeline):
+/// forget what is bound, so the title's next sets are applied instead of dropped as repeats. The
+/// title's descriptor heaps are bound again at once (its tables keep mapping through them); its
+/// pipeline counts as unbound until it sets one, so a draw before that is dropped rather than run with
+/// the outside pipeline. `false` if `list` is not one of ours.
+pub fn forget_bound_state(list: Raw) -> bool {
+    let Some(s) = state(list) else { return false };
+    let (count, console, host) = (s.sh.heap_count, s.sh.heaps_console, s.sh.heaps_host);
+    s.sh.clear();
+    if count > 0 && s.open {
+        call!(s.SetDescriptorHeaps(count, host.as_ptr()));
+        s.sh.heap_count = count;
+        s.sh.heaps_console = console;
+        s.sh.heaps_host = host;
+    }
+    s.sh.pso_missing = true;
+    true
+}
+
 /// The host lists to submit for `list`, in order, each after its waits hold.
 pub fn segments<'a>(list: Raw) -> Option<&'a [Segment]> {
     state(list).map(|s| &s.segments[..])
