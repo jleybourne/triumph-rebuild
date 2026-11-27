@@ -198,7 +198,7 @@ mod tests {
         }
         // Let the ring drain, then a period more.
         let t = Instant::now();
-        while w.room() < (rate as usize * ch as usize / 10) && t.elapsed().as_secs() < 3 {
+        while w.held() > 0 && t.elapsed().as_secs() < 3 {
             std::thread::sleep(Duration::from_millis(10));
         }
         std::thread::sleep(Duration::from_millis(50));

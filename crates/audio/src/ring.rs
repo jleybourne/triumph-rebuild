@@ -55,6 +55,11 @@ impl Writer {
     pub fn room(&self) -> usize {
         self.0.slots.len() - self.0.held()
     }
+
+    /// Samples written and not yet read.
+    pub fn held(&self) -> usize {
+        self.0.held()
+    }
 }
 
 /// The consuming side.
