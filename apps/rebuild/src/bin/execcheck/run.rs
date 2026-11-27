@@ -15,9 +15,9 @@ use super::{Heap, Oracle, Prog, Row, View};
 /// Slots each descriptor table gets in its heap.
 const TABLE_SLOTS: u32 = 256;
 /// First resource-heap slot of the tables (slots below are for dynamic indexing from the heap base 0).
-const TABLE_BASE: u32 = 256;
+const TABLE_BASE: u32 = 4096;
 const SAMPLER_TABLE_SLOTS: u32 = 64;
-const SAMPLER_TABLE_BASE: u32 = 64;
+const SAMPLER_TABLE_BASE: u32 = 512;
 /// Buffers are 64 KiB (a constant buffer's most).
 const BUFFER_BYTES: u64 = 65536;
 /// The input sets every program runs on.
@@ -74,7 +74,7 @@ pub fn plan(p: &Prog) -> Result<Plan, String> {
     let (mut nres, mut nsmp) = (0u32, 0u32);
     let mut consts = Vec::new();
     for prm in &p.layout {
-        if prm.user_data >= 16 {
+        if prm.user_data >= 16 && !matches!(prm.root, RootType::ResourceHeap | RootType::SamplerHeap) {
             continue; // past the root constants: a read of it is refused by the translator
         }
         if table_base.contains_key(&prm.user_data) {
@@ -642,7 +642,12 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
             diff.first = d.first.map(|(r, i, x, y)| (set as usize * 1000 + r, i, x, y));
         }
     }
-    let (verdict, reason) = diff.verdict();
+    let (verdict, mut reason) = diff.verdict();
+    // named: the oracle samples level 0 where a compute program samples with implicit derivatives (ours takes them
+    // from the host quad, whose layout is not the console's either)
+    if verdict == "differ" && cs && [".Sample(", ".SampleBias(", ".SampleCmp(", "CalculateLevelOfDetail"].iter().any(|s| p.src.contains(s)) {
+        reason = format!("implicit-derivative sampling in compute (the oracle samples level 0); {reason}");
+    }
     let mut detail = per_set.join(" ");
     if let Some((r, i, x, y)) = diff.first {
         detail += &format!(" first res{r} word{i} ours {x:#010x} oracle {y:#010x} max_ulp {}", diff.max_ulp);

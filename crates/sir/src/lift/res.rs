@@ -189,7 +189,7 @@ impl Lifter<'_> {
         };
         let stride = if heap == Heap::Sampler { 16 } else { 32 };
         // the offset in the table is a constant when the base is the table's own user SGPR
-        let const_off = if reg.is_none() && p.root == RootType::Table { self.table_offset(base).map(|k| k.wrapping_add(off)) } else { None };
+        let const_off = if reg.is_none() && matches!(p.root, RootType::Table | RootType::ResourceHeap | RootType::SamplerHeap) { self.table_offset(base).map(|k| k.wrapping_add(off)) } else { None };
         self.out.sgprs.insert(base);
         if self.f.stale.contains(&base) {
             self.why = Some("a lane mask read as data".into());

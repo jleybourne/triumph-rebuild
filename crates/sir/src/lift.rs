@@ -687,7 +687,7 @@ impl Lifter<'_> {
         r
     }
 
-    /// The value SGPR `n` holds as its table's offset plus a constant: the table's own user SGPR (unwritten) is
+    /// The value SGPR `n` holds as its table's (or heap's) offset plus a constant: the own user SGPR (unwritten) is
     /// plus 0; a copy or constant add of one is tracked in `table_add`; anything else derived is unknown.
     fn table_offset(&self, n: u8) -> Option<i32> {
         if let Some(k) = self.f.table_add.get(&n) {
@@ -697,7 +697,7 @@ impl Lifter<'_> {
             return None;
         }
         let b = self.bind?;
-        b.layout.iter().any(|p| b.hw.user_sgpr(p.user_data) == n && p.root == rebuild_shader::native::RootType::Table).then_some(0)
+        b.layout.iter().any(|p| b.hw.user_sgpr(p.user_data) == n && matches!(p.root, rebuild_shader::native::RootType::Table | rebuild_shader::native::RootType::ResourceHeap | rebuild_shader::native::RootType::SamplerHeap)).then_some(0)
     }
 
     /// The descriptor table or heap a value derives from (its user-data dword): the parameter's own user
