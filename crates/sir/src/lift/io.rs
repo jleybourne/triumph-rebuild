@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use rebuild_shader::gfx10::enc::Decoded;
+use rebuild_shader::gfx10::enc::{self, Decoded, Src};
 use rebuild_shader::native::PsInput;
 use rebuild_shader::signature::Element;
 
@@ -154,6 +154,48 @@ impl Lifter<'_> {
         Some(())
     }
 
+    /// 16-bit interpolation (VOP3): `src0` packs the attribute (bits 0-5), channel (6-7) and the high half of a
+    /// packed fp16 pair (8); `src1` is the barycentric VGPR; p2's `src2` is p1's partial result. The host
+    /// interpolates the element in float and the result is rounded to fp16 in the low half of `vdst`.
+    pub(super) fn interp16(&mut self, d: &Decoded) -> Option<()> {
+        let Stage::Ps(ps) = &self.stage else { return None };
+        if d.get("opsel")? != 0 {
+            self.why = Some("op_sel".into());
+            return None;
+        }
+        let packed = d.get("src0")?;
+        let (attr, chan, high) = ((packed & 0x3f) as u8, (packed >> 6 & 3) as u8, packed >> 8 & 1 == 1);
+        let input = ps.inputs.iter().find(|i| i.attr == attr)?;
+        let row = if high {
+            if !input.pack2 {
+                self.why = Some("high half of an unpacked attribute".into());
+                return None;
+            }
+            input.row2
+        } else {
+            input.row
+        };
+        let vsrc = match enc::src(d.get("src1")?) {
+            Src::Vgpr(v) => v as usize,
+            _ => return None,
+        };
+        let mode = match ps_vgprs(ps.input_addr).get(vsrc)? {
+            PsVgpr::Bary(m, _) => *m,
+            _ => return None,
+        };
+        let e = self.out.io.inputs.entry(row).or_insert((0, mode));
+        if e.1 != mode {
+            self.out.io.conflicts += 1;
+            return None;
+        }
+        e.0 |= 1 << chan;
+        let vdst = d.get("vdst")? as u16;
+        self.out.notes.insert("fp16 interpolation done in float, rounded to fp16");
+        // p1's partial result only feeds p2 on the same register, so both may write the value
+        self.vwrite_raw(vdst, format!("(v{vdst} & 0xffff0000u) | f32tof16(asfloat(@in{row}.{chan}@))"));
+        Some(())
+    }
+
     pub(super) fn export(&mut self, d: &Decoded) -> Option<()> {
         let Stage::Ps(_) = &self.stage else { return None };
         let target = d.get("target")? as u8;
@@ -261,9 +303,11 @@ pub fn ps_program(l: &Lifted, ps: &PsStage, bind: Option<&super::Bindings>, isg1
                 }
             }
         }
+        // a channel the row's element does not have (the half of a packed fp16 pair that packed math reads
+        // alongside the one it uses) reads 0, as a missing component does
         for c in 0..4u8 {
-            if chans >> c & 1 == 1 && body.contains(&format!("@in{row}.{c}@")) {
-                return Err(format!("row {row} channel {c} is in no ISG1 element"));
+            if chans >> c & 1 == 1 {
+                body = body.replace(&format!("@in{row}.{c}@"), "0u");
             }
         }
     }

@@ -216,8 +216,8 @@ fn ps_report(walk: &census::Walk) {
                             if let Ok(want) = std::env::var("REBUILD_TRANSLATE_DUMP") {
                                 if e.contains(&want) {
                                     let txt = format!(
-                                        "{e}\nlayout {:#?}\nused {:#?}\n--- lifted\n{}",
-                                        p.native.layout, p.native.used, l.body
+                                        "{e}\nlayout {:#?}\nused {:#?}\ninputs {:?}\nisg1 {:?}\n--- lifted\n{}",
+                                        p.native.layout, p.native.used, inputs, isg1, l.body
                                     );
                                     let _ = std::fs::write(out.join(format!("{}.fail.txt", p.hash)), txt);
                                 }

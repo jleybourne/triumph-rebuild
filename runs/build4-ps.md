@@ -45,6 +45,9 @@ ops; the primitive mask SGPR reads 0 (the host interpolates); `s_brev_b32` and `
 **1,684 of 1,798 (93.7 %) now translate and compile.** Left: `v_interp_p1ll_f16` (62), untraced samplers (14),
 16-bit image addresses (11), `ds_swizzle_b32` (9), cube maps (6), and single programs.
 
+**Update, same day: 16-bit interpolation and mixed precision.** VOP3 fp16 interpolation and the VOP3P
+`v_fma_mix*` forms translate; a channel a packed fp16 element lacks reads 0. **1,748 of 1,798 (97.2 %).**
+
 **Not yet proven correct:** these compile, but a program counts toward the 25,694 only when the execution
 check matches the oracle's output (tasks.md, Build 4). Next: resource tracing (descriptor loads from root
 parameters, decision 5), which unblocks 1,364 of the remaining 1,371.

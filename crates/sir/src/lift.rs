@@ -172,6 +172,52 @@ impl Lifter<'_> {
         Some(e)
     }
 
+    /// VOP3P. The mix forms: each source is f16 when its `opsel_hi` bit is set (the half `opsel` names) and
+    /// f32 otherwise; `neg` negates, `neg_hi` takes the absolute value; the result is f32 (`v_fma_mix_f32`) or
+    /// f16 into the low or high half (`v_fma_mixlo_f16`, `v_fma_mixhi_f16`).
+    fn vop3p(&mut self, name: &str, d: &Decoded) -> Option<()> {
+        if !matches!(name, "v_fma_mix_f32" | "v_fma_mixlo_f16" | "v_fma_mixhi_f16") {
+            return None;
+        }
+        let (opsel, hi) = (d.get("opsel")?, d.get("opsel_hi")? | d.get("opsel_hi2")? << 2);
+        let (neg, abs) = (d.get("neg")?, d.get("neg_hi")?);
+        let mut srcs = Vec::new();
+        for (i, field) in ["src0", "src1", "src2"].into_iter().enumerate() {
+            let code = d.get(field)?;
+            let mut e = match enc::src(code) {
+                // an inline float is the same number in either width
+                Src::Inline(c) if (240..=248).contains(&c) => inline_float(c)?.to_string(),
+                _ => {
+                    let u = self.src(code, d.literal)?;
+                    if hi >> i & 1 == 1 {
+                        format!("f16tof32(({u}) >> {}u)", 16 * (opsel >> i & 1))
+                    } else {
+                        format!("asfloat({u})")
+                    }
+                }
+            };
+            if abs >> i & 1 == 1 {
+                e = format!("abs({e})");
+            }
+            if neg >> i & 1 == 1 {
+                e = format!("(-{e})");
+            }
+            srcs.push(e);
+        }
+        let mut r = format!("mad({}, {}, {})", srcs[0], srcs[1], srcs[2]);
+        if d.get("clamp")? == 1 {
+            r = format!("saturate({r})");
+        }
+        let v = d.get("vdst")? as u16;
+        let e = match name {
+            "v_fma_mix_f32" => format!("asuint({r})"),
+            "v_fma_mixlo_f16" => format!("(v{v} & 0xffff0000u) | f32tof16({r})"),
+            _ => format!("(v{v} & 0xffffu) | (f32tof16({r}) << 16)"),
+        };
+        self.vwrite_raw(v, e);
+        Some(())
+    }
+
     fn usrc(&mut self, d: &Decoded, field: &str) -> Option<String> {
         let code = d.get(field)?;
         self.src(code, d.literal)
@@ -271,6 +317,7 @@ impl Lifter<'_> {
             Encoding::Smem => self.smem(name, &d),
             Encoding::Mimg => self.mimg(name, &d),
             Encoding::Exp => self.export(&d),
+            Encoding::Vop3p => self.vop3p(name, &d),
             Encoding::Vop1 | Encoding::Vop2 | Encoding::Vop3 | Encoding::Vopc => {
                 if d.extra.is_some() {
                     return None; // SDWA / DPP: not yet
@@ -535,6 +582,9 @@ impl Lifter<'_> {
     }
 
     fn valu(&mut self, name: &str, d: &Decoded) -> Option<()> {
+        if matches!(name, "v_interp_p1ll_f16" | "v_interp_p1lv_f16" | "v_interp_p2_f16") && d.encoding == Encoding::Vop3 {
+            return self.interp16(d);
+        }
         let f0 = |l: &mut Self| l.fsrc(d, "src0", 0);
         let u0 = |l: &mut Self| l.usrc(d, "src0");
         // VOP2's second operand is `vsrc1` (a VGPR); VOP3's is `src1`

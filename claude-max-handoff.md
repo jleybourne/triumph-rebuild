@@ -21,9 +21,9 @@ title       loads and runs its entry; the startup "wait" was likely our graphics
 runtime     GDK runtime (xgameruntime.dll) ours via LoadLibraryExA override; files 32 + CRT 13 bound
 lanes       round 1 and round 2 all merged (#1-#18); no lane running
 tests       311 green (one files F5 host-comparison test 46 vs 45 since the reboot: for the files lane)
-translate   `translate ps` over D:\victory-data\shaders.rpf: 1,684 / 1,798 v0 pixel shaders compile (93.7 %);
+translate   `translate ps` over D:\victory-data\shaders.rpf: 1,748 / 1,798 v0 pixel shaders compile (97.2 %);
             immediate samplers decode to static samplers (sir::sampler, space100: Build 5 must add them to
-            the root signature); next: v_interp_p1ll_f16 (62), then vertex shaders
+            the root signature); next: the last 50 (samplers 14, a16 images 11, ds_swizzle 9, cube 6), then vertex shaders
 ```
 
 ## Who you are and how the owner works
