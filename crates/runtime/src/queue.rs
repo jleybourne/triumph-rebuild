@@ -4,41 +4,68 @@
 //! the header). Behind it, a host `ID3D12CommandQueue` of the same type. This title uses the newer table: from
 //! 0x070 every slot is 0x10 later than the 2020 layout (Signal 0x080, PresentX 0x100, ExecuteCommandListsX 0x118).
 //!
-//! Written so far: IUnknown, private data, GetDevice, the profiler markers (no-ops), GetTimestampFrequency,
-//! GetDesc. Submission, Signal, Wait and Present are traps until fences and the list glue land; a run names the
-//! order the title needs them in ([`traps`]).
+//! Written: IUnknown, private data, GetDevice, the profiler markers (no-ops), GetTimestampFrequency, GetDesc,
+//! Signal, Wait, SignalX; submission (0x50, 0x118) in [`crate::submit`], PresentX (0x100) in [`crate::present`].
+//! Every other slot traps; a run names the order the title needs them in ([`traps`]).
+//!
+//! The title's pointer leads to our [`Queue`] without a lock: the object keeps it at +0x38 (a word the title is
+//! not known to read; the fork's object never put anything there), trusted only after the method table checks out.
 
 #![cfg(windows)]
 #![allow(non_snake_case)]
 
-use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::OnceLock;
 
-use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, D3D12_COMMAND_QUEUE_DESC};
+use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Fence, D3D12_COMMAND_QUEUE_DESC, D3D12_FENCE_FLAG_NONE};
 
 pub const SLOTS: usize = 40;
 const OBJECT_SIZE: usize = 0x40;
 const E_NOTIMPL: u64 = 0x8000_4001;
 
-/// One queue: the host queue and its creation description.
+/// Where the console object keeps its [`Queue`].
+const OURS: usize = 0x38;
+
+/// One queue: the host queue and its creation description, and the fences submission and present use.
 pub struct Queue {
     pub host: ID3D12CommandQueue,
     pub desc: D3D12_COMMAND_QUEUE_DESC,
+    /// The title-visible object.
+    pub object: usize,
+    /// Memory waits the host GPU cannot see: the queue waits on this fence and the waiter thread signals it from
+    /// the CPU once the memory holds ([`crate::submit`]). Values in issue order.
+    pub(crate) bridge: ID3D12Fence,
+    pub(crate) bridge_next: AtomicU64,
+    /// Signalled when another queue must run after this one's work so far (a present from another queue).
+    pub(crate) progress: ID3D12Fence,
+    pub(crate) progress_next: AtomicU64,
+    /// The present queue's frame has had its first submission (its GPU start time is written).
+    pub(crate) frame_started: AtomicBool,
 }
 
-// SAFETY: command queues are free-threaded.
+// SAFETY: command queues and fences are free-threaded.
 unsafe impl Send for Queue {}
 unsafe impl Sync for Queue {}
 
-static QUEUES: Mutex<Option<HashMap<usize, &'static Queue>>> = Mutex::new(None);
 static CALLS: [AtomicU32; SLOTS] = [const { AtomicU32::new(0) }; SLOTS];
 static FIRST: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
 
-/// The queue behind a title queue pointer.
+/// The queue behind a title queue pointer: read from the object, no lock.
+#[inline]
 pub fn find(object: usize) -> Option<&'static Queue> {
-    QUEUES.lock().unwrap().as_ref()?.get(&object).copied()
+    if object == 0 || object % 8 != 0 {
+        return None;
+    }
+    let table = VTABLE.get()?.as_ptr() as usize;
+    // SAFETY: a pointer the title says is a queue; its first word is read only to check it is one of ours, and +0x38
+    // only after that.
+    unsafe {
+        if *(object as *const usize) != table {
+            return None;
+        }
+        ((object + OURS) as *const *const Queue).read().as_ref()
+    }
 }
 
 fn note(slot: usize) {
@@ -67,7 +94,7 @@ fn slot_name(off: usize) -> &'static str {
 }
 
 fn implemented(off: usize) -> bool {
-    matches!(off, 0x000..=0x038 | 0x058..=0x068 | 0x080 | 0x088 | 0x090 | 0x0e0 | 0x110)
+    matches!(off, 0x000..=0x038 | 0x050..=0x068 | 0x080 | 0x088 | 0x090 | 0x0e0 | 0x100 | 0x110 | 0x118)
 }
 
 /// Queue slots called but not written: (offset, name, calls, first call in ms after the device).
@@ -225,6 +252,9 @@ fn vtable() -> &'static [usize; SLOTS] {
         for s in [0x58 / 8, 0x60 / 8, 0x68 / 8] {
             t[s] = Marker as *const () as usize;
         }
+        t[0x50 / 8] = crate::submit::ExecuteCommandLists as *const () as usize;
+        t[0x118 / 8] = crate::submit::ExecuteCommandListsX as *const () as usize;
+        t[0x100 / 8] = crate::present::PresentX as *const () as usize;
         t[0x80 / 8] = Signal as *const () as usize;
         t[0x88 / 8] = Wait as *const () as usize;
         t[0x110 / 8] = SignalX as *const () as usize;
@@ -238,13 +268,24 @@ fn vtable() -> &'static [usize; SLOTS] {
 pub fn create(desc: &D3D12_COMMAND_QUEUE_DESC) -> Result<usize, i32> {
     let dev = crate::device::get().ok_or(0x8000_4005u32 as i32)?;
     let host: ID3D12CommandQueue = unsafe { dev.host.CreateCommandQueue(desc) }.map_err(|e| e.code().0)?;
-    let object = Box::leak(Box::new([0u8; OBJECT_SIZE]));
-    unsafe {
-        (object.as_mut_ptr() as *mut usize).write(vtable().as_ptr() as usize);
-        (object.as_mut_ptr().add(0x10) as *mut u32).write(desc.Type.0 as u32);
-    }
-    let q: &'static Queue = Box::leak(Box::new(Queue { host, desc: *desc }));
+    let bridge: ID3D12Fence = unsafe { dev.host.CreateFence(0, D3D12_FENCE_FLAG_NONE) }.map_err(|e| e.code().0)?;
+    let progress: ID3D12Fence = unsafe { dev.host.CreateFence(0, D3D12_FENCE_FLAG_NONE) }.map_err(|e| e.code().0)?;
+    let object = Box::leak(Box::new([0u64; OBJECT_SIZE / 8]));
     let key = object.as_ptr() as usize;
-    QUEUES.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, q);
+    let q: &'static Queue = Box::leak(Box::new(Queue {
+        host,
+        desc: *desc,
+        object: key,
+        bridge,
+        bridge_next: AtomicU64::new(0),
+        progress,
+        progress_next: AtomicU64::new(0),
+        frame_started: AtomicBool::new(false),
+    }));
+    unsafe {
+        (key as *mut usize).write(vtable().as_ptr() as usize);
+        ((key + 0x10) as *mut u32).write(desc.Type.0 as u32);
+        ((key + OURS) as *mut *const Queue).write(q);
+    }
     Ok(key)
 }

@@ -59,6 +59,7 @@ pub unsafe extern "system" fn WaitFrameEventX(
 ) -> i32 {
     CALLS[2].fetch_add(1, Ordering::Relaxed);
     let now = Instant::now();
+    let _waiting = Waiting(now);
     let (n, at) = next_origin(now);
     let limit = now + Duration::from_millis(u64::from(timeout_ms));
     if at > limit {
@@ -75,6 +76,14 @@ pub unsafe extern "system" fn WaitFrameEventX(
         unsafe { *token = n };
     }
     0
+}
+
+/// Time the title spends in [`WaitFrameEventX`], for the frame line's `wait`.
+struct Waiting(Instant);
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        crate::framelog::waited(self.0.elapsed());
+    }
 }
 
 pub unsafe extern "system" fn GetFrameStatisticsX(_this: *mut c_void, _token: u64, _kinds: u32, count: *mut u32, _out: *mut c_void) -> i32 {
