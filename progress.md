@@ -54,6 +54,18 @@ and becomes the number that counts.
 | frame line (fps, ms, draws, …) | `██░░░░░░░░░░░░░░░░░░` | contract agreed with the launcher; todo |
 | Build 0 (c): the title's GPU time | `░░░░░░░░░░░░░░░░░░░░` | needs a frame |
 
+## Helper lanes running
+
+| lane | build | working on |
+|---|---|---|
+| `present` | 5 | ExecuteCommandLists, PresentX, frame capture, frame line |
+| `ondemand` | 5 | translating programs missing from the library when the title creates them |
+| `shaderexec` | 4 | our shaders against the oracle's, on the GPU: the "shaders counted" bar |
+| `shadercov` | 4 | the last 1,726 agnostic programs (7,402 → 9,128) |
+| `wave64` | 4 | wave-wide programs, the other ~16,500 |
+| `ffx` | 7 | the title's FidelityFX upscaler calls, onto our DLSS / FSR |
+| waiting | 6, 8 | list translation cost and pacing need real frames |
+
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
 

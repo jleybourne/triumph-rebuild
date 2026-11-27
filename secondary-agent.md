@@ -334,7 +334,7 @@ tests     460 green, 0 warnings: cargo test --release --no-fail-fast
 | 6 list translation | 🔄 core built | `crates/xlist` | Build 0 (b) |
 | 7 upscaler | ⏳ (plan decision 5 corrected) | — | — |
 | 8 pacing · 9 AMD testers | ⏳ | — | — |
-| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | **Round 5 running (2026-11-27 night): `ondemand` (translate programs missing from the library at creation, disk cache), `streampso` (device 0x2b0 stream and 0x50 graphics pipelines), `present` (Execute, PresentX, capture, frame line), `shaderexec` (execution check against the oracle; the shaders-counted bar)** | their pull requests |
+| helper lanes | live status: [`agents/secondary-agents-updates.md`](agents/secondary-agents-updates.md) | **Round 5 running (2026-11-27 night): `ondemand` (translate programs missing from the library at creation, disk cache), `streampso` (device 0x2b0 stream and 0x50 graphics pipelines), `present` (Execute, PresentX, capture, frame line), `shaderexec` (execution check against the oracle; the shaders-counted bar), `shadercov` (agnostic coverage 7,402 → 9,128), `wave64` (wave-wide programs: the other ~16,500), `ffx` (Build 7: the title's FidelityFX upscaler API onto crates/upscale)**. GPU rule: card runs only with `agents\MEASURING` absent and the exclusive lock `agents\CARD`; correctness on WARP; ≤ 4 dxc workers per lane | their pull requests |
 | launcher track | 🔄 C1 registry; L1-L4 + U6 merged; hardware limits for testing (RAM, VRAM, CPU cores, CPU usage) in the launcher and applied before the title; C2 and L5 ⏳ | `crates/config`, `apps/launcher`, `crates/runtime/src/limits.rs` | config, launcher tests |
 
 ## 9. Taking over as lead
