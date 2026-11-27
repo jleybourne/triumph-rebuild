@@ -147,3 +147,7 @@ The owner's rules, in their own words:
   crates/shader/src/bitcode.rs does not recognise dx.op calls in DXC 1.8 output (only checked against the oracle).
   FIXED (Char6 names). Interface diffs now SigIn 35, SigOut 3, Bindings 4 (runs/build4-oraclediff.md);
   read each with `oraclediff --sig`, fix ours or name the reason, then the v0 row closes.
+- Build 5 started (lead): D3D12ConfigureVirtualMemoryX fixed (one pointer; fills lowest = 4 GiB, highest = top of
+  user space). The title's device request, logged: riid 5405c344-d457-444e-b4dd-2366e45aee39 (ID3D12Device11),
+  params [00020004, 0, 00100000, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 00000020]. Next: the static device object
+  (0x58 bytes, byte +0x18 = 1), slots per docs/research/d3d12x-device.md section 6, every other slot a trap.

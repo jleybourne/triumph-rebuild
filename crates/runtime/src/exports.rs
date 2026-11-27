@@ -343,19 +343,47 @@ pub fn on_create_device(f: fn(&[u64; 4])) {
     *ON_DEVICE.lock().unwrap() = Some(f);
 }
 
-/// The first render call. Build 5 makes the D3D12.X device here; until then it reports and fails.
+/// The first render call: `(adapter = null, params, riid, out)` (docs/research/d3d12x-device.md section 1).
+/// Build 5 makes the D3D12.X device here; until then it reports what the title asked for and fails.
 pub extern "system" fn D3D12XboxCreateDevice(a: u64, b: u64, c: u64, d: u64) -> i32 {
     eprintln!("first render call reached: D3D12XboxCreateDevice({a:#x}, {b:#x}, {c:#x}, {d:#x})");
+    // the interface id and the creation parameters, once: the fork never decoded past the version word
+    if c != 0 {
+        let g = unsafe { std::slice::from_raw_parts(c as *const u8, 16) };
+        let d1 = u32::from_le_bytes([g[0], g[1], g[2], g[3]]);
+        let d2 = u16::from_le_bytes([g[4], g[5]]);
+        let d3 = u16::from_le_bytes([g[6], g[7]]);
+        eprintln!(
+            "  riid {d1:08x}-{d2:04x}-{d3:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            g[8], g[9], g[10], g[11], g[12], g[13], g[14], g[15]
+        );
+    }
+    if b != 0 {
+        let w = unsafe { std::slice::from_raw_parts(b as *const u32, 16) };
+        eprintln!("  params {:08x?}", w);
+    }
     if let Some(f) = *ON_DEVICE.lock().unwrap() {
         f(&[a, b, c, d]);
     }
     0x8000_4005u32 as i32 // E_FAIL
 }
 
-/// Sets up the console's GPU virtual address layout: nothing to set up on the host.
-pub extern "system" fn D3D12ConfigureVirtualMemoryX(_a: u64, _b: u64) -> i32 {
+/// `D3D12ConfigureVirtualMemoryX(*{flags u32, page_table_pages u32, preserved_bytes u32, pad; out lowest u64,
+/// out highest u64})` (docs/research/d3d12x-device.md section 1). The title may size its GPU address layout
+/// from the range: ours is where graphics memory lives, from the first 4 GiB window to the top of user space.
+pub extern "system" fn D3D12ConfigureVirtualMemoryX(desc: *mut u8) -> i32 {
+    if desc.is_null() {
+        return 0x8007_0057u32 as i32; // E_INVALIDARG
+    }
+    unsafe {
+        (desc.add(0x10) as *mut u64).write_unaligned(crate::xmem::WINDOW);
+        (desc.add(0x18) as *mut u64).write_unaligned(USER_SPACE_TOP);
+    }
     0
 }
+
+/// The highest user-mode address on 64-bit Windows.
+pub const USER_SPACE_TOP: u64 = 0x7FFF_FFFE_FFFF;
 
 fn host_d3d12(name: &str) -> Option<u64> {
     use windows::core::{PCSTR, PCWSTR};
@@ -476,6 +504,18 @@ mod tests {
             assert!(crate::modules::override_export(f).is_some(), "{f}");
             assert_eq!(crate::modules::override_export(f), rebuild_winfiles::override_export(f), "{f}");
         }
+    }
+
+    #[test]
+    fn configure_virtual_memory_fills_the_graphics_range() {
+        let mut desc = [0u8; 0x20];
+        desc[4] = 4; // page_table_pages, as the title passes
+        assert_eq!(D3D12ConfigureVirtualMemoryX(desc.as_mut_ptr()), 0);
+        let lowest = u64::from_le_bytes(desc[0x10..0x18].try_into().unwrap());
+        let highest = u64::from_le_bytes(desc[0x18..0x20].try_into().unwrap());
+        assert_eq!((lowest, highest), (crate::xmem::WINDOW, USER_SPACE_TOP));
+        assert_eq!(desc[4], 4, "the inputs are left as they were");
+        assert_eq!(D3D12ConfigureVirtualMemoryX(std::ptr::null_mut()), 0x8007_0057u32 as i32);
     }
 
     #[test]
