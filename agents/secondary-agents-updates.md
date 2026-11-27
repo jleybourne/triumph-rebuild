@@ -10,16 +10,16 @@ Each lane's own detail is in its `agents/<lane>.md` on its branch, and arrives w
 
 | lane | build | branch | worktree | state | last reported |
 |:--|:--|:--|:--|:--|:--|
-| **loader** | Build 3a (L1–L4), then L5 | `agent/loader` | `D:\Developer\triumph-rebuild-loader` | ✅ L1–L4 **merged** (#1); 🔄 L5 (GetProcAddress names) started 13:27, new PR to come | — |
-| **shader** | Build 4 front end (S1–S5) | `agent/shader` | `D:\Developer\triumph-rebuild-shader` | 🔄 S1–S4 committed on its branch (1 commit, "25,694 programs"), working on S5; no PR yet | 13:02 (S1–S4 commit: 25,694 programs, 43.95M instructions) |
-| **launcher** | Triumph Launcher (U1–U5, plus library and per-game settings) | `agent/launcher` | `D:\Developer\triumph-rebuild-launcher` | 🔄 2 commits: library, per-game store, theme pass 1 (31 tests); pass 2 in progress | 13:20 |
+| **loader** | Build 3a (L1–L4), then L5 | `agent/loader` | `D:\Developer\triumph-rebuild-loader` | ✅ L1–L4 **merged** (#1); ✅ L5 **PR open** | [#7](https://github.com/jleybourne/triumph-rebuild/pull/7) |
+| **shader** | Build 4 front end (S1–S5) | `agent/shader` | `D:\Developer\triumph-rebuild-shader` | ✅ S1–S4 **PR open**; ✅ **S5 committed: 25,694 / 25,694 oracle files** on `agent/shader-s5`, PR pending | [#5](https://github.com/jleybourne/triumph-rebuild/pull/5) |
+| **launcher** | Triumph Launcher (U1–U5, library, per-game settings) | `agent/launcher` | `D:\Developer\triumph-rebuild-launcher` | 🔄 pass 3: grain gone, cards fixed, but **body text renders only first letters** (font bug); fix ordered | 13:35 |
 | **vfs** | overlay file system (V1–V4) | `agent/vfs` | `D:\Developer\triumph-rebuild-vfs` | ✅ **merged** by the lead | [#3](https://github.com/jleybourne/triumph-rebuild/pull/3) (2 commits) |
-| **upscale** | DLSS and FSR backends, standalone (P1–P5) | `agent/upscale` → `agent/upscale-fsr` | `D:\Developer\triumph-rebuild-upscale` | ✅ P1, P2, P4, P5 **merged** (PR #4); 🔄 P3 (FSR) on `agent/upscale-fsr`, SDK files fetched to `D:\tools\fidelityfx\v2.4.0` | [#4](https://github.com/jleybourne/triumph-rebuild/pull/4) |
+| **upscale** | DLSS and FSR backends, standalone (P1–P5) | `agent/upscale` → `agent/upscale-fsr` | `D:\Developer\triumph-rebuild-upscale` | ✅ P1, P2, P4, P5 **merged** (#4); ✅ **P3 FSR 3.1.6 done, PR open** | [#8](https://github.com/jleybourne/triumph-rebuild/pull/8) |
 | **input** | controller and keyboard (I1–I3) | `agent/input` | `D:\Developer\triumph-rebuild-input` | ✅ **merged** by the lead | [#2](https://github.com/jleybourne/triumph-rebuild/pull/2) (2 commits) |
 | **audio** | console audio hardware (A1–A4) | `agent/audio` | `D:\Developer\triumph-rebuild-audio` | 🔄 started 13:25 | — |
-| **dstorage** | DirectStorage (D1–D4) | `agent/dstorage` | `D:\Developer\triumph-rebuild-dstorage` | 🔄 started 13:25 | — |
+| **dstorage** | DirectStorage (D1–D4) | `agent/dstorage` | `D:\Developer\triumph-rebuild-dstorage` | ✅ **D1–D3 closed; D4 answered (no decoder: owner decision)**, PR open | [#6](https://github.com/jleybourne/triumph-rebuild/pull/6) |
 | **files** | the 15 file overrides (F1–F3) | `agent/files` | `D:\Developer\triumph-rebuild-files` | 🔄 started 13:27 | — |
-| **xg** | console texture layout (X1–X4) | `agent/xg` | `D:\Developer\triumph-rebuild-xg` | 🔄 started 13:27 | — |
+| **xg** | console texture layout (X1–X4) | `agent/xg` | `D:\Developer\triumph-rebuild-xg` | ✅ **X1–X4 closed, PR open** | [#9](https://github.com/jleybourne/triumph-rebuild/pull/9) (2 commits) |
 
 No lane merges; each opens a PR to `master` titled `agent/<lane>: <what closed>`.
 
@@ -80,6 +80,31 @@ From **upscale** (details in `agents/upscale.md` on `agent/upscale`, PR #4):
 
 25. **Owner: settings are saved per game and never replaced.** Per-game files in the launcher's app-data. Upgrades and reinstalls only fill missing keys, never reset values, and keep unknown keys. Atomic writes with a `.bak`, a schema version with non-destructive migration. The title-settings copy is regenerated from saved values at launch. Tests for isolation, upgrades, unknown keys, crash recovery and re-adding a removed game.
 
+From **dstorage** (details in `agents/dstorage.md` on `agent/dstorage`, PR #6):
+26. Binding: resolve `xcrdapi.dll!DStorageGetFactory` to `rebuild_dstorage::DStorageGetFactory`, after `install(Engine::new(vfs, Config { pages: Some(..), .. }))` with the `G:` vfs.
+27. Implement `Pages` over `runtime::physical` (64 KiB frames, the same size), with a retry for pages the title hasn't made yet: the fork lost 12–446 reads a launch without one.
+28. **BCPack is CPU work, and it's the real streaming cost:** the fork's decoder ran 33–66 MB/s a thread, against zlib's 397 MB/s. A decoder needs ~78 KB of underivable format tables, which can't go in git, so they'd load at run time (suggested config `dstorage.bcpack_tables`). Then a decoder is either written here or the fork's vendored by exception. **Owner decision.** Until then BCPack requests return `E_NOTIMPL` and are counted (`Stats::bcpack_refused`).
+29. Numbers: 124 workspace tests green, 0 warnings. Whole requests at 336 / 688 / 1,444 / 2,024 MB/s on 1 / 2 / 4 / 8 workers. Write-watch saw 64/64 pages of worker writes, so the Build 2 ring sees them free.
+
+From **loader L5** (details in `agents/loader.md`, PR #7):
+30. The GDK areas (XGame, XUser, XAsync, XTaskQueue, XStore) are **not** looked up by name. The title takes 6 entry points from `xgameruntime.dll` by name (`InitializeApiImpl`, `InitializeApiImplEx`, `InitializeApiImplEx2`, `UninitializeApiImpl`, `QueryApiImpl`, `XErrorReport`) and reaches every area through objects `QueryApiImpl` returns. This matches the fork's notes.
+31. GetProcAddress must answer by name for `xgameruntime.dll` (6), `gameplatformservices.dll` (3: `GetApiVersionImpl`, `RestartApiImpl`, `RundownApiImpl`), winhttp's `WinHttpWebSocket*` (6) and `icu.dll` (14 time-zone functions). `agents/loader-getproc.csv`: 76 names (high 42, medium 3, low 31; the low ones are likely log strings).
+32. The FidelityFX loader names `amd_fidelityfx_framegeneration_xbox.dll`, which the title does not ship. If that loader is ever called, its load of that DLL must fail cleanly.
+
+From **upscale P3** (details in `agents/upscale.md`, PR #8):
+33. FSR 3.1.6 through FidelityFX SDK v2.4.0 works. Quality: 33.69 dB moving (DLSS 30.96, bilinear 26.50), static frame-to-frame 0.159, 0.508 ms. 0 NaN, 0 black frames. Synthetic PSNR proves the wiring, not which upscaler looks better.
+34. Download (owner-approved, needed files only): two AMD-signed DLLs plus 6 headers and the licence, in `D:\tools\fidelityfx\v2.4.0`, SHA-256s in `agents/upscale.md`. **Licence:** files not in the MIT list are AMD binary-only; every file we use (both DLLs included) is in the MIT list, loaded at run time, so it's GPL-3.0-compatible. Nothing in git.
+35. Registry entry to add: `upscaler.fidelityfx_dir`. Until then, `REBUILD_FIDELITYFX_DIR`.
+36. Both SDKs want jitter negated on both axes and motion vectors passed as-is; both backends now share one `Signs` mapping. FSR render sizes follow the ratio rule (balanced 1505x847); Streamline's don't (1485x835).
+37. FSR 4: the DLL is 4.1.2, but this card is offered only 3.1.6 and 2.3.4. RDNA 4 will probably be offered FSR 4; whether AMD should prefer it is the lead's call (one line in `Fsr::attach`).
+
+From **xg** (details in `agents/xg.md` on `agent/xg`, PR #9):
+38. Binding: wrap `Computer` in a 13-slot vtable in `crates/runtime`, in `SLOTS` order. **Slot 0x30 must return 0 for a texel outside the texture**: the fork saw an error code read as an offset send the title into wild memory. Size copy slices with `Computer::copy_extent`.
+39. Build 5: `Layout::tables` (per-axis row and column tables) is ready for detiling on the card. The fork estimates 2–4 ms of its 4–6 ms texture refresh moves off the CPU.
+40. `XGSuggestSwizzleMode` follows the fork's older library rule: if streamed textures come out scrambled, check it first.
+41. HTILE, CMASK, FMASK and DCC metadata planes aren't sized (as in the fork). That only matters if the title sizes a pool from console sizes.
+42. Numbers: 0 bytes differ from the fork's detiler over 174 synthetic cases (43.4 MB). BC7 64KB_D 2048² full chain: 0.49–0.54 ms (~11 GB/s). Workspace 135 green, 0 warnings. The layout maths are vendored from the fork's `victory-formats/src/texture.rs` (itself following AMD's MIT addrlib) with the header; `CREDITS.md` created.
+
 From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f):
 6. Lane `launcher` U5 says "launch the proofs (`gputest --bare`)", but section 2 says helpers never run `gputest`. The launcher lane was told to build U5's launch path against a fake child process in tests, and to run no `gputest` itself. Please say which you meant.
 7. Lane `upscale` P3 needs AMD's FidelityFX SDK. If it isn't already on disk, getting it is a download. The lane was told not to download without your say, and to do P1, P2, P4 and P5 first. For DLSS it was pointed at the Streamline SDK zip already in `D:\tools\dlss\download` (production `bin/x64`, extracted outside git) and the user-supplied `nvngx_dlss.dll` in `D:\tools\dlss`.
@@ -98,6 +123,11 @@ From the **coordinator**, on the new lane text in `secondary-agent.md` (71a521f)
 
 | time | event |
 |:--|:--|
+| 13:42 | **xg** done: X1–X4 closed, PR #9 open. |
+| 13:40 | **upscale P3** done: FSR 3.1.6 beside DLSS, PR #8 open; licence checked compatible. |
+| 13:36 | **loader L5** done: PR #7 open (76 run-time names; the GDK is reached through `xgameruntime!QueryApiImpl` objects, not by name). |
+| 13:35 | Shader opened PR #5 (S1–S4); S5 continues. Launcher pass 3 reviewed: the grain and card layout are fixed, but a font bug shows only the first letter of each word; fix ordered. |
+| 13:33 | **dstorage**: D1–D3 closed, D4 answered, PR #6 open. **launcher**: owner says "pretty broken"; fix-first pass 3 ordered. |
 | 13:27 | Lead added lanes files, xg and loader L5 (master 5a26027). Started **files** and **xg**; the loader agent resumed for **L5** (fast-forward of agent/loader, new PR). |
 | 13:22 | Lead merged PR #4 (upscale, DLSS). Upscale FSR branch started with the SDK files on disk. Launcher committed the library and per-game store (31 tests). Audio and dstorage set up, no commits yet. |
 | 13:30 | Owner approved the FidelityFX download in chat: **only the needed files** (~58 MB at tag v2.4.0: loader and upscaler DLLs, FSR 3.1 and API headers, licence) to `D:/tools/fidelityfx/v2.4.0`, outside git. The upscale lane fetches them, records SHA-256s, and reads the licence before any code (it stops if the licence is not GPL-3.0-compatible). |

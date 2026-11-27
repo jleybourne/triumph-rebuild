@@ -4,7 +4,7 @@
 built around the right memory model from the first line, aiming at 30 frames a second.</b></p>
 
 <p align="center">
-  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-42%25-yellow?style=for-the-badge"></a>
+  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-43%25-yellow?style=for-the-badge"></a>
   <a href="progress.md"><img alt="frame" src="https://img.shields.io/badge/title%20frame-not%20yet-lightgrey?style=for-the-badge"></a>
   <a href="tasks.md"><img alt="shaders" src="https://img.shields.io/badge/shaders-0%20%2F%2025%2C694-lightgrey?style=for-the-badge"></a>
   <a href="plan.md"><img alt="target" src="https://img.shields.io/badge/target-30%20fps-blue?style=for-the-badge"></a>
@@ -18,7 +18,7 @@ built around the right memory model from the first line, aiming at 30 frames a s
   <a href="LICENSE"><img alt="licence" src="https://img.shields.io/badge/licence-GPL--3.0--only-blue"></a>
 </p>
 
-<p align="center"><a href="progress.md"><b>Progress <code>[████████░░░░░░░░░░░░]</code> 42 %</b></a><br>
+<p align="center"><a href="progress.md"><b>Progress <code>[█████████░░░░░░░░░░░]</code> 43 %</b></a><br>
 <sub>work toward 30 fps, weighted by build step · no title frame measured yet</sub></p>
 
 <table align="center">
@@ -50,7 +50,7 @@ Measured on one machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB RAM, PCIe 3.0, Win
 
 | | now | target |
 |:--|:--|:--|
-| **Title frame** | not yet: the title's 17 images map and **97.5 % of their imports bind** ([run](runs/build3-maptitle.md)); D3D12.X next | **30 fps · 33.3 ms** at ~4,500 draws, stated resolution and upscaler mode |
+| **Title frame** | not yet, but **the title's own code runs**: 16/16 DLL entry points, its exe entry for 60 s, no crash ([run](runs/build3-startup.md)); it waits before its first render call | **30 fps · 33.3 ms** at ~4,500 draws, stated resolution and upscaler mode |
 | **Memory** | ✅ tiles at console addresses, sharing by address, 10 GiB committed with 0 wrong ([Build 1](runs/build1-tiles.md)) | no copy-back, ever |
 | **CPU → GPU upload** | ✅ the ring: submit thread 32 µs a frame; 34 MB lands in 19 ms on workers, verified ([Build 2](runs/build2-ring.md)) | inside a frame, overlapped |
 | **List translation** | ✅ 0.43 µs a draw with the driver, 1.9 ms a frame ([Build 0 b](runs/build0b-lists.md)) | ≤ 7.4 µs a draw |
@@ -131,6 +131,10 @@ and replacing only the memory model has not been costed, and no title frame has 
 Full status with outcomes: **[tasks](tasks.md)** · **[progress](progress.md)**.
 
 ## 🔎 Recent findings
+
+- **The title's own code runs in our process.** Its images load through the Windows loader as prepared copies,
+  all 16 of its DLLs initialise, and its exe runs for 60 s without a crash. Next: what it waits on before its
+  first render call.
 
 - **The title maps and binds.** All 17 of its images load at real addresses with 8,257 relocations, and 1,876 of
   1,924 imports (97.5 %) bind. The 48 left are files, audio, D3D12.X, the texture layout and DirectStorage.

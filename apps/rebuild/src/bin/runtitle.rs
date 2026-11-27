@@ -1,0 +1,147 @@
+//! Build 3: load the title through the Windows loader (prepared images) and run its startup to its first
+//! render call.
+//!
+//! REBUILD_GAME_DIR=<the title's folder> cargo run --release --bin runtitle            # load and bind only
+//! REBUILD_GAME_DIR=<the title's folder> cargo run --release --bin runtitle -- --run   # and run its startup
+//!
+//! The run stops at `D3D12XboxCreateDevice` (the first render call), or after `--seconds N` (default 60),
+//! and prints the discovery list: every unbuilt import the title called, in first-call order. The game
+//! folder is only read; prepared copies go to %LOCALAPPDATA%\triumph-rebuild\images.
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use rebuild_runtime::exports::{on_create_device, set_alloc_hooks, set_command_line};
+use rebuild_runtime::modules::misses;
+use rebuild_runtime::title::{load_title, trap_hits, Loaded};
+
+fn report(started: Instant) {
+    println!("discovery ({:.1} s in): unbuilt imports the title called, first-call order", started.elapsed().as_secs_f64());
+    for (dll, name, n) in trap_hits() {
+        println!("  {n:>6}×  {dll}!{name}");
+    }
+    let m = misses();
+    if !m.is_empty() {
+        println!("lookups that found nothing (GetProcAddress / LoadLibrary): {}", m.len());
+        for (dll, name) in m {
+            println!("          {dll}!{name}");
+        }
+    }
+}
+
+static mut STARTED: Option<Instant> = None;
+
+fn reached_device(args: &[u64; 4]) {
+    let started = unsafe { STARTED }.unwrap_or_else(Instant::now);
+    println!("REACHED   the first render call: D3D12XboxCreateDevice{args:x?}");
+    report(started);
+    std::process::exit(0);
+}
+
+/// Title DLLs in an order where each comes after the title DLLs it imports.
+fn dependency_order(images: &[Loaded]) -> Vec<usize> {
+    let names: Vec<String> = images.iter().map(|l| l.name.clone()).collect();
+    let mut done: HashSet<usize> = HashSet::new();
+    let mut order = Vec::new();
+    fn visit(i: usize, images: &[Loaded], names: &[String], done: &mut HashSet<usize>, order: &mut Vec<usize>, depth: usize) {
+        if done.contains(&i) || depth > 64 {
+            return;
+        }
+        done.insert(i);
+        for m in &images[i].image.imports {
+            if let Some(j) = names.iter().position(|n| *n == m.dll.to_ascii_lowercase()) {
+                visit(j, images, names, done, order, depth + 1);
+            }
+        }
+        order.push(i);
+    }
+    for i in 0..images.len() {
+        visit(i, images, &names, &mut done, &mut order, 0);
+    }
+    order
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let run = args.iter().any(|a| a == "--run");
+    let seconds: u64 = args.iter().position(|a| a == "--seconds").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(60);
+    let Some(dir) = std::env::var_os("REBUILD_GAME_DIR").map(PathBuf::from) else {
+        println!("FAILED    set REBUILD_GAME_DIR to the title's folder (it is only read)");
+        std::process::exit(1);
+    };
+    let cache = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("triumph-rebuild").join("images");
+
+    let title = match load_title(&dir, &cache) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("FAILED    {e}");
+            std::process::exit(1);
+        }
+    };
+    let exe = title.images.iter().find(|l| l.name.ends_with(".exe")).expect("the title's exe");
+    println!("runtitle — Build 3: the title loaded by the Windows loader (prepared images), imports bound");
+    println!(
+        "loaded    {} images; {} imports bound ({} from the title's own DLLs); {} bound to trap thunks (unbuilt)",
+        title.images.len(),
+        title.bound,
+        title.from_title,
+        title.trapped.len()
+    );
+    if !run {
+        return;
+    }
+
+    set_command_line(&format!(r"G:\{}", exe.name));
+    // the title's own allocator for XMemAlloc, if its exe exports one
+    if let Some(e) = exe.image.exports.iter().find(|e| e.name.as_deref() == Some("__XMemAllocationHooks__")) {
+        if let Some(rva) = e.rva {
+            let hooks = (exe.base + rva as u64) as *const [u64; 2];
+            let [a, f] = unsafe { hooks.read() };
+            set_alloc_hooks(a as usize, f as usize);
+            println!("hooks     the exe's __XMemAllocationHooks__ installed");
+        }
+    }
+    unsafe { STARTED = Some(Instant::now()) };
+    on_create_device(reached_device);
+
+    // DLL entry points, dependencies first
+    type DllMain = unsafe extern "system" fn(u64, u32, u64) -> i32;
+    for i in dependency_order(&title.images) {
+        let l = &title.images[i];
+        if l.name.ends_with(".exe") || l.image.entry_rva == 0 {
+            continue;
+        }
+        let entry: DllMain = unsafe { std::mem::transmute((l.base + l.image.entry_rva as u64) as usize) };
+        let ok = unsafe { entry(l.base, 1, 0) };
+        println!("dllmain   {:<40} {}", l.name, if ok != 0 { "ok" } else { "FAILED" });
+    }
+    // the exe's TLS callbacks, then its entry on a thread with the stack it asks for
+    if let Some(tls) = &exe.image.tls {
+        for rva in &tls.callbacks {
+            let cb: DllMain = unsafe { std::mem::transmute((exe.base + *rva as u64) as usize) };
+            unsafe { cb(exe.base, 1, 0) };
+        }
+        println!("tls       {} callbacks of the exe run", tls.callbacks.len());
+    }
+    let entry = exe.base + exe.image.entry_rva as u64;
+    let stack = (exe.image.stack_reserve as usize).max(8 << 20);
+    let (tx, rx) = mpsc::channel();
+    println!("entry     the exe's entry point on a {} MiB stack; waiting up to {seconds} s for the first render call", stack >> 20);
+    std::thread::Builder::new()
+        .name("title-main".into())
+        .stack_size(stack)
+        .spawn(move || {
+            let main: unsafe extern "system" fn() -> i32 = unsafe { std::mem::transmute(entry as usize) };
+            let code = unsafe { main() };
+            let _ = tx.send(code);
+        })
+        .expect("title thread");
+    match rx.recv_timeout(Duration::from_secs(seconds)) {
+        Ok(code) => println!("EXITED    the title's entry returned {code:#x} before a render call"),
+        Err(_) => println!("TIMEOUT   no render call within {seconds} s"),
+    }
+    report(unsafe { STARTED }.unwrap());
+    std::process::exit(0);
+}

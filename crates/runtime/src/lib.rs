@@ -18,6 +18,8 @@ pub mod exports;
 #[cfg(windows)]
 pub mod modules;
 pub mod physical;
+#[cfg(windows)]
+pub mod title;
 pub mod xmem;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

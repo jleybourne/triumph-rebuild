@@ -327,8 +327,50 @@ pub fn override_export(name: &str) -> Option<u64> {
     Some(f as usize as u64)
 }
 
+// ------------------------------------------------------------------------------- d3d12_xs.dll
+
+/// What `D3D12XboxCreateDevice` does when it is reached: the startup run stops here (Build 3's
+/// closing point), or later the D3D12.X device is made (Build 5).
+static ON_DEVICE: Mutex<Option<fn(&[u64; 4])>> = Mutex::new(None);
+
+pub fn on_create_device(f: fn(&[u64; 4])) {
+    *ON_DEVICE.lock().unwrap() = Some(f);
+}
+
+/// The first render call. Build 5 makes the D3D12.X device here; until then it reports and fails.
+pub extern "system" fn D3D12XboxCreateDevice(a: u64, b: u64, c: u64, d: u64) -> i32 {
+    eprintln!("first render call reached: D3D12XboxCreateDevice({a:#x}, {b:#x}, {c:#x}, {d:#x})");
+    if let Some(f) = *ON_DEVICE.lock().unwrap() {
+        f(&[a, b, c, d]);
+    }
+    0x8000_4005u32 as i32 // E_FAIL
+}
+
+/// Sets up the console's GPU virtual address layout: nothing to set up on the host.
+pub extern "system" fn D3D12ConfigureVirtualMemoryX(_a: u64, _b: u64) -> i32 {
+    0
+}
+
+fn host_d3d12(name: &str) -> Option<u64> {
+    use windows::core::{PCSTR, PCWSTR};
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32};
+    let w: Vec<u16> = "d3d12.dll".encode_utf16().chain(std::iter::once(0)).collect();
+    let m = unsafe { LoadLibraryExW(PCWSTR(w.as_ptr()), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }.ok()?;
+    let c = std::ffi::CString::new(name).ok()?;
+    unsafe { GetProcAddress(m, PCSTR(c.as_ptr() as *const u8)) }.map(|f| f as usize as u64)
+}
+
 /// Our implementation of a console-only function, by DLL and name.
 pub fn console_export(dll: &str, name: &str) -> Option<u64> {
+    if dll.eq_ignore_ascii_case("d3d12_xs.dll") {
+        return match name {
+            "D3D12XboxCreateDevice" => Some(D3D12XboxCreateDevice as *const () as usize as u64),
+            "D3D12ConfigureVirtualMemoryX" => Some(D3D12ConfigureVirtualMemoryX as *const () as usize as u64),
+            // standard: the host's own
+            "D3D12SerializeVersionedRootSignature" | "D3D12CreateRootSignatureDeserializer" => host_d3d12(name),
+            _ => None,
+        };
+    }
     if !dll.eq_ignore_ascii_case("xmem.dll") {
         return None;
     }

@@ -59,7 +59,9 @@ Order and decisions are `plan.md`'s; overall progress is in [`progress.md`](prog
 | done | memory and process overrides: `VirtualAlloc` with GPU protection bits → graphics memory in one window, write-watched; `VirtualFree`; `GetCommandLineA/W` → the title's console path | unit tests |
 | todo | file overrides (15): helper lane `files` | lane tests |
 | done | prepared images (`crates/loader/src/prepare.rs`): a patched copy the Windows loader maps, relocates, gives static TLS and unwind tables, but runs nothing (the fork's idea, our code) | test: the test binary prepared and loaded; Windows assigns a static TLS index and this thread has a block |
-| todo | run the title's startup to its first render call (`runtitle`): bind IATs, trap thunks for misses, DLL entries, exe TLS callbacks, exe entry on its own thread | the startup path reaches `D3D12XboxCreateDevice` |
+| done | load the title through the Windows loader and bind its IATs (`crates/runtime/src/title.rs`, `runtitle`); trap thunks for the 43 unbuilt imports | 17 images, 1,881 imports bound |
+| done | **run the title's startup** (`runtitle --run`): 16/16 DLL entry points ok, the exe's 2 TLS callbacks run, the exe entry runs 60 s without a crash — [`runs/build3-startup.md`](runs/build3-startup.md) | the title's own code runs in our process |
+| todo | find what the title's main thread waits on (stack sampler) and reach `D3D12XboxCreateDevice` | "REACHED" in `runtitle` |
 | done | **map the title's images and bind them** (`maptitle`, no title code run) | 17 images, 8,257 relocations; **1,876 of 1,924 imports bound (97.5 %)**; the 48 missing are files 21, audio 19, `d3d12_xs` 5, `xg_xs` 2, DirectStorage 1 — [`runs/build3-maptitle.md`](runs/build3-maptitle.md) |
 | todo | console audio `acphal`/`xapu`/`chad` (19): helper lane `audio` · DirectStorage `xcrdapi` (1): helper lane `dstorage` | their lanes' closing tests |
 | done | files (`crates/vfs`, lane `vfs`, PR #3): console paths → host, read-only package, write overlay, mods as ordered layers with conflicts | 18 tests; game folder hash unchanged (`v2_game_folder_unchanged`); 10,000-file open+read +3.3 µs over the OS floor |

@@ -1,108 +1,97 @@
 # claude-max-handoff.md — the lead's working state, for the session that takes over
 
-Updated by the lead **every step**. Read this after `secondary-agent.md` sections 8-10, which cover the
-project state, the owner's rules and the step order. This file holds what is **in flight**: the step
-underway, the decisions made but not yet written anywhere else, and the exact next actions.
+Updated by the lead every step. **This is the final handoff from the first lead session (2026-11-27).**
+Read this first, then `secondary-agent.md` §8-10 (project state, the owner's rules and step order, answers to
+helpers).
 
-**Last updated:** 2026-11-27, during Build 3's "run the title's startup" step (see "In flight").
+## Where things stand (one screen)
 
-## Who you are and how the owner works (short)
+```
+progress    42 % toward 30 fps (progress.md)       measured fps: none yet (no title frame)
+built       Builds 0 (a, b), 1, 2 closed; Build 3 ~70 %; Build 4 core proven; Build 7 DLSS standalone
+title       its 17 images load through the Windows loader; 16/16 DLL entry points run; its exe's entry
+            point RUNS for 60 s without a crash, but waits before its first render call
+runtime     32 / 73 of our functions built; 624 more bind straight to the host
+shaders     core proven on the card (lane model, live masks, memory, f16, HLSL → DXC); 0 / 25,694 programs
+            yet, waiting for lane `shader`'s decoder
+tests       121+ green, 0 warnings (cargo test --release)
+```
+
+## Who you are and how the owner works
 
 You are the **lead** of `D:\Developer\triumph-rebuild` (GitHub `jleybourne/triumph-rebuild`, branch `master`).
-The owner's rules, in their own words where it matters:
+The owner's rules, in their own words:
 
-- "keep building until we have no tasks to do"
-- "you shouldn't stop ever"
-- "just do what is best for us I want it to perform the best": decide technical questions yourself; ask
-  only owner-only items (`secondary-agent.md` §9).
-- Every push gets a new dated entry at the top of `progress.md` "Updates", with its own bar and notes.
-  Also update the README bar and badges, `tasks.md`, `runs/README.md`, `secondary-agent.md` §8, and **this
-  file**.
+- "keep building until we have no tasks to do" and "you shouldn't stop ever". Watch token usage, though: the
+  owner asked to slow down near limits.
+- "just do what is best for us I want it to perform the best": decide technical questions yourself, record
+  them in `plan.md` and `tasks.md`; ask only owner-only items (`secondary-agent.md` §9).
+- Every push gets a new dated entry at the top of `progress.md` "Updates", with its own bar and notes. Also
+  update the README bar and badges, `tasks.md`, `runs/README.md`, `secondary-agent.md` §8, and **this file**.
 - Commit to `master` and push. Helper agents work in lanes and send pull requests. Before every step, read
-  `agents/secondary-agents-updates.md`, merge open PRs first, and answer their "For the lead" items in
-  `secondary-agent.md` §10.
+  `agents/secondary-agents-updates.md`, merge open PRs first (review: no game bytes or paths, no NVIDIA or AMD
+  binaries, lane boundaries kept), and answer "For the lead" items in `secondary-agent.md` §10.
 
-## How to work in this repo (practical)
+## How to work in this repo
 
-- **Shell:** Git Bash. Run multi-file doc edits as a Python script in the scratchpad, and
+- **Shell:** Git Bash. Run multi-file doc edits as a Python script in the scratchpad, with
   `export PYTHONIOENCODING=utf-8` first: printing a `█` under cp1252 crashed a script mid-edit once.
-- **Rust string literals with Windows paths:** use raw strings (`r"G:\title.exe"`). `"G:\t…"` silently
-  becomes a tab. Edit such lines with the Edit tool, not `sed` or Python, because shell escaping halves backslashes.
+- **Windows paths in Rust:** use raw strings (`r"G:\title.exe"`). Edit them with the Edit tool, not
+  sed or Python; `"G:\t…"` silently becomes a tab.
 - **Measurement lock:** `touch agents/MEASURING` before any GPU or timed run, and `rm -f agents/MEASURING` after.
-- **The title's folder** is read-only, through `REBUILD_GAME_DIR` (its path is `game_dir` in
-  `D:\Developer\fxceless-victory\victory.toml`). Never commit game bytes or that path.
-- **The fork** (design and data only): `git -C D:\Developer\fxceless-victory show triumph/main:<path>`. Its
-  GPU and loader design: `crates/victory-gpu/src/*.rs`, `crates/victory-loader/src/*.rs`,
-  `crates/victory-hle/src/modules/*.rs`.
-- **Tests:** `cargo test --release`, 121+ green and 0 warnings; keep both true.
-- **DXC:** the Windows SDK `dxc.exe` (found automatically by `sirtest`).
+- **Merging lane PRs:** the root `Cargo.toml` `members` line and `apps/rebuild/Cargo.toml` always conflict. Take
+  the union of members, keeping `"apps/rebuild"` last; take both dependency lines; `git checkout --theirs
+  Cargo.lock`, then build to regenerate it.
+- **The title's folder** is read-only, through `REBUILD_GAME_DIR` (the path is `game_dir` in
+  `D:\Developer\fxceless-victory\victory.toml`). Never commit game bytes or that path. Prepared image copies live
+  in `%LOCALAPPDATA%\triumph-rebuild\images`.
+- **The fork** (design and data only): `git -C D:\Developer\fxceless-victory show triumph/main:<path>`. GPU
+  design: `crates/victory-gpu/src/*.rs`; loader: `crates/victory-loader/src/*.rs`; console DLLs:
+  `crates/victory-hle/src/modules/*.rs`; findings: `CLAUDE.md`, `ROADBLOCK.md`, `docs/`.
 
-## In flight: Build 3, "run the title's startup to its first render call"
+## Next actions, in order (start here)
 
-**Done in this step so far:**
+1. **Find what the title's main thread waits on.** See `runs/build3-startup.md`: the entry point runs 60 s, calls
+   no unbuilt import, and never reaches `D3D12XboxCreateDevice`.
+   - In `runtitle`, add a sampler: every ~2 s `SuspendThread` `title-main`, then `GetThreadContext` for its RIP.
+     Walk the stack with `RtlLookupFunctionEntry` + `RtlVirtualUnwind`; Windows registered the unwind tables
+     because the images are prepared copies. `ResumeThread`.
+   - Map each address to (image, RVA) through `title::LoadedTitle.images` bases, and print the top frames.
+     Also list the title's other threads (`CreateToolhelp32Snapshot`).
+   - Suspects: a wait on an event that an unbuilt GDK piece would set; the job scheduler; a `GetProcAddress`
+     the title makes through the **host's** `kernel32` that bypasses our override (check whether its IAT slot
+     for `GetProcAddress` really points at `modules::GetProcAddress`); the hang watchdog (the fork: 30
+     one-second sleeps without a frame).
+   - Close it by reaching `D3D12XboxCreateDevice` ("REACHED" in `runtitle`).
+2. **Build 5, the D3D12.X device**, where `D3D12XboxCreateDevice` lands (`crates/runtime/src/exports.rs`,
+   `on_create_device`). Facts from the fork (design):
+   - Console graphics objects begin with a vtable pointer, bookkeeping bits and a refcount. **Title code reads
+     object fields directly** (inlined), so the memory layout matters, not only the vtable.
+   - Device vtable: IUnknown, object methods, device methods in PC order, then the console's additions.
+     **Unwritten slots log their offset and fail**, so every run names the next method to write.
+   - Command lists: the title writes packets inline while a list's put pointer is below its limit, and calls
+     the list method otherwise. **Set both to 0** and every command arrives as a call: `crates/xlist` translates
+     those (0.43 µs a draw, measured).
+   - Wire in: our tiles (Build 1) for GPU-owned resources, the ring (Build 2) for
+     `exports::graphics_regions()`, labels into title memory, physical pages read in place, `sir` for shaders,
+     and the frame line. Then Build 0 (c), the title's GPU time.
+3. **Shaders:** when lane `shader` merges (S1-S5: census, GFX10 decoder, oracle set), do section 9 step 3 of
+   `secondary-agent.md`: GFX10 → `sir` (CFG, SSA, structurize), agnostic programs first, and start the shader bar.
+4. Merge helper PRs as they arrive, and bind what they built in `crates/runtime`:
+   - lane `files` → its functions into `modules::override_export` (or a new override table)
+   - lanes `audio`, `dstorage`, `xg` → `exports::console_export`
 
-- `crates/loader/src/prepare.rs`: patch a copy of an image so the **Windows loader** maps it, relocates it,
-  allocates its static TLS and registers its unwind tables, but runs nothing (DLL flag, no entry point,
-  import directory pointed at its terminator, TLS callbacks cleared, their relocation neutralised).
-  - Test: the test binary itself is prepared and loaded; Windows assigns a static TLS index and this thread
-    has a block. ✅
-  - Why: 4 title images use static TLS (`game_scarlett_master.exe` with 2 callbacks, plus
-    `xboxbvhbuilder.dll`, `amd_fidelityfx_upscaler_xbox.dll` and `libhttpclient.gdk.dll`). Manual mapping
-    cannot give them static TLS on every thread; the Windows loader can. (The idea is the fork's; the code
-    is ours.)
-
-**Next actions, in order:**
-
-1. **`crates/runtime/src/title.rs`** (new): `load_title(dir) -> LoadedTitle`.
-   - For each image (the same walk as `maptitle`): `prepare`, write to
-     `%LOCALAPPDATA%\triumph-rebuild\images\<name>-<first 16 hex of a hash>.dll`, `LoadLibraryExW` it, and
-     `modules::register_title(name, base, "G:\\name", exports…)`. Exe flag for the `.exe`.
-   - Then bind imports into each loaded module's IAT. For each `img.imports` entry, slot = `base + iat_rva`:
-     `VirtualProtect` it to RW, write the address from `maptitle`'s `Combined` resolver (title DLLs →
-     `HostResolver`), then restore the protection. Move `Combined` from `maptitle.rs` into `title.rs` and
-     make `maptitle` use it.
-   - **Missing imports → trap thunks**: generated x64 code per import, `mov rcx, <index>` (48 B9 imm64),
-     `mov rax, <trap>` (48 B8 imm64), `jmp rax` (FF E0), in one `PAGE_EXECUTE_READ` block. The trap is
-     `extern "system" fn(u64) -> u64`: it records `(dll, name)` into `modules::misses()`, logs it once,
-     returns 0. The first argument is overwritten, which is fine for a trap.
-2. **`apps/rebuild/src/bin/runtitle.rs`**: `load_title`, then run.
-   - DLL entry points: `DllMain(base, DLL_PROCESS_ATTACH, 0)` for each title DLL. The entry RVA comes from
-     the **original** image (`Image::entry_rva`), since the prepared copy's is 0. Order: dependencies first
-     (a DLL after the title DLLs it imports).
-   - Then the exe's TLS callbacks (`img.tls.callbacks`, RVAs), each `(base, DLL_PROCESS_ATTACH, 0)`.
-   - Then the exe entry on a new thread with the image's stack reserve. Run with a timeout, then print
-     `modules::misses()` in first-call order and stop.
-   - Known gap: threads the title creates later get no `DLL_THREAD_ATTACH` for title DLLs, because their
-     entries are cleared. Handle it when a miss or crash shows it matters.
-   - Set `exports::set_command_line(r"G:\game_scarlett_master.exe")` and install `__XMemAllocationHooks__` if
-     the exe exports it (`exports::set_alloc_hooks`).
-3. **The first render call** is `d3d12_xs.dll!D3D12XboxCreateDevice`. Stub it in `exports.rs`
-   (`console_export` for `d3d12_xs.dll`): log "first render call reached" with its arguments, return
-   `E_FAIL` (0x80004005). Also bind `D3D12SerializeVersionedRootSignature` and
-   `D3D12CreateRootSignatureDeserializer` straight to the host's `d3d12.dll` (standard), and
-   `D3D12ConfigureVirtualMemoryX` to a no-op returning `S_OK`. Closing number: **the startup path reaches
-   `D3D12XboxCreateDevice`**, with the miss list from before it. Record it in
-   `runs/build3-startup.md`.
-4. **Then Build 5, the D3D12.X device.** Facts from the fork (design):
-   - Console graphics objects begin with a vtable pointer, bookkeeping bits and a refcount. The title's
-     **inlined code reads object fields directly**, so the layout matters, not only the vtable.
-   - Device vtable: IUnknown, the object methods, the device methods in PC order, then the console's
-     additions. Unwritten slots log their table offset and fail, so every run says what to write next.
-   - **Command lists:** the title writes packets inline while a list's put pointer is below its limit, and
-     calls the list method otherwise. Set both to 0 and every command arrives as a call, which is what
-     `crates/xlist` translates (0.43 µs a draw measured). Parsing inline packets on workers is a later option,
-     measured against the frame line.
-   - Device creation wires: our tiles (Build 1) for GPU-owned memory, the ring (Build 2) for graphics
-     regions (`exports::graphics_regions()`), labels into title memory, physical pages read in place.
-
-## Open threads (not urgent, don't lose)
+## Open threads
 
 - `XMemGetWorkingSetStatistics`: refused until its layout is known (from a run).
-- One of the 18 census images did not parse as PE32+ in `maptitle` (17 mapped); name it in the startup log.
-- Helper lanes waiting to start (the coordinator starts them): `audio`, `dstorage`, `files`, `xg`, loader L5,
-  upscale P3. Running: `shader`, `launcher`.
-- Build 5: direct GPU read of title memory vs the ring, per resource, by the frame line.
-- "Second title" check after the first title renders (the owner asked whether other games will work).
+- Threads the title creates get no `DLL_THREAD_ATTACH` for title DLLs (their entries are cleared in the prepared
+  copies). Fix it if the sampler shows it matters (the fork passes thread start and end on).
+- Helper lanes: running `shader`, `launcher`. Waiting for the coordinator to start them: `audio`, `dstorage`,
+  `files`, `xg`, loader L5, upscale P3 (FSR; SDK download approved).
+- Build 5: direct GPU read of title memory vs the ring, per resource, by the frame line. Inline-packet parsing
+  vs calls, by the frame line.
+- "Second title" check once the first title renders.
+- Owner-only: the minimum spec in `plan.md`; AMD testers; pushing the fork's `dlss-hook` branch.
 
 ## Where everything is
 
@@ -113,5 +102,7 @@ The owner's rules, in their own words where it matters:
 | every task and its closing number | `tasks.md` |
 | measurements | `runs/` (write-up `.md` + raw `.txt`; index `runs/README.md`) |
 | designs | `docs/design/shader-ir.md`, `docs/design/launcher.md` |
+| the title loader and runtime | `crates/loader` (`pe`, `map`, `prepare`), `crates/runtime` (`title`, `modules`, `exports`, `xmem`, `physical`) |
+| tools | `apps/rebuild/src/bin/`: `runtitle`, `maptitle`, `runtimecensus`, `gputest`, `sirtest`, `uploadbench`, `listbench` |
 | helper status (coordinator's) | `agents/secondary-agents-updates.md` |
 | Claude memory for this project | `C:\Users\Jayde\.claude\projects\D--Developer-triumph-rebuild\memory\` |

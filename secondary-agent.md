@@ -246,8 +246,8 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-27, after prepared images (static TLS through the Windows loader); see also claude-max-handoff.md for the lead's in-flight state
-progress  42 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
+updated   2026-11-27, end of the first lead session: the title's own code runs (16/16 DLL entries, exe entry 60 s); claude-max-handoff.md is the final handoff
+progress  43 % (progress.md) · shaders 0 / 25,694 counted (they count once decoded programs match the oracle)
 tests     121 green (1 ignored), 0 warnings: cargo test --release  (uma 24, xlist 5, sir 13, config 6, loader 14, input 16, vfs 18, runtime 14, upscale 11)
 ```
 

@@ -1,7 +1,7 @@
 # Progress
 
 ```
-work toward 30 fps   [████████░░░░░░░░░░░░]  42 %
+work toward 30 fps   [█████████░░░░░░░░░░░]  43 %
 shaders (census)     [░░░░░░░░░░░░░░░░░░░░]   0 / 25,694   (fork reference: 25,694 translated, 7 pipelines refused)
 runtime functions    [█████████░░░░░░░░░░░]  32 / 73 ours built (xmem, modules, memory, process); 624 more bind to the host directly
 launcher track       [███░░░░░░░░░░░░░░░░░]  1 / 7 steps (C1 settings registry; the mods tab's file system is merged); does not count toward the fps %
@@ -22,14 +22,14 @@ second row and is the number that counts.
 | 0 | three answers before more code | 10 | 70 % | 7.0 | (a) upload **done**; (b) translation **done**: 0.43 µs a draw; (c) blocked until the title renders (moved to Build 5) |
 | 1 | tiled VRAM at console addresses | 10 | 100 % | 10.0 | **closed**: tiles, console addresses, sharing (buffer and render target), arena, 10 GiB scale, upload onto tiles |
 | 2 | CPU-written memory on an async ring; GPU→CPU region | 8 | 100 % | 8.0 | **closed**: the ring (submit thread 32 µs, upload 19 ms, verified) and GPU-written labels into title memory |
-| 3 | PE loader + console runtime | 15 | 70 % | 10.5 | loader (PR #1), files (PR #3), input (PR #2) merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides built (32 / 73 ours); files, audio, DirectStorage in lanes |
+| 3 | PE loader + console runtime | 15 | 75 % | 11.25 | loader (PR #1), files (PR #3), input (PR #2) merged; runtime census (89.5 % host); `xmem` complete; module, memory and process overrides built (32 / 73 ours); files, audio, DirectStorage in lanes |
 | 4 | shader recompiler RDNA2 → DXIL, wave32 | 15 | 25 % | 3.75 | IR, classifier, lane model, live masks, memory through the windows, native half precision, HLSL → DXC: all proven on the card; decoder in lane `shader` |
 | 5 | D3D12.X device, lists, descriptors, present | 12 | 0 % | 0 | first frame |
 | 6 | list translation | 8 | 10 % | 0.8 | translator core written and measured (5 tests); list cache dropped by measurement |
 | 7 | upscaler: DLSS + FSR | 10 | 20 % | 2.0 | DLSS standalone through Streamline on a synthetic scene (PR #4); FSR waits for the SDK; wiring to the title's pass todo |
 | 8 | frame pacing | 6 | 0 % | 0 | 30 fps on NVIDIA closes here |
 | 9 | AMD validation by testers | 6 | 0 % | 0 | 30 fps on AMD closes here |
-| | **total** | **100** | | **42.05 ≈ 42 %** | |
+| | **total** | **100** | | **42.8 ≈ 43 %** | |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -82,6 +82,28 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
+
+### 2026-11-27 — The title's own code runs: 16/16 DLL entry points, the exe's entry for 60 s; final handoff of this session
+
+```
+[█████████░░░░░░░░░░░]  43 %   (was 42 %: +0.75 Build 3, the title runs)
+runtime     32 / 73 of our functions built
+shaders     0 / 25,694 (core proven; waiting for lane shader's decoder)
+measured fps   none yet
+```
+
+- **Built** `crates/runtime/src/title.rs`: prepared images loaded by the Windows loader, registered, and their
+  IATs bound (title DLLs, our runtime, the host). Every unbuilt import goes to a generated **trap thunk** that
+  records the call instead of crashing. Also `runtitle`, and the `d3d12_xs` exports: the device-creation stop
+  point, the host's root-signature functions, and the virtual-memory setup.
+- **Measured:** 17 images, 1,881 imports bound, 43 trapped. **All 16 title DLL entry points succeed. The exe's 2 TLS
+  callbacks and its entry point run, for 60 s, without a crash.** It calls no unbuilt import and does not reach
+  the first render call, so it is waiting on something. [`runs/build3-startup.md`](runs/build3-startup.md)
+- **Handoff:** `claude-max-handoff.md` is now the final handoff of this lead session: the state in one screen,
+  the owner's rules, how to work here, and the next actions in order (first, a stack sampler to find what the
+  title waits on).
+- **Shaders:** the core is ready, but real programs start counting only after lane `shader` delivers the census
+  and the GFX10 decoder.
 
 ### 2026-11-27 — Prepared images: Windows maps the title's images with static TLS and runs nothing; handoff file
 
