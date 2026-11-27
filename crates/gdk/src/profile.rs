@@ -2,6 +2,7 @@
 //! The lead fills it from `rebuild.toml` (gamertag) and the title's manifest (title id, store id) at
 //! start-up, before the title runs; until then the defaults stand.
 
+use std::path::PathBuf;
 use std::sync::RwLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,7 +21,16 @@ impl Console {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `XDisplayHdrModeInfo`: the display's tone-mapping luminance, in nits.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HdrModeInfo {
+    pub min_tone_map_luminance: f32,
+    pub max_tone_map_luminance: f32,
+    pub max_full_frame_tone_map_luminance: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
     /// The signed-in user's gamertag: 1-15 bytes, so it fits every gamertag component's buffer
     /// (classic: 16 bytes with the NUL).
@@ -38,6 +48,16 @@ pub struct Profile {
     pub console: Console,
     /// `XSystemGetXboxLiveSandboxId`.
     pub sandbox: String,
+    /// The drive the title's persistent local storage is mounted as; `XPersistentLocalStorageGetPath`
+    /// hands out its root (`S:\`, the runtime's `drives::STORAGE`).
+    pub storage_drive: char,
+    /// The storage quota: `PersistentLocalStorage/SizeMB` in the title's `MicrosoftGame.config`.
+    pub storage_bytes: u64,
+    /// The host folder behind the storage drive (the overlay's), for the bytes used; `None`: none used.
+    pub storage_host: Option<PathBuf>,
+    /// The display's HDR luminance when the presentation can output HDR; `None`: SDR only, and
+    /// `XDisplayTryEnableHdrMode` answers disabled.
+    pub hdr: Option<HdrModeInfo>,
 }
 
 impl Default for Profile {
@@ -51,6 +71,12 @@ impl Default for Profile {
             package_bytes: 0,
             console: Console::SeriesX,
             sandbox: "RETAIL".into(),
+            storage_drive: 'S',
+            // The title's manifest value, as the fork's runs read it (2048 MB); the lead sets it from
+            // the manifest.
+            storage_bytes: 2048 << 20,
+            storage_host: None,
+            hdr: None,
         }
     }
 }
@@ -67,6 +93,9 @@ impl Profile {
         }
         if self.sandbox.is_empty() || self.sandbox.len() > 15 {
             return Err(format!("sandbox must be 1-15 bytes: {:?}", self.sandbox));
+        }
+        if !self.storage_drive.is_ascii_uppercase() {
+            return Err(format!("storage drive must be a letter A-Z: {:?}", self.storage_drive));
         }
         if self.xuid == 0 {
             return Err("xuid must not be 0".into());
@@ -108,5 +137,6 @@ mod tests {
         let empty = Profile { gamertag: String::new(), ..Profile::default() };
         assert!(configure(empty).is_err());
         assert!(Profile { package_id: "x".repeat(33), ..Profile::default() }.check().is_err());
+        assert!(Profile { storage_drive: 's', ..Profile::default() }.check().is_err());
     }
 }

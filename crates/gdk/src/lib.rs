@@ -12,7 +12,8 @@
 //! object      objects, method tables, the discovery handler behind every slot we don't implement
 //! taskqueue   XTaskQueue: work and completion ports, manual / thread pool / serialized / immediate
 //! xasync      XAsync: XAsyncBlock lifetime, providers, completion, cancel, waits
-//! areas       XUser, XGame (title, features, invites, events), XSystem, XPackage, XStore, XNetworking
+//! areas       XUser, XGame (title, features, invites, events), XSystem, XPackage, XStore, XNetworking,
+//!             XPersistentLocalStorage, XDisplay (HDR)
 //! table       every (interface, slot) -> Rust function, with the console argument layout
 //! ```
 //!

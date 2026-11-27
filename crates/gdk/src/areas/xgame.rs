@@ -22,11 +22,12 @@ unsafe extern "system" fn title_id(_: This, out: *mut u32) -> HRESULT {
 }
 
 /// `XGameRuntimeFeature` values (the public enum's order) whose area this crate serves: XAsync (2),
-/// XAsyncProvider (3), XGame (5), XGameInvite (6), XNetworking (10), XPackage (11), XStore (14),
-/// XSystem (15), XTaskQueue (16), XUser (18), XError (19), XGameEvent (20). Not yet: accessibility
-/// (0), app capture (1), display (4), game saves (7), game UI (8), launcher (9), local storage (12),
-/// speech (13), threads (17), streaming (21). The test keeps this list and the served areas in step.
-pub const AVAILABLE: [u32; 12] = [2, 3, 5, 6, 10, 11, 14, 15, 16, 18, 19, 20];
+/// XAsyncProvider (3), XDisplay (4), XGame (5), XGameInvite (6), XNetworking (10), XPackage (11),
+/// XPersistentLocalStorage (12), XStore (14), XSystem (15), XTaskQueue (16), XUser (18), XError (19),
+/// XGameEvent (20). Not yet: accessibility (0), app capture (1), game saves (7), game UI (8),
+/// launcher (9), speech (13), threads (17), streaming (21). The test keeps this list and the served
+/// areas in step.
+pub const AVAILABLE: [u32; 14] = [2, 3, 4, 5, 6, 10, 11, 12, 14, 15, 16, 18, 19, 20];
 
 unsafe extern "system" fn is_feature_available(_: This, feature: u32) -> bool {
     AVAILABLE.contains(&feature)
@@ -117,10 +118,12 @@ mod tests {
         // feature -> provider, for features that are runtime areas of their own.
         let areas = [
             (2, crate::areas::queue::PROVIDER),
+            (4, crate::areas::xdisplay::PROVIDER),
             (5, TITLE_PROVIDER),
             (6, INVITES),
             (10, crate::areas::xnetworking::PROVIDER),
             (11, crate::areas::xpackage::PROVIDER),
+            (12, crate::areas::xlocalstorage::PROVIDER),
             (14, crate::areas::xstore::PROVIDER),
             (15, crate::areas::xsystem::PROVIDER),
             (16, crate::areas::queue::PROVIDER),
@@ -131,7 +134,7 @@ mod tests {
             assert!(unsafe { f(t, feature) }, "feature {feature}");
             assert!(crate::table::ALL.iter().any(|d| d.provider == provider), "feature {feature} served");
         }
-        for unserved in [0, 1, 4, 7, 8, 9, 12, 13, 17, 21, 99] {
+        for unserved in [0, 1, 7, 8, 9, 13, 17, 21, 99] {
             assert!(!unsafe { f(t, unserved) }, "feature {unserved}");
         }
     }

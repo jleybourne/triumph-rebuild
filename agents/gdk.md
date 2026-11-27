@@ -1,6 +1,6 @@
 # Lane `gdk` — the GDK runtime behind `xgameruntime.dll` (Build 3 piece)
 
-Branch `agent/gdk`, crate `crates/gdk` (package `rebuild-gdk`), binaries `gdkguids` (G1 evidence) and `gdkslots`
+Branches `agent/gdk` (G1-G4, PR #18, merged) and `agent/gdk-2` (G5), crate `crates/gdk` (package `rebuild-gdk`), binaries `gdkguids` (G1 evidence) and `gdkslots`
 (G4 table as CSV). Pure host Rust, no dependencies, no GPU, no title code. Nothing vendored (the fork's
 `victory-hle` modules and run logs were read for slot offsets and behaviour, not copied), so no `CREDITS.md` line.
 
@@ -15,7 +15,10 @@ G3  XGame, XUser, XStore/XPackage,    closed   11 interfaces, 102 slots, each ca
     XSystem (+ XNetworking offline)            a test; offline calls fail at once with the area's error
 G4  (interface, slot) -> function     closed   124 rows in gdk-slots.csv; every listed slot resolves through
                                                QueryApiImpl (177 checks over 12 interfaces, 14 (provider, iid) pairs)
-tests                                          42 in crates/gdk (workspace 238 -> 280), 0 warnings; 30 / 30 repeat runs green
+G5  local storage, display (HDR)      closed   the two pairs our first title run asked for: 2 interfaces, 6 slots
+                                               (5 + 1), each called through QueryApiImpl in a test; 130 rows,
+                                               188 slot checks over 14 interfaces, 17 (provider, iid) pairs
+tests                                          46 in crates/gdk (G5: +4), workspace 321 passed, 6 ignored, 0 warnings
 ```
 
 ## Built
@@ -96,12 +99,12 @@ is the fork's, which served the title through 240 runs.
 | package | `af406016-e850-4aa8-a88d-2f3dcb9dac7e` | `0b9d556e-ab70-43f4-baa0-9999ac4cb040` | exe (lib: provider only) | yes |
 | store | `0dd112ac-7c24-448c-b92b-3960fb5bd30c` | `b09d803c-2414-4a05-82c6-66dfdc9e9a44`, `2d42fea5-e71d-4b76-97cd-c50afbb3ae5d` | exe, lib | yes |
 | networking | `37e56907-2f10-41e8-b72f-36edb185331a` | `bf2346b2-39af-4658-b5ea-44713c7e83b3` (and = provider) | exe, lib, XCurl | yes |
-| display (HDR) | `03f0fe74-fdd9-4e5c-b630-f9339c47acc5` | `35f07670-706e-4bfb-9476-090798c5ebf3` | exe, lib | **no** |
+| display (HDR) | `03f0fe74-fdd9-4e5c-b630-f9339c47acc5` | `35f07670-706e-4bfb-9476-090798c5ebf3` | exe, lib | yes (G5) |
 | shell (URIs, deferrals) | `1b339674-328d-4283-a200-3171f18d3639` | = provider | exe, lib | **no** |
 | capture | `a4f1aee2-4bf1-4485-b008-a7c26d52ac27` | `22e672d7-b4e3-406c-bd50-8f0d25236f9e` | exe, lib | **no** |
 | game save | `704c3f58-e629-4cc2-b197-30511b996fe2` | `1bfff3af-f14a-40a3-8e35-9ada906593f9` | exe, lib | **no** |
 | game UI | `dfcd4649-4ff8-4043-ba07-35d607df98b0` | `eaf669df-5542-4590-99a3-8dc061f837cc` | exe, lib | **no** |
-| local storage | `f4faf4d4-2d04-4fce-b3e0-474a713a3e84` | `41a4e10c-5a7e-41d9-8c37-37bde62a07d6` | exe, lib | **no** |
+| local storage | `f4faf4d4-2d04-4fce-b3e0-474a713a3e84` | `41a4e10c-5a7e-41d9-8c37-37bde62a07d6` (and the older `d29411df-0794-4553-8b27-95fc02d0f75d`) | exe, lib | yes (G5) |
 | speech / accessibility | `3e241977-6237-41e9-8559-102c2d9983f1` | `d722b373-8c4d-4692-9e51-d6ad9b37aa7d` | exe, lib | **no** |
 | user devices | `7d824997-10dc-45ab-86b7-2737767c0bf1` | `0cc6a956-e7e1-4fdf-9341-9d5da649ebc8` | lib | no |
 
@@ -127,6 +130,8 @@ it has one (a label from the fork, not confirmed here) and **unknown** where it 
 | package (40) | 0x40 update monitor · 0x50 unregister progress · 0x58 user locale · 0x68 enumerate chunk availability · 0x78 install chunks (blocking) · 0xb8 mount (deprecated) · 0xc0 mount path size · 0xe0 enumerate packages (older) (all fork) · 0xa0, 0xa8, 0xb0, 0xd8, 0xe8-0x108, 0x118, 0x120 unknown |
 | store (76) | 0x38 / 0x40 products by id · 0x58 / 0x60 product for the game · 0x68 / 0x70 for a package · 0xc0-0xd8 can acquire · 0xf0-0x100 add-on licences · 0x158-0x180 licence token and related · 0x198 / 0x1a0 rate and review · 0x1d0 / 0x1d8 download updates · 0x248 / 0x250 associated products page (all fork) · 0x120, 0x190, 0x1b0, 0x230 unknown (results of fulfillment, purchase UI, redeem UI by position; not confirmed) |
 | networking (18) | 0x30 / 0x38 port changed · 0x58-0x68 security information, UTF-16 · 0x70 verify server certificate (all fork) |
+| local storage (8) | none |
+| display (5) | 0x18 unknown (the fork left it unimplemented and logged no call) |
 | gamertag, features, invites, events, system, analytics | none |
 
 ### G2 — numbers
@@ -155,6 +160,26 @@ it has one (a label from the fork, not confirmed here) and **unknown** where it 
 Every call the fork's logs name is answered: `InitializeApiImplEx2` (both stubs) and `XUserAddAsync` (options 1, 232
 runs). The fork logged no other GDK call.
 
+### G5 — the two interfaces the title asks for at start
+
+Our first run of the title (`runs/build3-reached.txt`) left two discovery lines, both "interface not implemented".
+Both are in the exe's GUID table (G1) and in `known.rs`; the fork's `storage.rs` and `display.rs` name them and their
+slots, and its run logs under `D:\victory-work\logs` (242 that reach `InitializeApiImplEx2`) show which slots run.
+
+| pair | what it is | slot | API | evidence the title calls it | answer |
+|:--|:--|:--|:--|:--|:--|
+| `f4faf4d4-…` / `41a4e10c-…` | **XPersistentLocalStorage** (the iid the 2026 title asks with; `d29411df-…` is the older one, same slots, also served) | 0x18 | `XPersistentLocalStorageGetPathSize` | the fork mounts the storage drive only inside 0x18 / 0x20; its "virtual drive" line for the storage folder is in 239 of 242 runs (in the latest, 36 ms after `InitializeApiImplEx2`, before the first HDR call) | 4 (`S:\` and its NUL) |
+| | | 0x20 | `XPersistentLocalStorageGetPath` | the fork's note: the title calls 0x20 and 0x28; the drive mount above | `S:\` (the drive's root, from `Profile::storage_drive`; the runtime's `drives::STORAGE`). Too small: `E_FAIL`, nothing written (the fork's reading of the docs; not confirmed); null buffer `E_INVALIDARG` |
+| | | 0x28 | `XPersistentLocalStorageGetSpaceInfo` | the fork's note (no log line: the fork does not log it) | 32 bytes: used = bytes of the files under `Profile::storage_host` (the overlay's `S` folder), total = `Profile::storage_bytes` (default 2048 MB, the manifest value the fork's runs show), free = quota rest, available = that, capped by the host disk's free bytes |
+| | | 0x30 / 0x38 | `XPersistentLocalStoragePromptUserForSpaceAsync` / `…Result` | public header order; no call seen | nobody to ask: `S_OK` if the quota's rest covers the request, else `E_ABORT` (a user who cancels), completed at once through XAsync |
+| `03f0fe74-…` / `35f07670-…` | **XDisplay, HDR mode** | 0x20 | `XDisplayTryEnableHdrMode` | 1,402 calls in 242 runs (6 per run in 232), every one with preference 0 (prefer HDR) | `Disabled` (2), `info` untouched, while we present SDR; `Enabled` (1) with the display's luminance (`XDisplayHdrModeInfo`, 3 x f32) once the lead sets `Profile::hdr` |
+| | | 0x18 | unknown | none | discovery (`E_NOTIMPL`) |
+
+`XGameRuntimeIsFeatureAvailable` now says yes for XDisplay (4) and XPersistentLocalStorage (12): 14 features. Unknown
+slots (display 0x18, anything past each table) keep the discovery handler (tests call display 0x18 / 0x28 and local
+storage 0x40). Tests (`xlocalstorage.rs`, `xdisplay.rs`) take every slot from the object `QueryApiImpl` hands out,
+through its first word, for each interface id.
+
 ## Decided
 
 - **Objects from definitions.** The G4 table is the source the method tables are built from, so the table cannot
@@ -169,15 +194,19 @@ runs). The fork logged no other GDK call.
 - **Completion on a terminated queue**: the routine still runs, on the completing thread (unknown on the console).
 - **Offline error codes** per area, from `XGameErr.h` / `winerror.h` names; the exact codes the console returns
   offline are not known.
+- **Local storage is the drive's root**, never a host folder (the fork's finding: titles mount what precedes the
+  path's last `:\`). Used bytes are walked from the host folder on each space call; the title calls it rarely, and
+  a cache would go stale under the title's own writes.
+- **HDR is off until the presentation can output it.** Answering enabled while we present SDR would make the title
+  render HDR values into an SDR swap chain. The answer is one profile field away from enabled.
 - **Unserved interfaces** get `E_NOINTERFACE` and a discovery line (the console's code for this is unknown; the
   title's stubs only test for failure, by the fork's runs).
 
 ## Next
 
-- G5 (proposed): the seven interfaces the exe's table names that are not served here: game save and local storage
-  (through `crates/vfs`, the title's storage drive), game UI, display / HDR, shell, capture, speech. The fork served
-  all of them; until they are, `XGameRuntimeIsFeatureAvailable` says no for them and `QueryApiImpl` names each one
-  the title asks for.
+- The five interfaces the exe's table names that are still not served: game save, game UI, shell (URIs, display
+  deferrals), capture, speech. The fork served all of them, but our first run asked for none (so far); serve each
+  when a run's discovery names it.
 
 ## For the lead
 
@@ -188,8 +217,11 @@ runs). The fork logged no other GDK call.
 2. **Wiring.** `GetProcAddress(xgameruntime, name)` → `rebuild_gdk::runtime::get_proc(name)` (6 names; a miss is noted
    in `rebuild_gdk::discovery`). `LoadLibraryExA("xgameruntime.dll")` needs a pseudo handle. Drain
    `rebuild_gdk::discovery::lines()` into the Build 3 discovery list.
-3. **G5** (above): 7 interfaces in the exe's table are not served. The fork served them, so the title may expect
-   game saves at start-up; worth doing before the first start-up run.
+3. **G5 (closed):** both pairs from `runs/build3-reached.txt` answer now. Fill the new profile fields at start-up:
+   `storage_drive` = `drives::STORAGE` ('S', the default), `storage_host` = the overlay's `S` folder
+   (`Drives::overlay.join("S")`: `rebuild_vfs` keeps a writable drive in `<overlay root>/<letter>`), `storage_bytes` =
+   `PersistentLocalStorage/SizeMB` from `MicrosoftGame.config` x 2^20 (default 2048 MB), and `hdr` = the host
+   display's luminance once Build 5 presents HDR (until then `None`: the title is told HDR is disabled).
 4. **The game folder is being written by another process.** A new subfolder in `$REBUILD_GAME_DIR` has been filling
    since 14:27 today (multi-GB `.rpf` files), and `data\ttdb\ui\ttdb_ui.ttpf` changed at 14:19. Not this lane: its
    tools only read top-level images (unchanged before and after). Whole-folder before/after checks in other lanes

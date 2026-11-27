@@ -160,6 +160,9 @@ mod tests {
             ("37e56907-2f10-41e8-b72f-36edb185331a", "bf2346b2-39af-4658-b5ea-44713c7e83b3"),
             ("0dd112ac-7c24-448c-b92b-3960fb5bd30c", "b09d803c-2414-4a05-82c6-66dfdc9e9a44"),
             ("0dd112ac-7c24-448c-b92b-3960fb5bd30c", "2d42fea5-e71d-4b76-97cd-c50afbb3ae5d"),
+            // G5: the two our first run of the title asked for (runs/build3-reached.txt).
+            ("f4faf4d4-2d04-4fce-b3e0-474a713a3e84", "41a4e10c-5a7e-41d9-8c37-37bde62a07d6"),
+            ("03f0fe74-fdd9-4e5c-b630-f9339c47acc5", "35f07670-706e-4bfb-9476-090798c5ebf3"),
         ];
         for (p, i) in pairs {
             let (p, i) = (Guid::parse(p), Guid::parse(i));
