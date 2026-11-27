@@ -4,53 +4,100 @@
 
 use rebuild_config::{Apply, Config, Kind, Setting, Tier, Value, REGISTRY};
 
-/// The launcher's tabs, in order.
+/// The launcher's sections: the six in the top bar, and the game library (reached from Play).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
-    Library,
     Play,
-    Display,
-    Title,
-    Features,
+    Profiles,
+    Settings,
+    Runs,
     Mods,
     Diagnostics,
-    Profiles,
-    About,
+    Library,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 9] =
-        [Tab::Library, Tab::Play, Tab::Display, Tab::Title, Tab::Features, Tab::Mods, Tab::Diagnostics, Tab::Profiles, Tab::About];
+    /// The top bar, in order.
+    pub const TOP: [Tab; 6] = [Tab::Play, Tab::Profiles, Tab::Settings, Tab::Runs, Tab::Mods, Tab::Diagnostics];
+    pub const ALL: [Tab; 7] = [Tab::Play, Tab::Profiles, Tab::Settings, Tab::Runs, Tab::Mods, Tab::Diagnostics, Tab::Library];
 
     pub fn label(self) -> &'static str {
         match self {
-            Tab::Library => "Library",
             Tab::Play => "Play",
-            Tab::Display => "Display & upscaler",
-            Tab::Title => "Title settings",
-            Tab::Features => "Features",
+            Tab::Profiles => "Profiles",
+            Tab::Settings => "Settings",
+            Tab::Runs => "Runs",
             Tab::Mods => "Mods",
             Tab::Diagnostics => "Diagnostics",
-            Tab::Profiles => "Profiles",
-            Tab::About => "About",
+            Tab::Library => "Library",
         }
     }
 }
 
-/// Which tab a registry group is shown on. A group the launcher does not know yet goes to Features,
-/// so no registry entry is ever hidden.
-pub fn tab_of(group: &str) -> Tab {
-    match group {
-        "game" => Tab::Play,
-        "display" | "upscaler" => Tab::Display,
-        "title" => Tab::Title,
-        "diagnostics" => Tab::Diagnostics,
-        _ => Tab::Features,
+/// The group pills on Settings. Every registry entry is in exactly one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Group {
+    Display,
+    Limits,
+    Title,
+    MemoryShaders,
+    Menu,
+    Diagnostics,
+    Files,
+    Launcher,
+}
+
+impl Group {
+    pub const ALL: [Group; 8] = [Group::Display, Group::Limits, Group::Title, Group::MemoryShaders, Group::Menu, Group::Diagnostics, Group::Files, Group::Launcher];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Group::Display => "Display & upscaler",
+            Group::Limits => "Hardware limits",
+            Group::Title => "Title settings",
+            Group::MemoryShaders => "Memory & shaders",
+            Group::Menu => "In-game menu",
+            Group::Diagnostics => "Diagnostics",
+            Group::Files => "Files & paths",
+            Group::Launcher => "Launcher",
+        }
     }
 }
 
-pub fn settings_in(tab: Tab) -> impl Iterator<Item = &'static Setting> {
-    REGISTRY.iter().filter(move |s| tab_of(s.group()) == tab)
+/// The pill a setting is under: every file or folder setting is under Files & paths; the rest by their
+/// registry group. A group the launcher doesn't know yet goes to Memory & shaders, so no entry is hidden.
+pub fn group_of(s: &Setting) -> Group {
+    if s.kind == Kind::Path {
+        return Group::Files;
+    }
+    match s.group() {
+        "display" | "upscaler" => Group::Display,
+        "limits" => Group::Limits,
+        "title" => Group::Title,
+        "menu" => Group::Menu,
+        "diagnostics" => Group::Diagnostics,
+        "game" => Group::Files,
+        "launcher" => Group::Launcher,
+        _ => Group::MemoryShaders,
+    }
+}
+
+pub fn settings_in(g: Group) -> impl Iterator<Item = &'static Setting> {
+    REGISTRY.iter().filter(move |s| group_of(s) == g)
+}
+
+/// Settings search: every word of `query` in the label, key or help (any case). Empty matches all.
+pub fn matches(s: &Setting, query: &str) -> bool {
+    let hay = format!("{} {} {}", s.label, s.key, s.help).to_lowercase();
+    query.split_whitespace().all(|w| hay.contains(&w.to_lowercase()))
+}
+
+/// What a save would change: (keys whose effective value differs from `saved`, of those how many apply
+/// on the next launch).
+pub fn pending(saved: &Config, now: &Config) -> (Vec<&'static str>, usize) {
+    let keys: Vec<&'static str> = REGISTRY.iter().filter(|s| saved.get(s.key) != now.get(s.key)).map(|s| s.key).collect();
+    let restart = keys.iter().filter(|k| rebuild_config::find(k).is_some_and(|s| s.apply == Apply::Restart)).count();
+    (keys, restart)
 }
 
 /// The widget a setting gets, from its kind alone.
@@ -210,12 +257,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_registry_entry_has_a_widget_and_a_tab() {
+    fn every_registry_entry_has_a_widget_and_a_group() {
         let mut shown = 0;
-        for t in Tab::ALL {
-            shown += settings_in(t).count();
+        for g in Group::ALL {
+            shown += settings_in(g).count();
         }
-        assert_eq!(shown, REGISTRY.len(), "every entry on exactly one tab");
+        assert_eq!(shown, REGISTRY.len(), "every entry under exactly one pill");
+        for g in Group::ALL {
+            assert!(settings_in(g).count() > 0, "{} is empty", g.label());
+        }
         for s in REGISTRY {
             let m = Model::new(Config::parse("").unwrap());
             // the widget state for the default reads back as the default
@@ -225,6 +275,28 @@ mod tests {
             assert_eq!(m2.config.changed().count(), 0, "{}", s.key);
             assert!(!m.badges(s).changed);
         }
+        assert_eq!(group_of(rebuild_config::find("diagnostics.retention_days").unwrap()), Group::Diagnostics);
+        assert_eq!(group_of(rebuild_config::find("launcher.theme").unwrap()), Group::Launcher);
+        assert_eq!(group_of(rebuild_config::find("upscaler.dlss_dll").unwrap()), Group::Files);
+    }
+
+    #[test]
+    fn search_and_pending_changes() {
+        let fsr = rebuild_config::find("title.fsr_quality").unwrap();
+        assert!(matches(fsr, ""));
+        assert!(matches(fsr, "fsrquality"));
+        assert!(matches(fsr, "RENDER scale"));
+        assert!(!matches(fsr, "vsync"));
+        let found: Vec<_> = REGISTRY.iter().filter(|s| matches(s, "retention")).map(|s| s.key).collect();
+        assert_eq!(found, vec!["diagnostics.retention_days"]);
+        let saved = Config::parse("").unwrap();
+        let mut now = saved.clone();
+        now.set("display.vsync", Value::Bool(true)).unwrap();
+        now.set("display.width", Value::Int(2560)).unwrap();
+        now.set("display.height", Value::Int(2160)).unwrap(); // = the default: not a change
+        let (keys, restart) = pending(&saved, &now);
+        assert_eq!(keys, vec!["display.width", "display.vsync"]);
+        assert_eq!(restart, 1, "the width applies on the next launch; vsync is live");
     }
 
     /// U1 closes here: every registry entry is edited through the UI model, saved, and read back by

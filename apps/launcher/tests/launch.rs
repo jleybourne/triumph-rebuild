@@ -79,3 +79,50 @@ fn a_proof_binary_output_is_tailed() {
     assert_eq!(lines.len(), 4, "{lines:#?}");
     assert!(lines[0].starts_with("config profile=launch-test problems=0"));
 }
+/// L6: a launch in a session folder. The child gets `REBUILD_SESSION_DIR` and `REBUILD_FRAME_LOG` (inside
+/// the folder) and the matrix's environment; the launcher records the start and the end in
+/// `session.toml`; what the child leaves (summary, crash report) is listed with the session.
+#[test]
+fn a_launch_in_a_session_folder_records_start_and_end() {
+    use rebuild_launcher::session;
+    let home = temp("session");
+    let cfg_path = home.join("rebuild.toml");
+    let mut m = Model::new(Config::parse("").unwrap());
+    m.config.profile = "stress-cpu".into();
+    rebuild_config::builtin("stress-cpu").unwrap().apply(&mut m.config).unwrap();
+    m.save(&cfg_path).unwrap();
+    let exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_fake-layer"));
+    let sessions = session::sessions_dir(&home);
+    let start = session::Start { profile: "stress-cpu", config: &m.config, exe: &exe, config_path: &cfg_path, matrix: Some("m1"), run_seconds: Some(60), measure_from: Some("after_loading") };
+    let dir = session::create(&sessions, &start, session::now_unix()).unwrap();
+    let log = dir.join(session::FRAME_LOG);
+    let env = vec![("REBUILD_RUN_SECONDS".to_string(), "60".to_string()), ("REBUILD_MEASURE_FROM".to_string(), "after_loading".to_string())];
+    let extra: Vec<String> = ["--frames", "4", "--exit", "2"].iter().map(|s| s.to_string()).collect();
+    let mut r = play::Running::start_in(&exe, &cfg_path, &log, Some(&dir), &env, &extra).unwrap();
+    let t = Instant::now();
+    let status = loop {
+        if let Some(s) = r.poll() {
+            break s;
+        }
+        assert!(t.elapsed() < Duration::from_secs(30), "the child never exited");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    session::finish(&dir, &session::End { code: status.code(), status: status.to_string(), stopped_by_launcher: r.stopped }, session::now_unix()).unwrap();
+
+    let lines: Vec<String> = std::fs::read_to_string(&log).unwrap().lines().map(String::from).collect();
+    assert_eq!(lines.len(), 5, "the frame line went to <session>/frame-line.log: {lines:#?}");
+    let list = session::list(&sessions);
+    assert_eq!(list.len(), 1);
+    let e = &list[0];
+    let info = e.info.as_ref().unwrap();
+    assert_eq!(info.profile, "stress-cpu");
+    assert_eq!(info.exit_code, Some(2));
+    assert!(!info.stopped_by_launcher);
+    assert_eq!(info.limits, vec!["CPU 25 %".to_string()]);
+    assert_eq!(info.setting("limits.cpu_rate"), Some("25"));
+    let s = e.summary.as_ref().expect("the child wrote summary.toml into REBUILD_SESSION_DIR");
+    assert_eq!(s.avg_fps, Some(30.0));
+    assert_eq!(s.measured_from.as_deref(), Some("after_loading"), "the matrix environment reached the child");
+    assert_eq!(e.crashes.len(), 1);
+    assert!(e.outcome().starts_with("crash report"));
+}

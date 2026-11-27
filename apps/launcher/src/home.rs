@@ -6,7 +6,8 @@
 //! <home>/profiles/<n>.toml   saved profiles
 //! <home>/mods/<name>/        mods: files that replace title files by path
 //! <home>/overlay/            the launcher's write overlay (the copy of settings.xml, U3)
-//! <home>/frame-line.log      the frame line the layer appends (U5)
+//! <home>/frame-line.log      the frame line of a proof run without a session (U5)
+//! <home>/sessions/<stamp>-<profile>/   one folder per launch (L6, `session.rs`)
 //! ```
 
 use rebuild_config::Config;
@@ -47,6 +48,9 @@ impl Home {
     }
     pub fn frame_log(&self) -> PathBuf {
         self.dir.join("frame-line.log")
+    }
+    pub fn sessions_dir(&self) -> PathBuf {
+        crate::session::sessions_dir(&self.dir)
     }
 
     /// The active settings; a missing file is all defaults.

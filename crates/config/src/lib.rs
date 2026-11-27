@@ -164,6 +164,8 @@ pub static REGISTRY: &[Setting] = &[
     s("limits.vram_mb", "VRAM limit (MiB)", "Test a smaller graphics card: our GPU heaps stay under this. 0 = no limit. Enforced from Build 5.", Kind::Int { min: 0, max: 1 << 18 }, Default::Int(0), Restart, Experimental),
     s("limits.cpu_cores", "CPU core limit", "Run on only the first N logical processors. 0 = all.", Kind::Int { min: 0, max: 1024 }, Default::Int(0), Restart, Stable),
     s("limits.cpu_rate", "CPU usage cap (%)", "A hard cap on the share of the whole CPU the process may use. 0 = no cap.", Kind::Int { min: 0, max: 100 }, Default::Int(0), Restart, Stable),
+    s("diagnostics.retention_days", "Keep sessions for (days)", "Each launch gets a session folder (frame line, summary, crash reports, captures). Folders older than this are deleted when the launcher starts and after each run. 0 = keep forever.", Kind::Int { min: 0, max: 3650 }, Default::Int(14), Live, Stable),
+    s("launcher.theme", "Launcher theme", "dark or light, for the launcher only (the title is not affected). Also switched from the top bar.", Kind::Choice { options: &["dark", "light"] }, Default::Choice("dark"), Live, Stable),
     s("menu.key", "In-game menu key", "Toggles the in-game menu. While it is open the title sees no input.", Kind::Choice { options: &["F10", "F11", "F12", "Insert", "Home"] }, Default::Choice("F10"), Restart, Stable),
 ];
 
@@ -356,6 +358,28 @@ mod tests {
             assert!(s.key.contains('.'), "{} has no group", s.key);
             s.check(&s.default.value()).unwrap_or_else(|e| panic!("default of {}: {e}", s.key));
         }
+    }
+
+    #[test]
+    fn retention_and_theme_have_their_defaults_and_ranges() {
+        let c = Config::parse("").unwrap();
+        assert_eq!(c.int("diagnostics.retention_days"), 14);
+        assert_eq!(c.choice("launcher.theme"), "dark");
+        let mut c = Config::parse(
+            r#"
+            [settings]
+            "launcher.theme" = "light"
+            "diagnostics.retention_days" = 0
+            "#,
+        )
+        .unwrap();
+        assert!(c.problems.is_empty(), "{:#?}", c.problems);
+        assert_eq!(c.choice("launcher.theme"), "light");
+        assert_eq!(c.int("diagnostics.retention_days"), 0, "0 = keep forever is allowed");
+        assert!(c.set("launcher.theme", Value::Choice("blue".into())).is_err());
+        assert!(c.set("diagnostics.retention_days", Value::Int(-1)).is_err());
+        let back = Config::parse(&c.to_toml()).unwrap();
+        assert_eq!(back.choice("launcher.theme"), "light");
     }
 
     #[test]

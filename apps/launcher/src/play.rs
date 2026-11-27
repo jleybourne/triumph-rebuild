@@ -1,8 +1,8 @@
 //! U5: Play. Launch the layer with `--config <rebuild.toml>`, and show its frame-line log as it grows
 //! (a file the layer appends; no sockets).
 //!
-//! The log's path goes to the child as `REBUILD_FRAME_LOG` until the registry has an entry for it
-//! (proposed in `agents/launcher.md`).
+//! Every launch runs in a session folder (`session.rs`): the folder goes to the child as
+//! `REBUILD_SESSION_DIR`, and the log's path as `REBUILD_FRAME_LOG` (`<session>/frame-line.log`).
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -20,8 +20,19 @@ pub fn find_layer() -> Option<PathBuf> {
 
 /// The command the launcher runs. `extra` are further arguments (a proof's own flags).
 pub fn command(exe: &Path, config: &Path, frame_log: &Path, extra: &[String]) -> Command {
+    command_in(exe, config, frame_log, None, &[], extra)
+}
+
+/// The command, in a session: `REBUILD_SESSION_DIR` and any further environment (`env`).
+pub fn command_in(exe: &Path, config: &Path, frame_log: &Path, session: Option<&Path>, env: &[(String, String)], extra: &[String]) -> Command {
     let mut c = Command::new(exe);
     c.arg("--config").arg(config).args(extra).env("REBUILD_FRAME_LOG", frame_log);
+    if let Some(d) = session {
+        c.env(crate::session::ENV_SESSION_DIR, d);
+    }
+    for (k, v) in env {
+        c.env(k, v);
+    }
     // the user's hardware limits, as the runtime reads them (`rebuild_runtime::limits`)
     if let Some(cfg) = std::fs::read_to_string(config).ok().and_then(|t| rebuild_config::Config::parse(&t).ok()) {
         for (key, var) in [
@@ -47,22 +58,33 @@ pub fn command(exe: &Path, config: &Path, frame_log: &Path, extra: &[String]) ->
 pub struct Running {
     child: Child,
     pub started: std::time::Instant,
+    /// stopped by the launcher (Stop, or a matrix run past its length)
+    pub stopped: bool,
 }
 
 impl Running {
     /// Start it. The frame log is emptied first so the tail shows this run only.
     pub fn start(exe: &Path, config: &Path, frame_log: &Path, extra: &[String]) -> Result<Running, String> {
+        Running::start_in(exe, config, frame_log, None, &[], extra)
+    }
+
+    /// Start it in a session folder (`REBUILD_SESSION_DIR`), with further environment.
+    pub fn start_in(exe: &Path, config: &Path, frame_log: &Path, session: Option<&Path>, env: &[(String, String)], extra: &[String]) -> Result<Running, String> {
         if let Some(d) = frame_log.parent() {
             std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
         }
         std::fs::write(frame_log, b"").map_err(|e| format!("{}: {e}", frame_log.display()))?;
-        let child = command(exe, config, frame_log, extra).spawn().map_err(|e| format!("{}: {e}", exe.display()))?;
-        Ok(Running { child, started: std::time::Instant::now() })
+        let child = command_in(exe, config, frame_log, session, env, extra).spawn().map_err(|e| format!("{}: {e}", exe.display()))?;
+        Ok(Running { child, started: std::time::Instant::now(), stopped: false })
     }
 
     /// Start a proof binary (`gputest --bare` and the like) as it is, with its standard output
     /// appended to the frame log, so the Play tab shows its result through the same tail.
     pub fn start_proof(exe: &Path, args: &[String], frame_log: &Path) -> Result<Running, String> {
+        Running::start_proof_in(exe, args, frame_log, None)
+    }
+
+    pub fn start_proof_in(exe: &Path, args: &[String], frame_log: &Path, session: Option<&Path>) -> Result<Running, String> {
         if let Some(d) = frame_log.parent() {
             std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
         }
@@ -70,11 +92,14 @@ impl Running {
         let err = out.try_clone().map_err(|e| e.to_string())?;
         let mut c = Command::new(exe);
         c.args(args).stdin(Stdio::null()).stdout(out).stderr(err);
+        if let Some(d) = session {
+            c.env(crate::session::ENV_SESSION_DIR, d);
+        }
         if let Some(d) = exe.parent() {
             c.current_dir(d);
         }
         let child = c.spawn().map_err(|e| format!("{}: {e}", exe.display()))?;
-        Ok(Running { child, started: std::time::Instant::now() })
+        Ok(Running { child, started: std::time::Instant::now(), stopped: false })
     }
 
     /// `Some(status)` once it has exited.
@@ -87,6 +112,7 @@ impl Running {
     }
 
     pub fn stop(&mut self) {
+        self.stopped = true;
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
