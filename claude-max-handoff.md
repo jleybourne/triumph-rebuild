@@ -138,5 +138,6 @@ The owner's rules, in their own words:
 
 - Vertex shaders: `translate vs` wired; 911 / 951 compile (runs/build4-vs.md). Descriptor shadow table (plan
   decision 9) must be written by Build 5's descriptor code.
-- Owner request: user-set RAM / VRAM / CPU-core limits for testing (tasks.md, end).
+- Owner request, hardware limits: built (limits.rs, config limits.*, launcher env); left: VRAM in Build 5 heaps,
+  worker pools sized to the core limit, a capped proof run (owner OK).
 - The title has not been run since the kernel-spin fix (2a2af01); ask the owner before any run.

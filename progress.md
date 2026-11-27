@@ -83,6 +83,20 @@ of work. A step counts as 100 % only when its closing number from `tasks.md` is 
 Each upload adds an entry: its own bar, what changed, what was measured, and what moved the percentage.
 Older entries are never edited.
 
+### 2026-11-27 — Hardware limits for testing (owner request); files test fixed for Developer Mode hosts
+
+```
+[██████████░░░░░░░░░░]  49 %   (unchanged: a testing feature, not a build step)
+tests       317 green, 0 failing
+```
+
+- **Built:** user-set hardware limits, so people can test how the title runs on less than their machine has.
+  Four settings in the launcher (`limits.ram_mb`, `limits.vram_mb`, `limits.cpu_cores`, `limits.cpu_rate`; 0 = no
+  limit), passed to the layer and applied before the title starts (`crates/runtime/src/limits.rs`): RAM through
+  the title's budget and the job object's commit cap, CPU cores through process affinity, CPU usage through a
+  job hard cap. VRAM is recorded now and enforced by our GPU heaps in Build 5 (marked experimental until then).
+- **Fixed:** the files F5 test compared one line too many on hosts that allow symbolic links (Developer Mode).
+
 ### 2026-11-27 — Vertex shaders: 911 of 951 compile (95.8 %); pixel 1,790; descriptor shadow table decided
 
 ```

@@ -22,6 +22,20 @@ pub fn find_layer() -> Option<PathBuf> {
 pub fn command(exe: &Path, config: &Path, frame_log: &Path, extra: &[String]) -> Command {
     let mut c = Command::new(exe);
     c.arg("--config").arg(config).args(extra).env("REBUILD_FRAME_LOG", frame_log);
+    // the user's hardware limits, as the runtime reads them (`rebuild_runtime::limits`)
+    if let Some(cfg) = std::fs::read_to_string(config).ok().and_then(|t| rebuild_config::Config::parse(&t).ok()) {
+        for (key, var) in [
+            ("limits.ram_mb", "REBUILD_LIMIT_RAM_MB"),
+            ("limits.vram_mb", "REBUILD_LIMIT_VRAM_MB"),
+            ("limits.cpu_cores", "REBUILD_LIMIT_CPU_CORES"),
+            ("limits.cpu_rate", "REBUILD_LIMIT_CPU_RATE"),
+        ] {
+            let v = cfg.int(key);
+            if v > 0 {
+                c.env(var, v.to_string());
+            }
+        }
+    }
     c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if let Some(d) = exe.parent() {
         c.current_dir(d);

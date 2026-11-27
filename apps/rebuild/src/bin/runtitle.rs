@@ -109,10 +109,12 @@ fn guard(seconds: u64) -> Result<(), String> {
     use windows::Win32::System::JobObjects::*;
     use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
     const GIB: u64 = 1 << 30;
+    // user-set hardware limits first: the budget reads the RAM limit
+    rebuild_runtime::limits::set(rebuild_runtime::limits::Limits::from_env());
     let budget = rebuild_runtime::budget::limit();
     let avail = rebuild_runtime::budget::host_commit_available();
     // the budget (physical pages, charged to the system) plus our own private memory, plus room for Windows
-    let own = budget + 4 * GIB;
+    let own = rebuild_runtime::budget::private_cap();
     if avail < own + 4 * GIB {
         return Err(format!(
             "the system can commit {:.1} GiB more; a run needs {:.1} GiB (budget {:.1} + own {:.1} + 4 for Windows). Close programs or lower REBUILD_MEMORY_BUDGET_MB",
@@ -135,6 +137,12 @@ fn guard(seconds: u64) -> Result<(), String> {
         )
         .map_err(|e| format!("job limits: {e}"))?;
         AssignProcessToJobObject(job, GetCurrentProcess()).map_err(|e| format!("job assign: {e}"))?;
+        for line in rebuild_runtime::limits::apply_cpu(job)? {
+            println!("limit     {line}");
+        }
+        for line in rebuild_runtime::limits::get().describe() {
+            println!("limit     set: {line}");
+        }
         // the handle is never closed: it closes when the process ends, and the job kills what is left
         let _ = job;
     }

@@ -40,18 +40,33 @@ pub fn default_limit(physical: u64) -> u64 {
     third.min(12 * GIB)
 }
 
-/// The budget in bytes.
+/// The budget in bytes. A user RAM limit ([`crate::limits`]) gives the physical pages at most half of it;
+/// the process's own memory gets the rest ([`private_cap`]).
 pub fn limit() -> u64 {
     *LIMIT.get_or_init(|| {
-        if let Some(mb) = std::env::var("REBUILD_MEMORY_BUDGET_MB").ok().and_then(|v| v.parse::<u64>().ok()) {
-            return mb << 20;
+        let base = if let Some(mb) = std::env::var("REBUILD_MEMORY_BUDGET_MB").ok().and_then(|v| v.parse::<u64>().ok()) {
+            mb << 20
+        } else {
+            #[cfg(windows)]
+            let physical = host_physical();
+            #[cfg(not(windows))]
+            let physical = 0;
+            default_limit(physical)
+        };
+        match crate::limits::get().ram_bytes() {
+            Some(ram) => base.min(ram / 2),
+            None => base,
         }
-        #[cfg(windows)]
-        let physical = host_physical();
-        #[cfg(not(windows))]
-        let physical = 0;
-        default_limit(physical)
     })
+}
+
+/// The cap on the process's own committed memory: with a RAM limit, what the physical pages leave of it;
+/// otherwise the budget plus 4 GiB (Rust, our heaps, the title's private allocations).
+pub fn private_cap() -> u64 {
+    match crate::limits::get().ram_bytes() {
+        Some(ram) => ram.saturating_sub(limit()).max(1 << 30),
+        None => limit() + 4 * GIB,
+    }
 }
 
 /// Bytes charged so far.

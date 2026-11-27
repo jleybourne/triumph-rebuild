@@ -157,6 +157,10 @@ pub static REGISTRY: &[Setting] = &[
     s("dstorage.bcpack_tables", "BCPack tables", "The ~78 KB BCPack format tables, a file kept outside the repository. Empty = REBUILD_BCPACK_TABLES; without it, BCPack textures are refused.", Kind::Path, Default::Path(""), Restart, Stable),
     s("game.title_settings", "Title settings file", "The title's own settings.xml (it lives in the title's storage, not the game folder). Empty = search.", Kind::Path, Default::Path(""), Restart, Stable),
     s("diagnostics.frame_log_path", "Frame line log file", "Where the frame line log is written. Empty = REBUILD_FRAME_LOG, else frame-line.log in the launcher's folder.", Kind::Path, Default::Path(""), Live, Stable),
+    s("limits.ram_mb", "RAM limit (MiB)", "Test a smaller machine: the title and the layer together stay under this. 0 = no limit (the title's own budget still applies).", Kind::Int { min: 0, max: 1 << 20 }, Default::Int(0), Restart, Stable),
+    s("limits.vram_mb", "VRAM limit (MiB)", "Test a smaller graphics card: our GPU heaps stay under this. 0 = no limit. Enforced from Build 5.", Kind::Int { min: 0, max: 1 << 18 }, Default::Int(0), Restart, Experimental),
+    s("limits.cpu_cores", "CPU core limit", "Run on only the first N logical processors. 0 = all.", Kind::Int { min: 0, max: 1024 }, Default::Int(0), Restart, Stable),
+    s("limits.cpu_rate", "CPU usage cap (%)", "A hard cap on the share of the whole CPU the process may use. 0 = no cap.", Kind::Int { min: 0, max: 100 }, Default::Int(0), Restart, Stable),
     s("menu.key", "In-game menu key", "Toggles the in-game menu. While it is open the title sees no input.", Kind::Choice { options: &["F10", "F11", "F12", "Insert", "Home"] }, Default::Choice("F10"), Restart, Stable),
 ];
 

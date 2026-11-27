@@ -204,4 +204,12 @@ Design: [`docs/design/launcher.md`](docs/design/launcher.md). Its own bar in `pr
 
 Let people test their own hardware by imposing limits on the app: RAM (job object commit cap + the title budget,
 `crates/runtime/src/budget.rs`), VRAM (budget on our heaps / tiles), CPU cores (job object CPU set / affinity, worker
-pool size), maybe GPU time. Settings in `crates/config` and the launcher; applied before the title starts. Not started.
+pool size), maybe GPU time. Settings in `crates/config` and the launcher; applied before the title starts.
+
+- [x] settings `limits.ram_mb`, `limits.vram_mb`, `limits.cpu_cores`, `limits.cpu_rate` (registry: the launcher shows them)
+- [x] the launcher passes them to the layer (`REBUILD_LIMIT_*`); `crates/runtime/src/limits.rs` reads them
+- [x] RAM: title budget at most half the limit, the process's own commit capped at the rest (job object)
+- [x] CPU cores (process affinity, first N logical processors) and CPU usage (job hard cap)
+- [ ] VRAM: our GPU heaps refuse past the limit (Build 5)
+- [ ] worker pools (upload workers, DirectStorage threads) sized to the core limit
+- [ ] proof: a capped run shows the limits in force (needs the owner's OK to run the title)
