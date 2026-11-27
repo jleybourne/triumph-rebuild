@@ -13,6 +13,7 @@ fork jleybourne/Triumph, GPL-3.0-or-later, used here under GPL-3.0-only.
 | `crates/shader/src/gfx10/opcodes.rs` | VIctory, generated from Mesa's `aco_opcodes.py` (Valve Corporation, MIT notice kept in the file) | GPL-3.0-or-later / MIT, used under GPL-3.0-only | tables `pub(crate)`; the test no longer builds the fork's IR |
 | `crates/xg/src/layout.rs` | VIctory, `victory-formats/src/texture.rs` (itself following AMD's addrlib, MIT notice kept in the file) | GPL-3.0-or-later / MIT, used under GPL-3.0-only | the GFX10 layout maths: block dimensions, mip placement and tails, micro tile patterns, element offsets, the DXGI element table |
 | `crates/audio/src/wma/tables.rs` | VIctory, `victory-formats/src/xma/tables.rs` (itself converted from FFmpeg's `libavcodec/wmaprodata.h`, LGPL-2.1-or-later) | GPL-3.0-or-later / LGPL-2.1-or-later, used under GPL-3.0-only | none: data only (the WMA Pro code and level tables); the decoder in `crates/audio/src/wma` is ours |
+| `crates/dstorage/src/bcpack/consts.rs` | VIctory, `victory-formats/src/bcpack.rs` | GPL-3.0-or-later, used under GPL-3.0-only | constant data only (lane widths, BC6H/BC7 layout tables, the console's BC6H run order); the BCPack decoder in `crates/dstorage/src/bcpack` is ours |
 | `crates/xg/src/computer.rs` | VIctory, `victory-hle/src/modules/xg.rs` | GPL-3.0-or-later, used under GPL-3.0-only | the `xg_xs.dll` structure layouts, slot meanings and suggestion rule, rewritten as plain Rust methods |
 
 ## Fonts and libraries

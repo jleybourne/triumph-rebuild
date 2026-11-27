@@ -17,10 +17,13 @@
 //!
 //! What is ours and what is the lead's: the layouts, the queue semantics and the decode are here;
 //! the binding of `DStorageGetFactory` into `crates/runtime` and the physical-page writer
-//! ([`Pages`], over `runtime::physical`) are the lead's. BCPack (request bits 1-4) is answered in
-//! `agents/dstorage.md` (D4): requests that carry it fail with `E_NOTIMPL` unless a [`BcPack`]
-//! decoder is plugged in, and each is counted.
+//! ([`Pages`], over `runtime::physical`) are the lead's. BCPack (request bits 1-4) is decoded by
+//! [`bcpack::Decoder`] (D5: our decoder, the format tables from a file outside git, an on-disk cache
+//! of decoded output) once the engine is given one (`Config::bcpack`, e.g. `Decoder::from_config`);
+//! without one (no tables) such requests fail with `E_NOTIMPL` and are counted.
 
+pub mod bcpack;
+pub mod cache;
 pub mod com;
 pub mod engine;
 pub mod zlib;
@@ -30,6 +33,8 @@ mod tests;
 
 use std::ffi::{c_char, c_void};
 
+pub use bcpack::Decoder;
+pub use cache::Cache;
 pub use com::{install, DStorageGetFactory, OwnedFactory};
 pub use engine::{BcPack, Config, Engine, Pages, Stats, StatusArray};
 
