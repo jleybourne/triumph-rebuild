@@ -19,11 +19,13 @@
 #![allow(non_snake_case)]
 
 pub mod acp;
+pub mod awc;
 pub mod heap;
 #[cfg(test)]
 mod measure;
 pub mod ring;
 pub mod wasapi;
+pub mod wma;
 pub mod xapu;
 pub mod xdsp;
 pub mod xma;

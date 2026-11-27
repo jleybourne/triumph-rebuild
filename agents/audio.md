@@ -1,9 +1,9 @@
 # Lane `audio`: the console's audio hardware
 
 Crate `crates/audio` (package `rebuild-audio`). No GPU, no title bytes (every test builds its own input).
-State: **A1, A2, A4 closed; A3 closed for Opus, DSP and the coprocessor, and for XMA up to the frame decoder**
-(see "XMA decoder" below). 14 tests green (`cargo test --release -p rebuild-audio`), plus two hand-run
-measurements (ignored by default). Workspace: 128 passed, 3 ignored, 0 warnings.
+State: **A1-A5 closed.** A5 (round 2): our own XMA2 decoder, `crates/audio/src/wma`, now the XMA contexts'
+default. 18 tests green (`cargo test --release -p rebuild-audio`), plus four hand-run checks (ignored by default:
+the tone, the title-call timings, and A5's two checks against the title's own streams). Workspace: 245 passed, 6 ignored, 0 warnings.
 
 Sources for A1: the fork's `victory-hle` modules `audio.rs` (acphal), `apu.rs` (xapu), `dsp.rs` (chad), read
 through `git show triumph/main:...` and not copied, plus its run log
@@ -90,25 +90,54 @@ Before the lock and heap fixes the same measurement failed: worst 4.6 ms (`ApuAl
 the whole merged free range every time) and 3.8 ms (`SubmitCommand`, waiting for the XMA thread holding a voice
 through a whole ring fill).
 
-## XMA decoder: what exists
+## A5: our XMA2 decoder
 
-The brief expected "no open XMA decoder". That is not quite what I found:
+### Built
 
-- **FFmpeg** decodes XMA1/XMA2 (`libavcodec/wmaprodec.c`, decoders `xma1`, `xma2`), **LGPL-2.1-or-later**.
-- **The fork** has a pure-Rust XMA2 decoder, `crates/victory-formats/src/xma.rs` + `xma/tables.rs` (~1,650 lines),
-  GPL-3.0-or-later, whose header says it follows FFmpeg's `wmaprodec.c` restricted to XMA (≤ 2 channels, no LFE).
-- **No MIT/BSD/Apache XMA decoder** exists that I know of; Microsoft's own is console-only and closed.
+- `wma/mod.rs`: an XMA2 frame is a WMA Pro frame of 512 samples per channel (mono or stereo, subframes of
+  512/256/128, no LFE). Tile header, frame flags, then per subframe: channel transform (mid/side per band),
+  quantisation step, scale factors (fresh, or resampled from the last set plus run-level changes), coefficients
+  (4/2/1-vector codes until the zeros run long, then run-level), inverse quantisation, inverse MDCT, sine-window
+  overlap. Written from the bitstream's description; FFmpeg's `wmaprodec.c` and the fork's `xma.rs` were read as
+  references, not copied. Prefix codes decode through a 10-bit lookup table, longer codes by search.
+- `wma/tx.rs`: the half inverse MDCT through an n/4-point complex FFT between two rotations; unit-tested against
+  the same maths done by direct DFT in f64.
+- `wma/tables.rs`: **vendored data**: the WMA Pro code and level tables, from the fork's `xma/tables.rs` (which
+  converted FFmpeg's `wmaprodata.h`, LGPL-2.1-or-later). Section 3 header and a `CREDITS.md` line. These cannot be
+  derived; any decoder needs these exact tables.
+- `awc.rs`: enough of the engine's audio container (`ADAT`) to find each stream's format and data chunks, for the
+  tests. Codec 5 is XMA2; codec 11, most of the archive, is the Opus framing `xapu.dll` decodes.
+- `acp::Hal` now uses `wma::factory()` by default, so XMA voices play real audio.
 
-Both open ones are licence-compatible with GPL-3.0-only, but section 3 lets helpers vendor only code that carries no
-performance, and a codec runs per frame on a hot thread, so I did not vendor either. The crate is ready for one:
-implement `xma::FrameDecoder` (frame bits from the 15-bit length field, MSB first → 512 samples per channel) and
-call `Hal::set_xma_decoder`. Until then XMA voices play silence with exact timing.
+### Measured
+
+```
+reference    FFmpeg 9.0.2 (xma2 decoder), already on disk (WinGet "Gyan.FFmpeg"); nothing downloaded
+input        every XMA2 stream in the title's audio.rpf, read at test time through REBUILD_GAME_DIR (nothing kept;
+             the archive's size and modified time checked unchanged)
+match        1,818 streams, 832,026 frames, 0 refused; 424,867,971 samples compared:
+             322,087 (0.076 %) differ by 1, none by more  -> within +-1 LSB, closes A5
+             offset 576 samples in every stream (FFmpeg drops the first frame, 512, and trims 64 more)
+speed        one thread, two decoders (a stereo stream's work), 20,092 frames x 5, three runs:
+             1,122-1,292x real time at the title's 32 kHz; 12.4-14.3 us per stereo frame
+             (= ~750-860x at 48 kHz). Aim was 50x.
+```
+
+Commands: `REBUILD_GAME_DIR=<title> REBUILD_FFMPEG=<ffmpeg.exe> cargo test --release -p rebuild-audio -- --ignored
+a5_matches --nocapture` (`REBUILD_A5_STREAMS=100000` for all; 64 by default, 8 s) and `-- --ignored a5_speed`.
+
+### Not covered
+
+- **Stereo against a reference.** All of the title's XMA2 streams are mono (1,818 of 1,818; multichannel audio is
+  separate mono streams), and nothing can make a stereo XMA2 file (FFmpeg has no XMA or WMA Pro encoder). The stereo
+  paths (joint tile headers, mid/side, per-channel quantiser offsets) are written and fuzzed, not compared. The
+  speed number above is a stereo stream's work measured as two mono channels.
+- The frame header's trim fields are read and not applied: trimming is the XMA context's job (its skip fields).
 
 ## For the lead
 
-1. **XMA frame decoder** (above): decide between vendoring the fork's `victory-formats` XMA decoder (with the
-   section 3 header and `CREDITS.md`), porting FFmpeg's, or writing our own. The plug is one trait; the walk, loops
-   and ring are done and tested.
+1. **XMA decoder (A5): done, ours.** Only data is vendored (the code tables, credited). If a stereo XMA stream ever
+   turns up (a dump through the XMA context), add it to the reference check.
 2. **The title's middleware may open WASAPI itself.** The fork's notes say mixed audio leaves through the host's
    WASAPI, reached through COM like on PC (the import census binds those calls to the host). If so, A4's `Output`
    is not on the title's path; it is ready for anything we mix ourselves (in-game menu sounds, a fallback).
@@ -122,6 +151,5 @@ call `Hal::set_xma_decoder`. Until then XMA voices play silence with exact timin
 
 ## Next
 
-- A real XMA frame decoder behind `FrameDecoder` (item 1), then a decode test against reference PCM made from
-  synthetic input.
+- A stereo XMA2 reference, if one appears.
 - Bind the 19 functions in `crates/runtime` (the lead's).
