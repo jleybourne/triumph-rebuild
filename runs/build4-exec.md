@@ -70,7 +70,7 @@ compare (the program writes nothing, or nothing on these inputs: every pixel dis
 | buffer loads through a CBV descriptor read the host's CBV (an SRV type over a CBV descriptor lost the WARP device; GPU-based validation named it) | `001a8d494b5f60b3` | vertex programs that lost the device: 16 → 0 |
 
 Every `sirtest` and random-program test is unchanged (the IR, emitter and interpreters are untouched); `cargo test
---release --no-fail-fast`: 493 passed, 0 failed, 0 warnings.
+--release --no-fail-fast` after merging master (#36): 500 passed, 0 failed; one warning, from master (`rebuild-xlist` lib test, an unused `HRESULT`). After the merge the v0 compute set still gives 110 matching.
 
 ## The buckets, biggest first
 
