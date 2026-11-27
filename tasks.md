@@ -19,7 +19,7 @@ Order and decisions are `plan.md`'s; overall progress is in [`progress.md`](prog
 | done | (a) dirty-chunk upload benchmark: write-watch + 64 B diff (shadow and hash) + PCIe upload (copy-per-run and compute scatter) at 115 MB/frame | `uploadbench` — results in [`runs/build0a-upload.md`](runs/build0a-upload.md) |
 | done | (b) per-draw translation microbenchmark: synthetic frame in the title's shape (4,500 draws, 20,311 calls, 1,433 pipelines) through our translator (`crates/xlist`, 5 tests) into real D3D12 lists, plus 12,027 descriptor writes from a dirty list | `listbench`: 0.43 µs a draw on one thread, 1.9 ms a frame; descriptors 2.0 ms — [`runs/build0b-lists.md`](runs/build0b-lists.md) |
 | blocked | (c) the title's real GPU time from per-list timestamp pairs, RT on and off. Needs the title rendering on our code, so it closes in Build 5; until then the fork's 43-63 ms (RT off) stands | a measured replacement for the soft ~45 ms |
-| todo | owner: fill the minimum spec in `plan.md` (GPUs, VRAM, ReBAR, output resolution, upscaler mode) | filled before Build 7 |
+| done | owner: the minimum spec is the dev machine (`plan.md`): RTX 4070 Ti 12 GB, PCIe 3.0, ReBAR on, 3840x2160 output, DLSS Quality | filled 2026-11-27 |
 
 ## Build 1 — tiled VRAM at console addresses  ✅ closed — [`runs/build1-tiles.md`](runs/build1-tiles.md)
 
@@ -155,7 +155,7 @@ decision 4.
 | todo | submit-ahead and fence waits that never stall the title | frame time ≈ the card's own work |
 | todo | 30 fps on NVIDIA at the stated output resolution and DLSS mode | the frame line, at ~4,500 draws |
 
-## Build 9 — AMD validation by testers
+## Build 9 — AMD validation by testers (deferred by the owner, 2026-11-27)
 
 | state | work | closes when |
 |---|---|---|

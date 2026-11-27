@@ -27,15 +27,19 @@ stretch    60 displayed
 
 A "30 fps" with no resolution and no upscaler mode beside it is not a result.
 
-### Minimum spec — owner decision, to be filled before Build 7
+### Minimum spec — owner decision (2026-11-27): the dev machine
 
 ```
-GPU        NVIDIA  ____________      AMD  ____________      (Intel GPUs: unsupported)
-VRAM       ___ GB
-PCIe       3.0 x16 assumed as the floor (the dev machine: i7-10700KF, RTX 4070 Ti, PCIe 3.0)
-ReBAR      required / not required: ___
-output     ____ x ____, upscaler mode ________
+CPU        Intel i7-10700KF (8 cores / 16 threads), 64 GB RAM, Windows 11
+GPU        NVIDIA RTX 4070 Ti, 12 GB VRAM, driver 610.88      AMD: deferred (owner, 2026-11-27)
+PCIe       3.0 x16 (~15.8 GB/s): the floor for every memory-path number
+ReBAR      on (BAR1 16 GB): assumed present
+output     3840 x 2160 (the dev machine's display, 239 Hz), DLSS Quality: 2560 x 1440 internal, the title's own
+           internal resolution on the console, so the upscale costs no detail the console had
 ```
+
+The target is 30 fps at that output and mode. Faster DLSS modes stay options in the registry (`upscaler.mode`).
+Intel GPUs are unsupported.
 
 The dev machine's PCIe 3.0 link (~15.8 GB/s) is the floor for every memory-path number in this plan.
 
@@ -46,7 +50,7 @@ can test     NVIDIA (RTX 4070 Ti) — DLSS, and FSR 3.1 (vendor-agnostic) on the
 cannot test  AMD — FSR 4, AMD drivers, AMD memory/tiling behaviour, AMD device removals
 ```
 
-Everything that can be proven on NVIDIA is proven there first. AMD is closed by tester runs (Build 9).
+Everything that can be proven on NVIDIA is proven there first. AMD is closed by tester runs (Build 9), **deferred by the owner (2026-11-27)**: the work proceeds NVIDIA-first, and the FSR backend stays built and tested standalone.
 
 ## The six decisions
 

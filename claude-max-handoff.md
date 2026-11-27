@@ -50,8 +50,10 @@ The owner's rules, in their own words:
   in `%LOCALAPPDATA%\triumph-rebuild\images`.
 - **Shader corpus copy:** `D:\victory-data\shaders.rpf` (SHA-256 `0BC1634594E51CA8E7EF5F2BC6F5B32B081CE779AC094D686DE08ECB75DC24A8`),
   copied once with the owner's OK. All shader work reads this copy, never the game folder.
-- **Game folder:** `data\ttdb\ui\ttdb_ui.ttpf` was overwritten by a helper (2026-11-27); the owner is re-dumping it.
-  Don't run the title until it is back, then make the folder read-only (`attrib +R /S`, owner OK given).
+- **Game folder:** read-only at the file-system level since 2026-11-27 (`attrib +R /S`, all 110 files; a test
+  write is refused). `data\ttdb\ui\ttdb_ui.ttpf` was re-dumped by the owner after a helper overwrote it:
+  845,115,648 bytes, SHA-256 `DC983ED7F6B78D1693FA5757F17C03BAFB790E851594FDF4D412579B61D867F6`.
+- **Minimum spec = the dev machine** (`plan.md`): 3840x2160 output, DLSS Quality. **AMD testing deferred** by the owner.
 - **The fork** (design and data only): `git -C D:\Developer\fxceless-victory show triumph/main:<path>`. GPU
   design: `crates/victory-gpu/src/*.rs`; loader: `crates/victory-loader/src/*.rs`; console DLLs:
   `crates/victory-hle/src/modules/*.rs`; findings: `CLAUDE.md`, `ROADBLOCK.md`, `docs/`.
