@@ -81,6 +81,17 @@ pub struct ListStats {
     pub shadow_sets: u32,
     /// user-data dwords made from a root argument the title had not set, or a table outside the bound heaps (0)
     pub user_unset: u32,
+    /// of `skipped`: no host pipeline bound (not in the library, or no user map)
+    pub skipped_pipeline: u32,
+    /// of `skipped`: the draw's topology is outside the bound pipeline's type
+    pub skipped_topology: u32,
+    /// render-target and depth clears recorded
+    pub clears: u32,
+    /// copies recorded (buffer, resource, memory)
+    pub copies: u32,
+    /// OMSetRenderTargets calls, and render targets in them the host had no view for (bound as nothing)
+    pub rt_sets: u32,
+    pub rt_unmapped: u32,
 }
 
 /// The list as the title sees it: [`TITLE_BYTES`] of console layout, then ours.
@@ -285,6 +296,36 @@ macro_rules! call {
     };
 }
 
+// ---- tracing ----
+
+/// `trace::ON` (set by the runtime for a range of frames): each list call that matters for what reaches the
+/// screen is printed (pipelines, topology, draws and why they were dropped, targets, clears, refusals).
+pub mod trace {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    pub static ON: AtomicBool = AtomicBool::new(false);
+
+    #[inline]
+    pub fn on() -> bool {
+        ON.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn refused(what: &str) {
+        if on() {
+            eprintln!("xcall     refused in {what}");
+        }
+    }
+}
+
+macro_rules! tr {
+    ($($a:tt)*) => {
+        if trace::on() {
+            eprintln!("xcall     {}", format_args!($($a)*));
+        }
+    };
+}
+
+
 impl ListState {
     #[inline]
     fn work(&mut self) {
@@ -348,7 +389,7 @@ impl ListState {
         }
         let r = self.host.resource(console);
         if r.is_none() {
-            self.stats.refused += 1;
+            { self.stats.refused += 1; trace::refused("resource") };
         }
         r
     }
@@ -377,8 +418,16 @@ impl ListState {
             return;
         }
         self.sh.console_pipeline = console;
-        let Some(p) = self.host.pipeline(console) else {
-            self.stats.refused += 1;
+        let found = self.host.pipeline(console);
+        tr!(
+            "pipeline {console:p}: {}",
+            match &found {
+                Some(p) => format!("host {:p}, {} topology type {}, user map {}", p.pso, if p.compute { "compute" } else { "graphics" }, p.topology, p.user.is_some()),
+                None => "no host pipeline".to_string(),
+            }
+        );
+        let Some(p) = found else {
+            { self.stats.refused += 1; trace::refused("set_pipeline") };
             self.sh.pso_missing = true;
             return;
         };
@@ -548,6 +597,70 @@ impl ListState {
 
     /// A draw's topology outside the bound PSO's type: the host refuses it, so it is dropped.
     #[inline]
+    /// A non-indexed rectangle-list draw, its per-vertex buffers expanded to two triangles a rectangle into the
+    /// allocator's upload memory ([`super::rect`]). False (nothing recorded) when it cannot be: no input layout,
+    /// vertices not from buffers, a buffer the CPU cannot read, no upload memory, or no shadow table.
+    fn rect_draw(&mut self, vertices: u32, instances: u32, first_vertex: u32, first_instance: u32) -> bool {
+        if vertices == 0 || vertices % 3 != 0 {
+            return false;
+        }
+        let Some(layout) = self.host.input_layout(self.sh.console_pipeline) else { return false };
+        let mut views = self.sh.vbs;
+        let mut top = self.sh.vb_used as usize;
+        let mut slots: Vec<u32> = layout.iter().filter(|e| !e.3).map(|e| e.0).collect();
+        slots.sort_unstable();
+        slots.dedup();
+        if slots.is_empty() {
+            return false; // positions from the vertex number: the geometry stage's work
+        }
+        let rects = u64::from(vertices / 3);
+        for slot in slots {
+            let i = slot as usize & 31;
+            let (va, size, stride) = self.sh.vb_console[i];
+            let (start, len) = (u64::from(first_vertex) * u64::from(stride), u64::from(vertices) * u64::from(stride));
+            if stride == 0 || va == 0 || va == u64::MAX || start + len > u64::from(size) {
+                return false;
+            }
+            // the bytes must lie in memory a range holds (console addresses are CPU addresses)
+            if self.va(va + start).is_none() || self.va(va + start + len - 1).is_none() {
+                return false;
+            }
+            let out = rects * 6 * u64::from(stride);
+            let Some(a) = self.allocator() else { return false };
+            let dst = a.alloc(out, 256);
+            let Some(host) = (!dst.is_null()).then(|| a.find(dst as u64).and_then(|r| r.map(dst as u64))).flatten() else { return false };
+            let elements: Vec<(u32, u32)> = layout.iter().filter(|e| e.0 == slot && !e.3).map(|e| (e.1, e.2)).collect();
+            // SAFETY: `len` bytes of mapped memory (checked above), and `out` bytes of upload memory just taken
+            let (src, dst) = unsafe { (std::slice::from_raw_parts((va + start) as *const u8, len as usize), std::slice::from_raw_parts_mut(dst, out as usize)) };
+            super::rect::expand(src, dst, stride as usize, &elements);
+            views[i] = D3D12_VERTEX_BUFFER_VIEW { BufferLocation: host, SizeInBytes: out as u32, StrideInBytes: stride };
+            top = top.max(i + 1);
+        }
+        if !self.bind_library(0) {
+            return false;
+        }
+        self.work();
+        self.stats.draws += 1;
+        RECTS_EXPANDED.fetch_add(1, Ordering::Relaxed);
+        tr!("rectangle draw expanded: {rects} rectangles, {instances} instances");
+        call!(self.IASetVertexBuffers(0, top as u32, views.as_ptr()));
+        call!(self.DrawInstanced(rects as u32 * 6, instances, 0, first_instance));
+        // the title's buffers again for what follows
+        call!(self.IASetVertexBuffers(0, top as u32, self.sh.vbs.as_ptr()));
+        true
+    }
+
+    /// A draw not recorded: counted, with its reason.
+    fn skip_draw(&mut self) {
+        tr!("draw dropped: pipeline missing {}, topology {:?} vs pipeline type {}", self.sh.pso_missing, self.sh.topology, self.sh.pso_topology);
+        self.stats.skipped += 1;
+        if self.sh.pso_missing {
+            self.stats.skipped_pipeline += 1;
+        } else if self.topology_mismatch() {
+            self.stats.skipped_topology += 1;
+        }
+    }
+
     fn topology_mismatch(&self) -> bool {
         let want = self.sh.pso_topology;
         want != 0 && self.sh.topology.is_some_and(|t| topology_type(t) != want)
@@ -561,13 +674,13 @@ impl ListState {
             return;
         }
         if self.allocator().is_none() {
-            self.stats.refused += 1;
+            { self.stats.refused += 1; trace::refused("split") };
             return;
         }
         let _ = self.close_current();
         let me = self as *const Self as usize;
         let Some(allocator) = self.allocator().and_then(|a| a.take(me).ok()) else {
-            self.stats.refused += 1;
+            { self.stats.refused += 1; trace::refused("split") };
             return;
         };
         let next = match self.spare.pop() {
@@ -587,7 +700,7 @@ impl ListState {
                 self.work_since_barrier = false;
             }
             // Device lost or out of memory: the list stays closed; the queue's submit reports it.
-            Err(_) => self.stats.refused += 1,
+            Err(_) => { self.stats.refused += 1; trace::refused("split") },
         }
     }
 
@@ -972,13 +1085,15 @@ unsafe extern "system" fn reset_x(this: Raw, allocator: Raw, pipeline: Raw, _fla
 // ---- GPU safe mode ----
 
 /// `REBUILD_GPU_SKIP`: kinds of the title's GPU work to drop, for finding work that hangs the GPU:
-/// `draw`, `dispatch`, `indirect`, `mesh` (comma-separated; `submit` is the queue's). Read once.
+/// `draw`, `dispatch`, `indirect`, `mesh`, `rect` (comma-separated; `submit` is the queue's). Read once.
 pub mod skip {
     pub const DRAW: u32 = 1;
     pub const DISPATCH: u32 = 2;
     pub const INDIRECT: u32 = 4;
     pub const MESH: u32 = 8;
     pub const SUBMIT: u32 = 16;
+    /// rectangle-list draws expanded to triangles ([`super::super::rect`]): dropped instead
+    pub const RECT: u32 = 32;
     /// The largest `ExecuteIndirect` max count let through (a garbage count must not become billions of draws).
     pub const MAX_INDIRECT: u32 = 1 << 16;
 
@@ -994,6 +1109,7 @@ pub mod skip {
                     "indirect" => INDIRECT,
                     "mesh" => MESH,
                     "submit" => SUBMIT,
+                    "rect" => RECT,
                     "all" => DRAW | DISPATCH | INDIRECT | MESH | SUBMIT,
                     _ => 0,
                 };
@@ -1015,8 +1131,22 @@ pub mod skip {
 
 unsafe extern "system" fn draw_instanced(this: Raw, vertices: u32, instances: u32, first_vertex: u32, first_instance: u32) {
     let s = enter(this);
+    if s.sh.topology == Some(super::rect::RECTLIST) && !s.sh.pso_missing && s.sh.pso_topology == 3 && !skip::on(skip::DRAW | skip::RECT) {
+        if s.rect_draw(vertices, instances, first_vertex, first_instance) {
+            return;
+        }
+        RECTS_DROPPED.fetch_add(1, Ordering::Relaxed);
+    }
+    tr!("draw ({vertices}, {instances}, {first_vertex}, {first_instance}) vb0 {:x?}", s.sh.vb_console[0]);
+    if trace::on() && s.sh.vb_console[0].0 != 0 && s.va(s.sh.vb_console[0].0).is_some() {
+        let (va, _, stride) = s.sh.vb_console[0];
+        let at = va + u64::from(first_vertex) * u64::from(stride);
+        // SAFETY: memory a range holds; console addresses are CPU addresses
+        let w: Vec<f32> = (0..(stride as usize / 4) * 3.min(vertices as usize)).map(|i| unsafe { *(at as *const f32).add(i) }).collect();
+        tr!("vb0 first vertices as f32: {w:?}");
+    }
     if s.sh.pso_missing || skip::on(skip::DRAW) || s.topology_mismatch() {
-        s.stats.skipped += 1;
+        s.skip_draw();
         return;
     }
     if !s.bind_library(0) {
@@ -1025,13 +1155,15 @@ unsafe extern "system" fn draw_instanced(this: Raw, vertices: u32, instances: u3
     }
     s.work();
     s.stats.draws += 1;
+    tr!("draw {vertices} vertices x{instances}");
     call!(s.DrawInstanced(vertices, instances, first_vertex, first_instance));
 }
 
 unsafe extern "system" fn draw_indexed(this: Raw, indices: u32, instances: u32, first_index: u32, base_vertex: i32, first_instance: u32) {
     let s = enter(this);
+    tr!("draw indexed ({indices}, {instances}, {first_index}, {base_vertex}, {first_instance})");
     if s.sh.pso_missing || skip::on(skip::DRAW) || s.topology_mismatch() {
-        s.stats.skipped += 1;
+        s.skip_draw();
         return;
     }
     if !s.bind_library(0) {
@@ -1040,6 +1172,7 @@ unsafe extern "system" fn draw_indexed(this: Raw, indices: u32, instances: u32, 
     }
     s.work();
     s.stats.draws += 1;
+    tr!("draw indexed {indices} indices x{instances}");
     call!(s.DrawIndexedInstanced(indices, instances, first_index, base_vertex, first_instance));
 }
 
@@ -1048,6 +1181,7 @@ unsafe extern "system" fn dispatch(this: Raw, x: u32, y: u32, z: u32) {
     // more than 65,535 groups in a dimension is invalid in D3D12: never sent
     if s.sh.pso_missing || skip::on(skip::DISPATCH) || x > 65535 || y > 65535 || z > 65535 {
         s.stats.skipped += 1;
+        s.stats.skipped_pipeline += u32::from(s.sh.pso_missing);
         return;
     }
     if !s.bind_library(1) {
@@ -1069,6 +1203,7 @@ unsafe extern "system" fn dispatch_mesh(this: Raw, x: u32, y: u32, z: u32) {
     let s = enter(this);
     if s.sh.pso_missing || skip::on(skip::MESH) || x > 65535 || y > 65535 || z > 65535 {
         s.stats.skipped += 1;
+        s.stats.skipped_pipeline += u32::from(s.sh.pso_missing);
         return;
     }
     if !s.bind_library(0) {
@@ -1079,7 +1214,7 @@ unsafe extern "system" fn dispatch_mesh(this: Raw, x: u32, y: u32, z: u32) {
     s.stats.dispatches += 1;
     match &s.current().l6 {
         Some(l6) => unsafe { l6.DispatchMesh(x, y, z) },
-        None => s.stats.refused += 1,
+        None => { s.stats.refused += 1; trace::refused("dispatch_mesh") },
     }
 }
 
@@ -1088,6 +1223,7 @@ unsafe extern "system" fn execute_indirect(this: Raw, signature: Raw, max: u32, 
     let s = enter(this);
     if s.sh.pso_missing || skip::on(skip::INDIRECT) {
         s.stats.skipped += 1;
+        s.stats.skipped_pipeline += u32::from(s.sh.pso_missing);
         return;
     }
     if !s.bind_library(s.sh.pso_side) {
@@ -1097,13 +1233,13 @@ unsafe extern "system" fn execute_indirect(this: Raw, signature: Raw, max: u32, 
     s.work();
     s.stats.draws += 1;
     let Some(sig) = s.host.command_signature(signature) else {
-        s.stats.refused += 1;
+        { s.stats.refused += 1; trace::refused("execute_indirect") };
         // which pipeline side such a signature runs with (a console-only argument type: dispatch or mesh?)
         INDIRECT_REFUSED[s.sh.pso_side.min(1)].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return;
     };
     let Some(a) = s.resource(args) else {
-        s.stats.refused += 1;
+        { s.stats.refused += 1; trace::refused("execute_indirect") };
         return;
     };
     // the count buffer is optional (null: exactly `max`); one we cannot map is refused, never guessed
@@ -1113,7 +1249,7 @@ unsafe extern "system" fn execute_indirect(this: Raw, signature: Raw, max: u32, 
         match s.resource(count) {
             Some(c) => c,
             None => {
-                s.stats.refused += 1;
+                { s.stats.refused += 1; trace::refused("execute_indirect") };
                 return;
             }
         }
@@ -1124,6 +1260,7 @@ unsafe extern "system" fn execute_indirect(this: Raw, signature: Raw, max: u32, 
 unsafe extern "system" fn copy_buffer_region(this: Raw, dst: Raw, dst_offset: u64, src: Raw, src_offset: u64, bytes: u64) {
     let s = enter(this);
     s.work();
+    s.stats.copies += 1;
     let (Some(d), Some(r)) = (s.resource(dst), s.resource(src)) else { return };
     call!(s.CopyBufferRegion(d, dst_offset, r, src_offset, bytes));
 }
@@ -1131,6 +1268,7 @@ unsafe extern "system" fn copy_buffer_region(this: Raw, dst: Raw, dst_offset: u6
 unsafe extern "system" fn copy_resource(this: Raw, dst: Raw, src: Raw) {
     let s = enter(this);
     s.work();
+    s.stats.copies += 1;
     let (Some(d), Some(r)) = (s.resource(dst), s.resource(src)) else { return };
     call!(s.CopyResource(d, r));
 }
@@ -1145,12 +1283,13 @@ unsafe extern "system" fn copy_resource_x(this: Raw, dst: Raw, src: Raw, _flags:
 unsafe extern "system" fn copy_memory(this: Raw, dst: u64, src: u64, size: u64, _flags: u32) {
     let s = enter(this);
     s.work();
+    s.stats.copies += 1;
     let Some((d, d_off)) = s.place(dst, size) else {
-        s.stats.refused += 1;
+        { s.stats.refused += 1; trace::refused("copy_memory") };
         return;
     };
     let Some((r, r_off)) = s.place(src, size) else {
-        s.stats.refused += 1;
+        { s.stats.refused += 1; trace::refused("copy_memory") };
         return;
     };
     call!(s.CopyBufferRegion(d, d_off, r, r_off, size));
@@ -1169,6 +1308,10 @@ unsafe extern "system" fn discard(this: Raw, resource: Raw, region: *const D3D12
 
 /// ExecuteIndirect calls refused for want of a host signature, by the bound pipeline's side (graphics, compute).
 pub static INDIRECT_REFUSED: [std::sync::atomic::AtomicU64; 2] = [std::sync::atomic::AtomicU64::new(0), std::sync::atomic::AtomicU64::new(0)];
+
+/// Rectangle-list draws expanded to triangles on the CPU, and those that could not be (dropped).
+pub static RECTS_EXPANDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static RECTS_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Draws and dispatches dropped: a library pipeline with no shadow table bound.
 pub static NO_SHADOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1194,7 +1337,10 @@ unsafe extern "system" fn topology(this: Raw, t: i32) {
         return;
     }
     s.sh.topology = Some(t);
-    call!(s.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY(t)));
+    tr!("topology {t}");
+    // the host has no rectangle list: its draws go out as triangles ([`super::rect`])
+    let host = if t == super::rect::RECTLIST { 4 } else { t };
+    call!(s.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY(host)));
 }
 
 unsafe extern "system" fn viewports(this: Raw, n: u32, v: *const D3D12_VIEWPORT) {
@@ -1203,6 +1349,7 @@ unsafe extern "system" fn viewports(this: Raw, n: u32, v: *const D3D12_VIEWPORT)
     if !v.is_null() {
         unsafe { s.sh.viewports.as_mut_ptr().copy_from_nonoverlapping(v, n as usize) };
         s.sh.viewport_count = n;
+        tr!("viewports {:?}", s.sh.viewports[..n as usize].iter().map(|v| (v.TopLeftX, v.TopLeftY, v.Width, v.Height, v.MinDepth, v.MaxDepth)).collect::<Vec<_>>());
     }
     call!(s.RSSetViewports(n, v));
 }
@@ -1213,6 +1360,7 @@ unsafe extern "system" fn scissors(this: Raw, n: u32, r: *const RECT) {
     if !r.is_null() {
         unsafe { s.sh.scissors.as_mut_ptr().copy_from_nonoverlapping(r, n as usize) };
         s.sh.scissor_count = n;
+        tr!("scissors {:?}", s.sh.scissors[..n as usize].iter().map(|r| (r.left, r.top, r.right, r.bottom)).collect::<Vec<_>>());
     }
     call!(s.RSSetScissorRects(n, r));
 }
@@ -1235,7 +1383,7 @@ unsafe extern "system" fn depth_bounds(this: Raw, min: f32, max: f32) {
     s.sh.depth_bounds = Some((min, max));
     match &s.current().l1 {
         Some(l1) => unsafe { l1.OMSetDepthBounds(min, max) },
-        None => s.stats.refused += 1,
+        None => { s.stats.refused += 1; trace::refused("depth_bounds") },
     }
 }
 
@@ -1288,7 +1436,7 @@ unsafe extern "system" fn resource_barrier(this: Raw, n: u32, barriers: *const C
                 h.b = s.resource(b.b as Raw).unwrap_or(NULL) as u64;
             }
             _ => {
-                s.stats.refused += 1;
+                { s.stats.refused += 1; trace::refused("resource_barrier") };
                 continue;
             }
         }
@@ -1376,7 +1524,7 @@ unsafe extern "system" fn barrier_groups(this: Raw, count: u32, groups: *const C
                             None => globals.push(b[..16].try_into().expect("16 bytes")),
                         }
                     }
-                    _ => s.stats.refused += 1,
+                    _ => { s.stats.refused += 1; trace::refused("barrier_groups") },
                 }
             }
         }
@@ -1451,7 +1599,7 @@ unsafe extern "system" fn descriptor_heaps(this: Raw, n: u32, heaps: *const Raw)
                 s.sh.heaps_host[count] = b.heap;
                 count += 1;
             }
-            None => s.stats.refused += 1,
+            None => { s.stats.refused += 1; trace::refused("descriptor_heaps") },
         }
     }
     s.sh.heap_count = count as u32;
@@ -1508,7 +1656,7 @@ unsafe extern "system" fn root_table<const K: usize>(this: Raw, slot: u32, handl
         return;
     }
     let Some(h) = s.table(handle) else {
-        s.stats.refused += 1;
+        { s.stats.refused += 1; trace::refused("root_table") };
         return;
     };
     s.sh.args[K][i] = Arg { kind: 1, console: handle, host: h };
@@ -1535,7 +1683,8 @@ unsafe extern "system" fn root_view<const K: usize, const V: u8>(this: Raw, slot
         return;
     }
     let Some(h) = s.va(va) else {
-        s.stats.refused += 1;
+        { s.stats.refused += 1; trace::refused("root_view") };
+        tr!("root view kind {V} side {K} slot {slot}: address {va:#x} unknown");
         return;
     };
     s.sh.args[K][i] = Arg { kind: V, console: va, host: h };
@@ -1586,7 +1735,7 @@ unsafe extern "system" fn root_constant<const K: usize>(this: Raw, slot: u32, va
 unsafe extern "system" fn root_constants<const K: usize>(this: Raw, slot: u32, n: u32, data: *const u32, offset: u32) {
     let s = enter(this);
     if data.is_null() {
-        s.stats.refused += 1;
+        { s.stats.refused += 1; trace::refused("root_constants") };
         return;
     }
     if s.keep_consts(K, slot, unsafe { std::slice::from_raw_parts(data, n.min(64) as usize) }, offset) {
@@ -1616,7 +1765,7 @@ unsafe extern "system" fn index_buffer(this: Raw, view: *const D3D12_INDEX_BUFFE
     }
     let Some(va) = s.va(v.BufferLocation).filter(|&va| va != 0) else {
         // unmapped: unbind rather than leave the last index buffer bound for the next indexed draw
-        s.stats.refused += 1;
+        { s.stats.refused += 1; trace::refused("index_buffer") };
         s.sh.ib_console = Some(key);
         s.sh.ib = D3D12_INDEX_BUFFER_VIEW::default();
         call!(s.IASetIndexBuffer(std::ptr::null()));
@@ -1645,7 +1794,8 @@ unsafe extern "system" fn vertex_buffers(this: Raw, start: u32, n: u32, views: *
             Some(va) if va != 0 => D3D12_VERTEX_BUFFER_VIEW { BufferLocation: va, ..v },
             _ => {
                 if v.BufferLocation != 0 || v.SizeInBytes != 0 {
-                    s.stats.refused += 1;
+                    { s.stats.refused += 1; trace::refused("vertex_buffers") };
+                    tr!("vertex buffer {slot} refused: {:#x} {} bytes stride {}", v.BufferLocation, v.SizeInBytes, v.StrideInBytes);
                 }
                 D3D12_VERTEX_BUFFER_VIEW::default()
             }
@@ -1678,11 +1828,14 @@ unsafe extern "system" fn render_targets(this: Raw, n: u32, rts: *const D3D12_CP
         s.sh.rts[i].ptr = match s.host.cpu_descriptor(console) {
             Some(h) => h,
             None => {
-                s.stats.refused += 1;
+                { s.stats.refused += 1; trace::refused("render_targets") };
+                s.stats.rt_unmapped += 1;
                 0
             }
         };
     }
+    s.stats.rt_sets += 1;
+    tr!("render targets {n}: {:x?} depth {:?}", &s.sh.rts[..n as usize].iter().map(|h| h.ptr).collect::<Vec<_>>(), s.sh.dsv.map(|d| d.ptr as *const u8));
     s.sh.rt_count = n;
     s.sh.dsv = if dsv.is_null() {
         None
@@ -1690,7 +1843,7 @@ unsafe extern "system" fn render_targets(this: Raw, n: u32, rts: *const D3D12_CP
         match s.host.cpu_descriptor(unsafe { (*dsv).ptr }) {
             Some(h) => Some(D3D12_CPU_DESCRIPTOR_HANDLE { ptr: h }),
             None => {
-                s.stats.refused += 1;
+                { s.stats.refused += 1; trace::refused("render_targets") };
                 None
             }
         }
@@ -1703,18 +1856,33 @@ unsafe extern "system" fn render_targets(this: Raw, n: u32, rts: *const D3D12_CP
 unsafe extern "system" fn clear_dsv(this: Raw, dsv: D3D12_CPU_DESCRIPTOR_HANDLE, flags: D3D12_CLEAR_FLAGS, depth: f32, stencil: u8, n: u32, rects: *const RECT) {
     let s = enter(this);
     s.work();
+    s.stats.clears += 1;
     match s.host.cpu_descriptor(dsv.ptr) {
         Some(h) => call!(s.ClearDepthStencilView(D3D12_CPU_DESCRIPTOR_HANDLE { ptr: h }, flags, depth, stencil, n, rects)),
-        None => s.stats.refused += 1,
+        None => { s.stats.refused += 1; trace::refused("clear_dsv") },
     }
+}
+
+/// `REBUILD_PROBE_CLEAR=r,g,b[,a]`: every render-target clear the title records clears to this colour instead (a
+/// probe: a capture showing it proves the present reads what the title's lists wrote, after they ran).
+fn probe_clear() -> &'static Option<[f32; 4]> {
+    static C: std::sync::OnceLock<Option<[f32; 4]>> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        let v = std::env::var("REBUILD_PROBE_CLEAR").ok()?;
+        let f: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        (f.len() >= 3).then(|| [f[0], f[1], f[2], f.get(3).copied().unwrap_or(1.0)])
+    })
 }
 
 unsafe extern "system" fn clear_rtv(this: Raw, rtv: D3D12_CPU_DESCRIPTOR_HANDLE, color: *const f32, n: u32, rects: *const RECT) {
     let s = enter(this);
     s.work();
+    s.stats.clears += 1;
+    tr!("clear rtv {:#x} -> {:?} colour {:?} rects {n}", rtv.ptr, s.host.cpu_descriptor(rtv.ptr).map(|h| h as *const u8), (!color.is_null()).then(|| unsafe { *color.cast::<[f32; 4]>() }));
+    let color = probe_clear().as_ref().map_or(color, |c| c.as_ptr());
     match s.host.cpu_descriptor(rtv.ptr) {
         Some(h) => call!(s.ClearRenderTargetView(D3D12_CPU_DESCRIPTOR_HANDLE { ptr: h }, color, n, rects)),
-        None => s.stats.refused += 1,
+        None => { s.stats.refused += 1; trace::refused("clear_rtv") },
     }
 }
 
@@ -1727,7 +1895,7 @@ fn uav_clear(s: &mut ListState, gpu: u64, cpu: usize, resource: Raw) -> Option<(
     match (g, c, r) {
         (Some(g), Some(c), Some(r)) => Some((D3D12_GPU_DESCRIPTOR_HANDLE { ptr: g }, D3D12_CPU_DESCRIPTOR_HANDLE { ptr: c }, r)),
         _ => {
-            s.stats.refused += 1;
+            { s.stats.refused += 1; trace::refused("uav_clear") };
             None
         }
     }
@@ -1759,7 +1927,8 @@ fn label(this: Raw, address: u64, value: LabelValue, bytes: u32, flush: u32, fla
         None => false,
     };
     if !done {
-        s.stats.refused += 1;
+        { s.stats.refused += 1; trace::refused("label") };
+        tr!("label refused: address {address:#x} (host {host_va:x?}) {bytes} bytes, value {value:?}, flush {flush:#x}, flags {flags:#x}, host list has l2 {}", s.current().l2.is_some());
     }
 }
 
@@ -1784,7 +1953,7 @@ fn memory_wait(this: Raw, address: u64, comparison: u32, reference: u64, wide: b
     let w = MemoryWait { address, comparison, reference, wide };
     match s.host.memory_wait(&w) {
         WaitAction::Split => s.split(w),
-        WaitAction::Drop => s.stats.refused += 1,
+        WaitAction::Drop => { s.stats.refused += 1; trace::refused("memory_wait") },
     }
 }
 

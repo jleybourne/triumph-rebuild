@@ -1232,3 +1232,87 @@ fn lists_recording_at_once_on_one_allocator_get_their_own_host_allocators() {
         release(l);
     }
 }
+
+// ---- rectangle lists ----
+
+/// A host whose pipeline 0x5EC7 builds as triangles, takes float3 / unorm8x4 / float2 from slot 0, and whose
+/// memory is a real block (console addresses are its CPU addresses).
+struct RectHost {
+    mem: Box<[u8]>,
+}
+
+const RECT_PSO: Raw = 0x5EC7 as Raw;
+
+impl PipelineSource for RectHost {
+    fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
+        (console == RECT_PSO).then_some(HostPipeline { pso: 0x8000_5EC7 as Raw, root_signature: 0x5160 as Raw, compute: false, user: None, topology: 3 })
+    }
+    fn input_layout(&self, console: Raw) -> Option<Vec<(u32, u32, u32, bool)>> {
+        (console == RECT_PSO).then(|| vec![(0, 0, 6, false), (0, 12, 28, false), (0, 16, 16, false)])
+    }
+}
+
+impl ListHost for RectHost {
+    fn resource(&self, console: Raw) -> Option<Raw> {
+        Some(console)
+    }
+    fn descriptor_heap(&self, _console: Raw) -> Option<HeapBinding> {
+        None
+    }
+    fn cpu_descriptor(&self, console: usize) -> Option<usize> {
+        Some(console)
+    }
+    fn memory(&self, va: u64) -> Option<MemoryRange> {
+        let base = self.mem.as_ptr() as u64;
+        let r = MemoryRange { console: base, bytes: self.mem.len() as u64, host_va: base ^ (1 << 45), resource: 0x77 as Raw, resource_offset: 0 };
+        r.map(va).map(|_| r)
+    }
+}
+
+#[test]
+fn a_rectangle_list_draw_goes_out_as_two_triangles_a_rectangle() {
+    let mut mem = vec![0u8; 4096].into_boxed_slice();
+    // the loading screen's rectangle: top left, bottom left, bottom right
+    for (i, (x, y, u, v)) in [(-1.0f32, 1.0f32, 0.0f32, 0.0f32), (-1.0, -1.0, 0.0, 1.0), (1.0, -1.0, 1.0, 1.0)].into_iter().enumerate() {
+        let at = i * 24;
+        mem[at..at + 4].copy_from_slice(&x.to_le_bytes());
+        mem[at + 4..at + 8].copy_from_slice(&y.to_le_bytes());
+        mem[at + 12..at + 16].copy_from_slice(&[255; 4]);
+        mem[at + 16..at + 20].copy_from_slice(&u.to_le_bytes());
+        mem[at + 20..at + 24].copy_from_slice(&v.to_le_bytes());
+    }
+    let va = mem.as_ptr() as u64;
+    let h: Arc<dyn ListHost> = Arc::new(RectHost { mem });
+    let a = alloc::create_on(0, fake::backend(), h).unwrap();
+    let l = create_list(0, a, std::ptr::null_mut()).unwrap();
+    let f = fake::host_of(l);
+    type SetPso = unsafe extern "system" fn(Raw, Raw);
+    type Topo = unsafe extern "system" fn(Raw, i32);
+    type Vbs = unsafe extern "system" fn(Raw, u32, u32, *const D3D12_VERTEX_BUFFER_VIEW);
+    type Draw4 = unsafe extern "system" fn(Raw, u32, u32, u32, u32);
+    let before = RECTS_EXPANDED.load(std::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        method::<SetPso>(l, 0xc8)(l, RECT_PSO);
+        method::<Topo>(l, 0xa0)(l, crate::console::rect::RECTLIST);
+        let view = D3D12_VERTEX_BUFFER_VIEW { BufferLocation: va, SizeInBytes: 4096, StrideInBytes: 24 };
+        method::<Vbs>(l, 0x180)(l, 0, 1, &view);
+        method::<Draw4>(l, 0x60)(l, 3, 1, 0, 0);
+    }
+    // the host never sees topology 17: triangles
+    assert_eq!(f.last(20, 0), 4, "IASetPrimitiveTopology");
+    assert_eq!(f.count(host::DRAW_INSTANCED), 1, "the draw was recorded, not dropped");
+    assert_eq!((f.last(host::DRAW_INSTANCED, 0), f.last(host::DRAW_INSTANCED, 1), f.last(host::DRAW_INSTANCED, 2)), (6, 1, 0), "six vertices from the expanded buffer");
+    // the title's buffer, the expanded one, the title's again
+    assert_eq!(f.count(44), 3, "IASetVertexBuffers");
+    let s = stats(l).unwrap();
+    assert_eq!((s.draws, s.skipped), (1, 0));
+    assert!(RECTS_EXPANDED.load(std::sync::atomic::Ordering::Relaxed) > before);
+
+    // an indexed rectangle draw is still dropped (counted), never sent as a triangle
+    type Draw5 = unsafe extern "system" fn(Raw, u32, u32, u32, i32, u32);
+    unsafe { method::<Draw5>(l, 0x68)(l, 3, 1, 0, 0, 0) };
+    assert_eq!(f.count(host::DRAW_INDEXED), 0);
+    assert_eq!(stats(l).unwrap().skipped_topology, 1);
+    release(l);
+    release(a);
+}

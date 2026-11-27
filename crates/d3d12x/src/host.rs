@@ -17,6 +17,9 @@ impl<P: PipelineSource> PipelineSource for Host<P> {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
         self.pipelines.pipeline(console)
     }
+    fn input_layout(&self, console: Raw) -> Option<Vec<(u32, u32, u32, bool)>> {
+        self.pipelines.input_layout(console)
+    }
 }
 
 impl<P: PipelineSource + Send + Sync> ListHost for Host<P> {

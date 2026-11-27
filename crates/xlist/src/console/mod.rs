@@ -37,6 +37,7 @@
 
 mod alloc;
 mod list;
+pub mod rect;
 mod slots;
 
 #[cfg(test)]
@@ -51,7 +52,7 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
 
 pub use alloc::{create_allocator, host_allocator, upload_range};
-pub use list::{create_list, CLOSE_FAILED, INDIRECT_REFUSED, NO_SHADOW, forget_bound_state, host_list, segments, skip, stats, sync_descriptors, HostList, ListStats, Segment};
+pub use list::{create_list, CLOSE_FAILED, INDIRECT_REFUSED, NO_SHADOW, RECTS_EXPANDED, RECTS_DROPPED, forget_bound_state, host_list, segments, skip, stats, sync_descriptors, trace, HostList, ListStats, Segment};
 pub use slots::{allocator_slots, list_slots, traps, Returns, SlotInfo, SlotKind, Trap, ALLOCATOR_SLOTS, LIST_SLOTS};
 
 /// A COM or console object pointer, borrowed: never released through this.
@@ -159,6 +160,11 @@ impl UserMap {
 /// per *change* of pipeline (a set that repeats the bound pipeline is dropped before the call).
 pub trait PipelineSource {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline>;
+    /// A graphics pipeline's input layout, as (slot, byte offset, DXGI format, per instance): asked only for a
+    /// draw the list must rewrite (a rectangle list, [`rect`]). `None`: not known, and such a draw is dropped.
+    fn input_layout(&self, _console: Raw) -> Option<Vec<(u32, u32, u32, bool)>> {
+        None
+    }
 }
 
 /// A console descriptor heap as the host sees it: console GPU handles in
