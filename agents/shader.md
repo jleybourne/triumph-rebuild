@@ -183,6 +183,100 @@ decoded instruction list, because the bitcode has no fixed-size slot to blank. T
 reader on a hand-built module; signatures, bindings, threads, wave size and the three mutations on a
 hand-built container). Workspace: 242 green.
 
+## S7 — the last v0 interface diffs, each one read (round 2)
+
+```powershell
+$env:REBUILD_ORACLE_DIR = 'D:\victory-data\rebuild-oracle'; $env:REBUILD_SHADERS = 'D:\victory-data\shaders.rpf'
+cargo run --release --bin oraclediff -- --ours D:\victory-data\translate-dxil --out <csv outside git>
+cargo run --release --bin oraclediff -- --sig <ours>\<hash>.dxil <oracle>\<hash>.dxil   # "=" both, "<" ours, ">" oracle
+cargo run --release --bin oraclediff -- --console <hash>                            # the console program (printed only)
+$env:REBUILD_FORK_EXE = '<the S5 victory.exe>'
+cargo run --release --bin oraclediff -- --ties D:\victory-data\rebuild-oracle-work\cache --fix <dir>
+```
+
+**Built:** `--sig` prints a merged list per side instead of two dumps; `--console <hash>` prints the console
+program's stage IO, its container's signatures and every instruction's fields; `--ties` finds the S5 pairing's
+cache entries created in the same clock tick, settles each group by signature agreement with the containers
+(`sig_agreement`, `best_assignment`) or, when signatures cannot tell, by re-translating each container alone
+with the fork; `--fix` writes the right entries. Three named reasons added (`inputs_match`, `bindings_match`,
+each with the reason in a comment), and one new non-interface check, `InputReads` (`reads_missing`): pixel
+input components the oracle reads and ours does not (from the signature's read mask, which DXC fills). Tests:
+5 more in `crates/shader` (42 there, all green).
+
+**Measured** (our 2,834 v0 programs from `D:\victory-data\translate-dxil`, 2026-11-27):
+
+| run | SigIn | SigOut | Bindings | InputReads | programs with an interface diff |
+|:--|--:|--:|--:|--:|--:|
+| start (the lead's numbers) | 35 | 3 | 4 | — | 39 |
+| + three named reasons | 1 | 3 | 3 | 62 | 4 |
+| + the oracle's 4 swapped files corrected (in `D:\victory-data\s7\oracle`, hard links + the 4 fixed) | **0** | **1** | **0** | 62 | **1** |
+| the oracle against itself, `--self --mutate` | 0 | 0 | 0 | 0 | 0; mutations caught 25,060 / 25,060, 22,551 / 22,551, 18,896 / 18,896 |
+
+**Counts per class** (39 programs, 42 diffs): **(a) tool 3** (6 diffs) · **(b) design 35** (35 diffs) · **(c)
+translator 1** (1 diff). And one translator bug the interface columns cannot see, found while reading them: 62
+pixel programs (InputReads).
+
+### (a) Tool: the oracle has four files the wrong way round
+
+S5 paired the fork's cache entries with containers by creation time. **8 groups of 2 entries share a creation
+time** (NTFS tick); they then sort by path, a coin toss, and a same-stage swap passes the stage check. `--ties`
+with the S5 build (`wt-bisect ...\vn\diag\victory.exe`, sha256 `b744f584...8c1b`) re-translating each container
+alone: 2 groups are swapped, 6 are in order (4 of them hold byte-identical DXIL, so their order cannot matter).
+
+| hash | stage | diffs before | ours against the right entry |
+|:--|:--|:--|:--|
+| `2d539d4d776445e4` | vs | SigOut (TEXCOORD0 xyz/xy), Bindings | 0 diffs, histogram equal (its oracle file is `fbf743aed16d2bcd`'s) |
+| `fbf743aed16d2bcd` | vs | SigOut (TEXCOORD0 xy/xyz), Bindings | 0 diffs, histogram equal |
+| `2b9c4c58786e197b` | vs | SigIn (SV_InstanceID), Bindings (b0, t3 space1), memory 0/24 | 0 interface diffs (its oracle file is `727b2ac8d96d14ab`'s) |
+| `727b2ac8d96d14ab` | vs | not in the v0 set | — |
+
+The four right entries are in `D:\victory-data\s7\oracle-fix\<hash>.dxil|.vsh` (not copied over the lead's
+oracle: that folder is read-only to this lane). See "for the lead" 3-4.
+
+### (b) Design differences, each now a named reason
+
+| reason | programs | what differs | why it is not interface |
+|:--|--:|:--|:--|
+| vertex inputs the oracle declares but never reads | 22 vs | the oracle mirrors every container element; ours declares what the fetch loads (`VsInput`), so the rest move up a register | the input assembler matches by semantic; a VS may declare fewer elements than the layout; VS input registers are not compared. Only elements with read mask 0 in the oracle **and** absent from ours are excused |
+| `SV_Barycentrics` | 12 ps | the oracle declares it (register -1) | the fork seeds the console's barycentric VGPRs from it so a 16-bit interpolation's untouched high half keeps the console's bits; in all 12 the oracle reads `.y`, keeps bits 16-31 (`and -65536`), merges the fp16 result into bits 0-15, and the only use is `legacyF16ToF32` of the low half: the barycentric bits are dead. Rasteriser-generated, no register, never linked |
+| the oracle's descriptor-kind table `t255, space1` (raw) | 1 ps | the oracle reads one word per heap descriptor to choose a raw-buffer or constant-buffer load for a descriptor index read at run time | the translator's own helper, bound by the host layer, like our shadow table (space 101). The oracle declares it in 6,915 of its 25,694 programs; left out on both sides so the self-check stays 0 |
+
+Vertex inputs (oracle element never read, absent from ours): `118991d5859305d2` TEXCOORD0 · `1f908c28f4c7db57`
+TEXCOORD1 · `21539f54e036f79f` COLOR0 · `543a7e6929c56637` COLOR0 · `67af147c69986fd1` TEXCOORD0 ·
+`75e499b924d83722` COLOR0, TEXCOORD0 · `7b595eb2a13f4e10` COLOR0 · `8afeb23dccd2c7ad` TEXCOORD0, COLOR0 ·
+`8b453459c97f4a9d` COLOR0, TEXCOORD0 · `8ec2cbc5768e53ef` COLOR0 · `96f479a4786d5c8d` COLOR0 · `9a5c2f3b5ccf3d62`
+COLOR0 · `9c817639bbab62ec` TEXCOORD0 · `b0714c4f6cb83da2` SV_VertexID · `b26aff78ed4f93b3` TEXCOORD1 ·
+`ba58a93f61f24b3f` COLOR0, TEXCOORD0 · `c515e87ab85790f5` NORMAL0 · `c76396b821a35007` NORMAL0 ·
+`d3bc6782f8b1de37` TEXCOORD0 · `e8f9e32726e966bf` COLOR0 · `ec8f5247a12a61ad` TEXCOORD0 · `fef345f89e85fa86` COLOR0.
+
+`SV_Barycentrics`: `1d6f5717e55412ab` · `2dce678b290ae4f8` · `377453bce0699d5d` · `43cb7f36fdb7bf37` ·
+`71a02e6cb47638bb` · `77c88e56d8b57813` · `90b97fa5a34be3e5` · `aefe055414bc8826` · `b96714b90feacf4b` ·
+`d07c1a13a1d87699` · `d20027fbc6dea111` · `e94c932a45ce8441`. Kind table: `df939974040ca239`.
+
+### (c) Translator bugs (`crates/sir`, the lead's)
+
+1. **`68954fce6cd4d34e` (ps), SigOut: an output the console does not have.** The console program writes only
+   through `image_store` and ends with `exp null` (target 9, `en=0`, `vm done`); its container's `OSG1` is empty,
+   and the oracle declares no output. Ours declares `float4 unused : SV_Target0` and returns 0 in it: with a
+   colour target bound at slot 0 the host would write 0 where the console writes nothing. Place:
+   `crates/sir/src/lift/io.rs:450-452` (`if l.io.exports.is_empty() && osg1.is_empty()` pushes the dummy
+   element). Should be: no output at all (`void main`, no `Out` struct).
+2. **62 v0 pixel programs (every v0 program that uses 16-bit interpolation): packed fp16 attributes read the
+   wrong components.** `interp16` (`crates/sir/src/lift/io.rs`, around line 180) maps `src0` = (attr, chan,
+   high) to component `chan` of `high ? row2 : row`. The packing (`crates/shader/src/native.rs`, `VsOutput`
+   `pack2`, which `PsInput` follows) puts two 16-bit values per dword, channel c of the row in dword c/2 (odd
+   channels in the high half), then the second row from the next dword: so the component is **c = 2·chan +
+   high**, from `row` for c < 4 and `row2` (c − 4) otherwise (`row2 == row` when there is one row). Evidence:
+   `1d6f5717e55412ab` has 7 fp16 interpolations of attr 1 (`row` 3 TEXCOORD1 xyz, `row2` 4 TEXCOORD4 xyzw);
+   c = 2·chan + high gives exactly TEXCOORD1.xyz + TEXCOORD4.xyzw, the 7 components the oracle reads; ours reads
+   TEXCOORD1.w (absent: lowered to `f32tof16(0)`), never TEXCOORD4.y, and hands most values to the wrong register. `377453bce0699d5d`
+   (one row, `row2` = `row` = 2): ours reads r2.x for chan 0 high (should be .y) and r2.y for chan 1 low (should
+   be .z). `oraclediff` now reports these as `InputReads(TEXCOORD1.z)` (34) and `InputReads(TEXCOORD4.y)` (28);
+   the fix should bring InputReads to 0. The read mask (`e.0 |= 1 << chan`) needs the same mapping.
+
+Files outside git: `D:\victory-data\s7\` (`v0*.csv`, `oracle-fix\`, `oracle\` = hard links to the lead's oracle
+with the 4 fixed files as separate copies).
+
 ## Decided
 
 - The census counts all 26,084 native programs, and reports the 25,694 VS+PS+CS+MS beside it, because ES
@@ -192,7 +286,7 @@ hand-built container). Workspace: 242 green.
 
 ## Next
 
-- S5 closed (below). The lane stops here.
+- S7 closed: every v0 interface diff is classified (below). Left: the two translator bugs for the lead.
 - The lead's: GFX10 → `sir`. The field model gives every operand by name (`Decoded::get`, `enc::src`).
 
 ## For the lead
@@ -203,3 +297,17 @@ hand-built container). Workspace: 242 green.
    43,952,121 console instructions (40.6M without hints); the world set 2,144,273.
 2. "25,694 programs" is the VS+PS+CS+MS count. The archive holds 26,084 native programs: 195 ES and 195 GS
    more (the fork's own summary says 26,084 translated). The census lists both numbers.
+3. **S7: four oracle files are the wrong way round** (S5's pairing by creation time; ties in the same tick).
+   Copy `D:\victory-data\s7\oracle-fix\{2d539d4d776445e4,fbf743aed16d2bcd,2b9c4c58786e197b,727b2ac8d96d14ab}.{dxil,vsh}`
+   over `D:\victory-data\rebuild-oracle`, and in `agents/shader-oracle.csv` swap the sizes of those rows:
+   `fbf743aed16d2bcd` 2367/2411, `2d539d4d776445e4` 3147/3207, `727b2ac8d96d14ab` 6457/6534,
+   `2b9c4c58786e197b` 3067/3111. `apps/rebuild/src/bin/oracle.rs` (outside this task's files) should settle
+   same-tick groups the way `oraclediff --ties` does before it is run again.
+4. **S7, translator:** `68954fce6cd4d34e` declares a dummy `SV_Target0` (`crates/sir/src/lift/io.rs:450-452`);
+   and `interp16` maps packed fp16 attributes to the wrong components in all 62 v0 programs that use it
+   (section S7 (c), with the mapping and the evidence).
+5. **S7, a question:** `df939974040ca239` (and the 6,915 oracle programs with the fork's kind table) loads
+   through a heap descriptor whose index it reads at run time. Ours always reads it as a `ByteAddressBuffer`;
+   the fork checks whether the title put a constant-buffer view there. If the runtime ever leaves a CBV in such
+   a slot, a raw view of it is undefined in D3D12. Named as a design difference here; whether every buffer
+   descriptor the title writes is mirrored as a raw view is the runtime's to confirm.

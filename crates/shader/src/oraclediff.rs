@@ -41,6 +41,50 @@ pub struct Binding {
     pub flags: u32,
 }
 
+impl SigElem {
+    /// One line for reading a diff: `r3 TEXCOORD1 xyz sv0 f32`.
+    pub fn short(&self) -> String {
+        let reg = if self.register == u32::MAX { "r-".to_owned() } else { format!("r{}", self.register) };
+        let mask: String = "xyzw".chars().enumerate().filter(|(k, _)| self.mask & (1 << k) != 0).map(|(_, c)| c).collect();
+        let ty = match self.comp_type {
+            1 => "u32",
+            2 => "i32",
+            3 => "f32",
+            4 => "u16",
+            5 => "i16",
+            6 => "f16",
+            t => return format!("{reg} {}{} {mask} sv{} type{t}", self.name, self.index, self.system_value),
+        };
+        let mp = if self.min_precision != 0 { format!(" mp{}", self.min_precision) } else { String::new() };
+        let st = if self.stream != 0 { format!(" stream{}", self.stream) } else { String::new() };
+        format!("{reg} {}{} {mask} sv{} {ty}{mp}{st}", self.name, self.index, self.system_value)
+    }
+}
+
+impl Binding {
+    /// One line for reading a diff: `space0 type2 [0..0] kind13 flags0`.
+    pub fn short(&self) -> String {
+        format!("space{} type{} [{}..{}] kind{} flags{}", self.space, self.res_type, self.lower, self.upper, self.kind, self.flags)
+    }
+}
+
+/// Two sorted lists merged for reading: `=` in both, `<` only in `ours`, `>` only in `oracle`.
+pub fn list_diff(ours: &[String], oracle: &[String]) -> Vec<(char, String)> {
+    let mut b: Vec<Option<&String>> = oracle.iter().map(Some).collect();
+    let mut out = Vec::new();
+    for x in ours {
+        match b.iter().position(|y| *y == Some(x)) {
+            Some(k) => {
+                b[k] = None;
+                out.push(('=', x.clone()));
+            }
+            None => out.push(('<', x.clone())),
+        }
+    }
+    out.extend(b.into_iter().flatten().map(|y| ('>', y.clone())));
+    out
+}
+
 /// Instruction counts by category.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Histogram {
@@ -64,6 +108,10 @@ pub struct Summary {
     pub sig_in: Vec<SigElem>,
     pub sig_out: Vec<SigElem>,
     pub sig_patch: Vec<SigElem>,
+    /// Input elements the program never reads (name, index): their read mask in `ISG1` is 0.
+    pub unread_in: Vec<(String, u32)>,
+    /// Every input element's read mask (name, index, components read).
+    pub in_reads: Vec<(String, u32, u8)>,
     pub bindings: Vec<Binding>,
     pub stage: u8,
     pub threads: [u32; 3],
@@ -124,7 +172,7 @@ fn u32_at(d: &[u8], at: usize) -> Result<u32, String> {
 }
 
 /// A signature part: u32 count, u32 8, then 32-byte elements; names are offsets into the part.
-fn signature(part: &[u8]) -> Result<Vec<SigElem>, String> {
+pub fn signature(part: &[u8]) -> Result<Vec<SigElem>, String> {
     let n = u32_at(part, 0)? as usize;
     let first = u32_at(part, 4)? as usize;
     let mut out = Vec::with_capacity(n);
@@ -149,6 +197,46 @@ fn signature(part: &[u8]) -> Result<Vec<SigElem>, String> {
     }
     out.sort();
     Ok(out)
+}
+
+/// Each element's read/write mask (the byte after the mask: for an input, the components the program reads;
+/// DXC fills it), as (name, index, mask).
+fn reads(part: &[u8]) -> Result<Vec<(String, u32, u8)>, String> {
+    let n = u32_at(part, 0)? as usize;
+    let first = u32_at(part, 4)? as usize;
+    let mut out = Vec::new();
+    for k in 0..n {
+        let e = first + 32 * k;
+        let name_at = u32_at(part, e + 4)? as usize;
+        let name = part.get(name_at..).and_then(|s| s.split(|&b| b == 0).next()).ok_or("signature name out of bounds")?;
+        out.push((String::from_utf8_lossy(name).into_owned(), u32_at(part, e + 8)?, *part.get(e + 25).ok_or("truncated")?));
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The elements of a signature part the program never reads, as (name, index).
+fn unread(part: &[u8]) -> Result<Vec<(String, u32)>, String> {
+    Ok(reads(part)?.into_iter().filter(|r| r.2 == 0).map(|r| (r.0, r.1)).collect())
+}
+
+/// Pixel input components the oracle reads and ours does not, as `TEXCOORD4.y` (SV_Barycentrics aside, see
+/// [`inputs_match`]). Not an interface difference (the signatures can be equal): a program that skips an
+/// interpolated component the oracle uses computes from something else. S7 found 62 v0 programs this way.
+pub fn reads_missing(ours: &Summary, oracle: &Summary) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, index, read) in &oracle.in_reads {
+        if name == "SV_Barycentrics" {
+            continue;
+        }
+        let mine = ours.in_reads.iter().find(|r| r.0 == *name && r.1 == *index).map_or(0, |r| r.2);
+        let lost = read & !mine;
+        if lost != 0 {
+            let comps: String = "xyzw".chars().enumerate().filter(|(k, _)| lost >> k & 1 == 1).map(|(_, c)| c).collect();
+            out.push(format!("{name}{index}.{comps}"));
+        }
+    }
+    out
 }
 
 /// PSV0: runtime info (size-prefixed), then the resource bindings.
@@ -205,7 +293,11 @@ pub fn summarise(container: &[u8]) -> Result<Summary, String> {
         if let Some(p) = c.part(fourcc) {
             let sig = signature(p.data)?;
             match list {
-                0 => s.sig_in = sig,
+                0 => {
+                    s.sig_in = sig;
+                    s.unread_in = unread(p.data)?;
+                    s.in_reads = reads(p.data)?;
+                }
                 1 => s.sig_out = sig,
                 _ => s.sig_patch = sig,
             }
@@ -226,6 +318,8 @@ pub enum Diff {
     SigIn,
     SigOut,
     SigPatch,
+    /// Pixel input components the oracle reads and ours does not ([`reads_missing`]); not interface.
+    InputReads,
     Bindings,
     Threads,
     WaveSize,
@@ -249,15 +343,31 @@ pub const OURS_IMMEDIATE_SAMPLER_SPACE: u32 = 100;
 /// The register space of our descriptor shadow table (`sir::lift::SHADOW_SPACE`, plan decision 9).
 pub const OURS_SHADOW_SPACE: u32 = 101;
 
-/// Bindings compared with two named reasons for differing (and nothing else):
+/// The fork's descriptor-kind table: a raw buffer at `t255, space1`, one word per heap descriptor, which its
+/// translation reads to choose between a raw-buffer and a constant-buffer load when a scalar buffer load goes
+/// through a descriptor whose index is read at run time (S7: `df939974040ca239`, the only v0 program with it).
+pub fn is_oracle_kind_table(b: &Binding) -> bool {
+    (b.space, b.res_type, b.lower, b.upper, b.kind) == (1, 4, 255, 255, 11)
+}
+
+/// Bindings compared with three named reasons for differing (and nothing else):
 /// - our descriptor shadow table (space 101) has no counterpart in the oracle;
 /// - our immediate samplers sit in space 100, the oracle's at its own registers: they match when the oracle has
-///   as many sampler bindings (`res_type` 1) as we have immediate ones.
+///   as many sampler bindings (`res_type` 1) as we have immediate ones;
+/// - the oracle's descriptor-kind table (`t255, space1`, [`is_oracle_kind_table`]) has no counterpart in ours.
+///   Like our shadow table it is the translator's own helper, bound by the host layer, never by the title. The
+///   oracle declares it in 6,915 of its 25,694 programs.
 pub fn bindings_match(ours: &[Binding], oracle: &[Binding]) -> bool {
     let span = |b: &Binding| u64::from(b.upper.saturating_sub(b.lower)) + 1;
     let immediate: u64 = ours.iter().filter(|b| b.space == OURS_IMMEDIATE_SAMPLER_SPACE).map(span).sum();
-    let mut a: Vec<Binding> = ours.iter().filter(|b| b.space != OURS_IMMEDIATE_SAMPLER_SPACE && b.space != OURS_SHADOW_SPACE).cloned().collect();
-    let mut b: Vec<Binding> = oracle.to_vec();
+    // the kind table is left out on both sides: ours never declares it, and the oracle against itself (the
+    // self-check) must still compare equal
+    let mut a: Vec<Binding> = ours
+        .iter()
+        .filter(|b| b.space != OURS_IMMEDIATE_SAMPLER_SPACE && b.space != OURS_SHADOW_SPACE && !is_oracle_kind_table(b))
+        .cloned()
+        .collect();
+    let mut b: Vec<Binding> = oracle.iter().filter(|b| !is_oracle_kind_table(b)).cloned().collect();
     if immediate > 0 {
         let oracle_samplers: u64 = b.iter().filter(|x| x.res_type == 1).map(span).sum();
         let our_heap_samplers: u64 = a.iter().filter(|x| x.res_type == 1).map(span).sum();
@@ -273,19 +383,50 @@ pub fn bindings_match(ours: &[Binding], oracle: &[Binding]) -> bool {
     a == b
 }
 
-/// Input signatures compared with one named reason for differing: the order (and so the registers) of the
-/// system-generated vertex and instance ids (system values 6 and 8). The GPU generates them and binds them by
-/// semantic, so their order changes neither the input layout nor stage linking; the fork adds them in the order
-/// its lowering first meets them. Every other element must match exactly, registers included.
-pub fn inputs_match(ours: &[SigElem], oracle: &[SigElem]) -> bool {
+/// PSV0 stage numbers.
+pub const STAGE_PIXEL: u8 = 0;
+pub const STAGE_VERTEX: u8 = 1;
+/// `SV_Barycentrics`.
+pub const SV_BARYCENTRICS: u32 = 23;
+
+/// Input signatures compared with three named reasons for differing (and nothing else):
+/// - the order (and so the registers) of the system-generated vertex and instance ids (system values 6 and 8).
+///   The GPU generates them and binds them by semantic, so their order changes neither the input layout nor
+///   stage linking; the fork adds them in the order its lowering first meets them.
+/// - `SV_Barycentrics`. The fork seeds the console's barycentric VGPRs from it, so the untouched high half of a
+///   16-bit interpolation's destination keeps the console's bits; in all 12 v0 programs that declare it those
+///   bits are dropped (only `legacyF16ToF32` of the low half reads the register). The rasteriser generates it
+///   and it has no register (-1): it neither links with the vertex stage nor takes a slot.
+/// - vertex inputs the oracle declares but never reads (read mask 0), absent from ours. The fork mirrors every
+///   element of the container; ours declares what the fetch loads. The input assembler matches elements by
+///   semantic, so a vertex shader may declare fewer than the layout provides, and vertex input registers are
+///   not part of the interface: for the vertex stage they are not compared.
+///
+/// Every other element must match exactly; pixel inputs with their registers (they link by register).
+pub fn inputs_match(ours: &[SigElem], oracle: &[SigElem], oracle_unread: &[(String, u32)], stage: u8) -> bool {
+    let vertex = stage == STAGE_VERTEX;
+    let has = |v: &[SigElem], e: &SigElem| v.iter().any(|x| x.name == e.name && x.index == e.index);
+    let kept = |v: &[SigElem], other: &[SigElem], unread: &[(String, u32)]| -> Vec<SigElem> {
+        v.iter()
+            .filter(|e| e.system_value != SV_BARYCENTRICS)
+            .filter(|e| !(vertex && unread.contains(&(e.name.clone(), e.index)) && !has(other, e)))
+            .cloned()
+            .collect()
+    };
+    let (ours, oracle) = (kept(ours, oracle, &[]), kept(oracle, ours, oracle_unread));
     let generated = |e: &&SigElem| matches!(e.system_value, 6 | 8);
-    let rest = |v: &[SigElem]| -> Vec<SigElem> { v.iter().filter(|e| !generated(e)).cloned().collect() };
+    let rest = |v: &[SigElem]| -> Vec<SigElem> {
+        let mut x: Vec<SigElem> =
+            v.iter().filter(|e| !generated(e)).map(|e| SigElem { register: if vertex { 0 } else { e.register }, ..e.clone() }).collect();
+        x.sort();
+        x
+    };
     let ids = |v: &[SigElem]| -> Vec<(String, u32, u8)> {
         let mut x: Vec<_> = v.iter().filter(generated).map(|e| (e.name.clone(), e.index, e.mask)).collect();
         x.sort();
         x
     };
-    rest(ours) == rest(oracle) && ids(ours) == ids(oracle)
+    rest(&ours) == rest(&oracle) && ids(&ours) == ids(&oracle)
 }
 
 pub fn compare(ours: &Summary, oracle: &Summary) -> Vec<Diff> {
@@ -293,8 +434,11 @@ pub fn compare(ours: &Summary, oracle: &Summary) -> Vec<Diff> {
     if ours.stage != oracle.stage {
         d.push(Diff::Stage);
     }
-    if !inputs_match(&ours.sig_in, &oracle.sig_in) {
+    if !inputs_match(&ours.sig_in, &oracle.sig_in, &oracle.unread_in, oracle.stage) {
         d.push(Diff::SigIn);
+    }
+    if oracle.stage == STAGE_PIXEL && !reads_missing(ours, oracle).is_empty() {
+        d.push(Diff::InputReads);
     }
     if ours.sig_out != oracle.sig_out {
         d.push(Diff::SigOut);
@@ -350,6 +494,52 @@ pub fn dx_op_calls(container: &[u8]) -> Result<Vec<(String, Option<u32>)>, Strin
             n.starts_with("dx.op.").then(|| (n.clone(), i.dx_op))
         })
         .collect())
+}
+
+/// How well a translation's signatures agree with the container it should come from: the elements
+/// (name, index, mask) the two have in common, inputs and outputs. The oracle's pairing (S5) uses it to settle
+/// cache entries created in the same clock tick, whose order the creation time cannot tell.
+pub fn sig_agreement(container_in: &[SigElem], container_out: &[SigElem], s: &Summary) -> usize {
+    let common = |a: &[SigElem], b: &[SigElem]| {
+        let mut b: Vec<(&str, u32, u8)> = b.iter().map(|e| (e.name.as_str(), e.index, e.mask)).collect();
+        a.iter()
+            .filter(|e| {
+                let k = b.iter().position(|x| *x == (e.name.as_str(), e.index, e.mask));
+                k.map(|k| b.swap_remove(k)).is_some()
+            })
+            .count()
+    };
+    common(container_in, &s.sig_in) + common(container_out, &s.sig_out)
+}
+
+/// `scores[i][j]`: agreement of container i with entry j, for one group of ties. The assignment (entry for
+/// each container) with the highest total, if exactly one assignment reaches it; groups are small (two
+/// entries in the corpus), so every permutation is tried.
+pub fn best_assignment(scores: &[Vec<usize>]) -> Option<Vec<usize>> {
+    fn permutations(n: usize) -> Vec<Vec<usize>> {
+        if n == 0 {
+            return vec![vec![]];
+        }
+        let mut out = Vec::new();
+        for p in permutations(n - 1) {
+            for k in 0..=p.len() {
+                let mut q = p.clone();
+                q.insert(k, n - 1);
+                out.push(q);
+            }
+        }
+        out
+    }
+    let n = scores.len();
+    if n > 6 || scores.iter().any(|r| r.len() != n) {
+        return None;
+    }
+    let total = |p: &Vec<usize>| p.iter().enumerate().map(|(i, &j)| scores[i][j]).sum::<usize>();
+    let all = permutations(n);
+    let best = all.iter().map(total).max()?;
+    let mut top = all.into_iter().filter(|p| total(p) == best);
+    let first = top.next()?;
+    top.next().is_none().then_some(first)
 }
 
 /// Byte-level mutations of a container, for the closing test.
@@ -478,6 +668,87 @@ mod tests {
         assert_eq!((s.bindings[0].space, s.bindings[1].lower), (0, 0));
         assert_eq!((s.threads, s.wave, s.stage), ([64, 1, 1], (32, 32), 5));
         assert!(compare(&s, &s).is_empty());
+    }
+
+    fn el(reg: u32, name: &str, index: u32, mask: u8, sv: u32) -> SigElem {
+        SigElem { register: reg, mask, name: name.into(), index, system_value: sv, comp_type: 3, stream: 0, min_precision: 0 }
+    }
+
+    #[test]
+    fn named_input_reasons_and_only_those() {
+        let unread = vec![("COLOR".to_owned(), 0)];
+        // vertex: the oracle's unread COLOR0 is absent from ours, TEXCOORD0 moves up a register: the same interface
+        let oracle = [el(0, "POSITION", 0, 7, 0), el(1, "COLOR", 0, 15, 0), el(2, "TEXCOORD", 0, 3, 0), el(3, "SV_VertexID", 0, 1, 6)];
+        let ours = [el(0, "POSITION", 0, 7, 0), el(1, "TEXCOORD", 0, 3, 0), el(2, "SV_VertexID", 0, 1, 6)];
+        assert!(inputs_match(&ours, &oracle, &unread, STAGE_VERTEX));
+        // ... but not if the oracle reads it, nor for a pixel shader (registers link there)
+        assert!(!inputs_match(&ours, &oracle, &[], STAGE_VERTEX));
+        assert!(!inputs_match(&ours, &oracle, &unread, STAGE_PIXEL));
+        // an element ours declares and the oracle lacks is never excused
+        let extra = [el(0, "POSITION", 0, 7, 0), el(1, "COLOR", 0, 15, 0), el(2, "TEXCOORD", 0, 3, 0), el(3, "NORMAL", 0, 7, 0), el(4, "SV_VertexID", 0, 1, 6)];
+        assert!(!inputs_match(&extra, &oracle, &unread, STAGE_VERTEX));
+        // a vertex element with another mask still differs
+        let masked = [el(0, "POSITION", 0, 15, 0), el(1, "TEXCOORD", 0, 3, 0), el(2, "SV_VertexID", 0, 1, 6)];
+        assert!(!inputs_match(&masked, &oracle, &unread, STAGE_VERTEX));
+        // pixel: SV_Barycentrics (no register) on one side only is not a difference; anything else is
+        let ps = [el(0, "SV_Position", 0, 15, 1), el(1, "TEXCOORD", 0, 3, 0)];
+        let mut with_bary = ps.to_vec();
+        with_bary.push(el(u32::MAX, "SV_Barycentrics", 0, 7, SV_BARYCENTRICS));
+        assert!(inputs_match(&ps, &with_bary, &[], STAGE_PIXEL));
+        let moved = [el(0, "SV_Position", 0, 15, 1), el(2, "TEXCOORD", 0, 3, 0)];
+        assert!(!inputs_match(&moved, &with_bary, &[], STAGE_PIXEL));
+    }
+
+    #[test]
+    fn the_oracle_kind_table_is_named_and_nothing_near_it() {
+        let b = |space, res_type, lower, kind| Binding { space, res_type, lower, upper: lower, kind, flags: 0 };
+        let cb = b(0, 2, 0, 13);
+        assert!(bindings_match(&[cb], &[cb, b(1, 4, 255, 11)]));
+        assert!(!bindings_match(&[cb], &[cb, b(1, 4, 3, 11)])); // a vertex buffer slot is real
+        assert!(!bindings_match(&[cb], &[cb, b(0, 4, 255, 11)]));
+        assert!(bindings_match(&[cb, b(1, 4, 255, 11)], &[cb, b(1, 4, 255, 11)])); // the self-check
+    }
+
+    #[test]
+    fn reads_the_unread_inputs() {
+        let mut isg = sig_part(&[("TEXCOORD", 0, 3), ("COLOR", 1, 15)]);
+        isg[8 + 25] = 3; // TEXCOORD0 read in x and y; COLOR stays 0
+        assert_eq!(unread(&isg).unwrap(), [("COLOR".to_owned(), 0)]);
+        // a pixel component the oracle reads and ours does not
+        let oracle = Summary { in_reads: reads(&isg).unwrap(), ..Summary::default() };
+        isg[8 + 25] = 1;
+        let ours = Summary { in_reads: reads(&isg).unwrap(), ..Summary::default() };
+        assert_eq!(reads_missing(&ours, &oracle), ["TEXCOORD0.y"]);
+        assert!(reads_missing(&oracle, &ours).is_empty());
+        assert_eq!(compare(&ours, &oracle), [Diff::InputReads]);
+        assert!(compare(&oracle, &oracle).is_empty());
+    }
+
+    #[test]
+    fn ties_are_settled_by_signatures() {
+        let c = container();
+        let parsed = Container::parse(&c).unwrap();
+        let cin = signature(parsed.part(FourCC::ISG1).unwrap().data).unwrap();
+        let cout = signature(parsed.part(FourCC::OSG1).unwrap().data).unwrap();
+        let right = summarise_parts(&container());
+        let mut wrong = right.clone();
+        wrong.sig_out[1].mask = 3; // one output element with another mask: another program
+        assert_eq!(sig_agreement(&cin, &cout, &right), 4);
+        assert_eq!(sig_agreement(&cin, &cout, &wrong), 3);
+        // two containers, two entries created in the same tick, filed the wrong way round
+        assert_eq!(best_assignment(&[vec![3, 4], vec![4, 3]]), Some(vec![1, 0]));
+        assert_eq!(best_assignment(&[vec![4, 3], vec![3, 4]]), Some(vec![0, 1]));
+        // signatures that cannot tell them apart: no answer, never a guess
+        assert_eq!(best_assignment(&[vec![4, 4], vec![4, 4]]), None);
+    }
+
+    #[test]
+    fn list_diff_marks_each_side() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let d = list_diff(&s(&["a", "b", "b"]), &s(&["b", "c"]));
+        assert_eq!(d, [('<', "a".into()), ('=', "b".into()), ('<', "b".into()), ('>', "c".into())]);
+        let e = SigElem { register: u32::MAX, mask: 7, name: "SV_Barycentrics".into(), index: 0, system_value: 23, comp_type: 3, stream: 0, min_precision: 0 };
+        assert_eq!(e.short(), "r- SV_Barycentrics0 xyz sv23 f32");
     }
 
     #[test]
