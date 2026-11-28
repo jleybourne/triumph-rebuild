@@ -163,6 +163,9 @@ mod tests {
             // G5: the two our first run of the title asked for (runs/build3-reached.txt).
             ("f4faf4d4-2d04-4fce-b3e0-474a713a3e84", "41a4e10c-5a7e-41d9-8c37-37bde62a07d6"),
             ("03f0fe74-fdd9-4e5c-b630-f9339c47acc5", "35f07670-706e-4bfb-9476-090798c5ebf3"),
+            // The two a card run's report named (game saves; speech synthesis).
+            ("704c3f58-e629-4cc2-b197-30511b996fe2", "1bfff3af-f14a-40a3-8e35-9ada906593f9"),
+            ("3e241977-6237-41e9-8559-102c2d9983f1", "d722b373-8c4d-4692-9e51-d6ad9b37aa7d"),
         ];
         for (p, i) in pairs {
             let (p, i) = (Guid::parse(p), Guid::parse(i));

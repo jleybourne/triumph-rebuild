@@ -13,7 +13,7 @@ G2  XTaskQueue + XAsync               closed   4 dispatch modes, composite queue
                                                ports 0.11 ms, worst XAsyncBegin+Schedule onto a busy pool 0.07 ms
 G3  XGame, XUser, XStore/XPackage,    closed   11 interfaces, 102 slots, each called through its method table in
     XSystem (+ XNetworking offline)            a test; offline calls fail at once with the area's error
-G4  (interface, slot) -> function     closed   124 rows in gdk-slots.csv; every listed slot resolves through
+G4  (interface, slot) -> function     closed   167 rows in gdk-slots.csv; every listed slot resolves through
                                                QueryApiImpl (177 checks over 12 interfaces, 14 (provider, iid) pairs)
 G5  local storage, display (HDR)      closed   the two pairs our first title run asked for: 2 interfaces, 6 slots
                                                (5 + 1), each called through QueryApiImpl in a test; 130 rows,
@@ -102,10 +102,10 @@ is the fork's, which served the title through 240 runs.
 | display (HDR) | `03f0fe74-fdd9-4e5c-b630-f9339c47acc5` | `35f07670-706e-4bfb-9476-090798c5ebf3` | exe, lib | yes (G5) |
 | shell (URIs, deferrals) | `1b339674-328d-4283-a200-3171f18d3639` | = provider | exe, lib | **no** |
 | capture | `a4f1aee2-4bf1-4485-b008-a7c26d52ac27` | `22e672d7-b4e3-406c-bd50-8f0d25236f9e` | exe, lib | **no** |
-| game save | `704c3f58-e629-4cc2-b197-30511b996fe2` | `1bfff3af-f14a-40a3-8e35-9ada906593f9` | exe, lib | **no** |
+| game save | `704c3f58-e629-4cc2-b197-30511b996fe2` | `1bfff3af-f14a-40a3-8e35-9ada906593f9` (and = provider) | exe, lib | yes (saves) |
 | game UI | `dfcd4649-4ff8-4043-ba07-35d607df98b0` | `eaf669df-5542-4590-99a3-8dc061f837cc` | exe, lib | **no** |
 | local storage | `f4faf4d4-2d04-4fce-b3e0-474a713a3e84` | `41a4e10c-5a7e-41d9-8c37-37bde62a07d6` (and the older `d29411df-0794-4553-8b27-95fc02d0f75d`) | exe, lib | yes (G5) |
-| speech / accessibility | `3e241977-6237-41e9-8559-102c2d9983f1` | `d722b373-8c4d-4692-9e51-d6ad9b37aa7d` | exe, lib | **no** |
+| speech / accessibility | `3e241977-6237-41e9-8559-102c2d9983f1` | `d722b373-8c4d-4692-9e51-d6ad9b37aa7d` | exe, lib | yes (speech synthesis) |
 | user devices | `7d824997-10dc-45ab-86b7-2737767c0bf1` | `0cc6a956-e7e1-4fdf-9341-9d5da649ebc8` | lib | no |
 
 **Unknown** (in a library's table, next to the GUIDs shown; never asked for in the fork's runs): `8ca467f7-22e8-4096-8456-bb8aa13f79d8`
@@ -117,7 +117,7 @@ after package provider: likely its package iid, not shown), `60b09f4e-1b85-45b1-
 `95fd18d2-74dd-4d7c-aa1b-0b51827665d6`, `026b010c-06c3-4cdd-bbcb-43f229db1cff` (lib, after local storage). If the
 title ever asks for one, `QueryApiImpl` names the pair as discovery.
 
-**Slots.** Implemented slots, with the API each stands for and its console argument layout, are the 124 rows of
+**Slots.** Implemented slots, with the API each stands for and its console argument layout, are the 167 rows of
 [`gdk-slots.csv`](gdk-slots.csv) (`gdkslots`). Every table starts with `QueryInterface` (0x00, unknown whether the
 title calls it: discovery), `AddRef` (0x08), `Release` (0x10). Slots we do not implement, with the fork's label where
 it has one (a label from the fork, not confirmed here) and **unknown** where it has none; each answers with discovery:
@@ -202,10 +202,39 @@ through its first word, for each interface id.
 - **Unserved interfaces** get `E_NOINTERFACE` and a discovery line (the console's code for this is unknown; the
   title's stubs only test for failure, by the fork's runs).
 
+## Game saves and speech (a card run's report named both pairs)
+
+- **Evidence.** Each public function the title calls is a thunk in the exe that queries one pair and calls one slot:
+  20 thunks for `704c3f58…`/`1bfff3af…` (image `0x1455df210`-`0x1455dfcf4`) and 10 for `3e241977…`/`d722b373…`
+  (`0x1455dce7c`-`0x1455df0e8`). Slot and argument shapes match `XGameSave.h` and `XSpeechSynthesizer.h` in order
+  (e.g. 0x20 takes a `bool` third: `XGameSaveInitializeProviderAsync`; 0xa8 a 32-bit count third:
+  `XGameSaveReadBlobDataAsync`; the speech caller at `0x143e41a70` picks 0x68 (text) or 0xa8 (SSML)). The title's
+  save code (`0x1428d1480`) sizes a read as 24 + name + NUL + size per blob from `XGameSaveEnumerateBlobInfoByName`,
+  then reads with `XGameSaveReadBlobData`; it writes "Save Game Header" (0x128 bytes) and "Save Game Data" in one
+  update (`0x1428d1ea0`).
+- **Saves** live in `overlay\GameSave\<xuid>\<scid>\<container>.gsc` (beside `S`, not on it), one file per
+  container, replaced whole by rename on each update (all or nothing). Offline: always in sync, no conflicts,
+  quota 256 MB, one update at most 16 MB. Asynchronous calls do their file work on the block's work port.
+- **In the title** (card runs `noinput1`, `setup1`-`setup4`, 2026-11-28): no `interface not implemented` line any more. The
+  title adds the user silently (`XUserAddAsync(1)`, ~5-10 s in), opens a save provider (`XGameSaveInitializeProviderAsync`,
+  sync on demand off), asks `XGameSaveGetContainerInfo` for `"Player"` (the gamertag) and `"SettingsProfileSettings"`,
+  and enumerates containers; it found none and had written none by the end of a 600 s run that reached the legal-terms
+  page of first-run setup (the scripted input never got past its checkboxes). So persistence across runs is proven by
+  the tests, not yet by the title: it needs a run that completes first-run setup (longer than the 120 s run limit).
+- **The engagement screen** ("ACCOUNT PICKER (Y) · SCREEN NARRATION (OFF) (X) · PLAYER (A)") is not a GDK sign-in failure:
+  every user call the title makes succeeds (traced: add, local id, id, gamertags, guest, age group, 15 privilege checks;
+  no state query, no token request), and no unserved interface is asked for. "PLAYER" is the gamertag. The title's pad
+  manager (`0x142211xxx`-`0x142212xxx`) pairs a gamepad with the signed-in user only when a pad arrives after the user is in
+  slot 0, or on an A press; a test that connected the pad only after the user was added did not change the screen (draws
+  stay at the screen's 21 a frame). The black stretches between the screen's frames are the Bink video (lead's notes).
+  Open: whether the screen is the first-boot gate that a saved profile (`SettingsProfileSettings`) skips.
+- **Speech** is silent: no voices; streams are a 44-byte WAVE file with no samples. Slots 0x18-0x38 and 0x88-0xa0
+  (closed captions, high contrast, speech to text) are not called and stay discovery.
+
 ## Next
 
-- The five interfaces the exe's table names that are still not served: game save, game UI, shell (URIs, display
-  deferrals), capture, speech. The fork served all of them, but our first run asked for none (so far); serve each
+- The three interfaces the exe's table names that are still not served: game UI, shell (URIs, display
+  deferrals), capture. The fork served all of them, but our first run asked for none (so far); serve each
   when a run's discovery names it.
 
 ## For the lead

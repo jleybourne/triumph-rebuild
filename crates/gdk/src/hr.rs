@@ -28,6 +28,14 @@ pub const E_GAMEPACKAGE_NO_PACKAGE_IDENTIFIER: HRESULT = hr(0x8924_5208);
 /// `XGameErr.h`, store.
 pub const E_GAMESTORE_NETWORK_ERROR: HRESULT = hr(0x8924_5301);
 
+/// `XGameErr.h`, game saves (the public reference pages name them; values as there).
+pub const E_GS_INVALID_CONTAINER_NAME: HRESULT = hr(0x8083_0001);
+pub const E_GS_NO_ACCESS: HRESULT = hr(0x8083_0002);
+pub const E_GS_UPDATE_TOO_BIG: HRESULT = hr(0x8083_0005);
+pub const E_GS_QUOTA_EXCEEDED: HRESULT = hr(0x8083_0006);
+pub const E_GS_PROVIDED_BUFFER_TOO_SMALL: HRESULT = hr(0x8083_0007);
+pub const E_GS_BLOB_NOT_FOUND: HRESULT = hr(0x8083_0008);
+
 pub fn failed(h: HRESULT) -> bool {
     h < 0
 }

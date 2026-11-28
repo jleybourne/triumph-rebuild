@@ -13,7 +13,7 @@
 //! taskqueue   XTaskQueue: work and completion ports, manual / thread pool / serialized / immediate
 //! xasync      XAsync: XAsyncBlock lifetime, providers, completion, cancel, waits
 //! areas       XUser, XGame (title, features, invites, events), XSystem, XPackage, XStore, XNetworking,
-//!             XPersistentLocalStorage, XDisplay (HDR)
+//!             XPersistentLocalStorage, XDisplay (HDR), XGameSave, XSpeechSynthesizer
 //! table       every (interface, slot) -> Rust function, with the console argument layout
 //! ```
 //!

@@ -55,6 +55,9 @@ pub struct Profile {
     pub storage_bytes: u64,
     /// The host folder behind the storage drive (the overlay's), for the bytes used; `None`: none used.
     pub storage_host: Option<PathBuf>,
+    /// The host folder that keeps the user's game saves (XGameSave), beside the storage drive's
+    /// folder; `None`: `GameSave` next to `storage_host`, and no saves at all without either.
+    pub saves_host: Option<PathBuf>,
     /// The display's HDR luminance when the presentation can output HDR; `None`: SDR only, and
     /// `XDisplayTryEnableHdrMode` answers disabled.
     pub hdr: Option<HdrModeInfo>,
@@ -76,6 +79,7 @@ impl Default for Profile {
             // the manifest.
             storage_bytes: 2048 << 20,
             storage_host: None,
+            saves_host: None,
             hdr: None,
         }
     }
@@ -120,6 +124,13 @@ pub fn current() -> Profile {
         .unwrap_or_else(|e| e.into_inner())
         .clone()
         .unwrap_or_default()
+}
+
+impl Profile {
+    /// Where the user's game saves live on the host, if anywhere.
+    pub fn saves_folder(&self) -> Option<PathBuf> {
+        self.saves_host.clone().or_else(|| Some(self.storage_host.as_ref()?.parent()?.join("GameSave")))
+    }
 }
 
 #[cfg(test)]
