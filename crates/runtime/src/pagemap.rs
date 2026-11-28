@@ -94,6 +94,29 @@ pub fn apply(pages: &mut BTreeMap<u64, u64>, batches: &[Batch], pool: u64, pool_
     ok
 }
 
+/// The GPU pages `batches` map or unmap (sorted, once each): textures over them take their new bytes
+/// (`crate::cputex`).
+pub fn touched(batches: &[Batch]) -> Vec<u64> {
+    let mut out = Vec::new();
+    for b in batches {
+        if b.ranges.is_null() || b.destination % PAGE != 0 {
+            continue;
+        }
+        // SAFETY: each batch holds `count` ranges (the caller's contract)
+        let ranges = unsafe { std::slice::from_raw_parts(b.ranges, b.count as usize) };
+        let mut at = b.destination;
+        for r in ranges {
+            if r.kind <= 2 {
+                out.extend((0..u64::from(r.count)).map(|k| at + k * PAGE));
+            }
+            at += u64::from(r.count) * PAGE;
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// The CPU address holding `bytes` at GPU address `va`, when its pages are mapped from one contiguous run of a pool.
 pub fn source(va: u64, bytes: u64) -> Option<u64> {
     let pages = PAGES.read().unwrap_or_else(|e| e.into_inner());
@@ -126,10 +149,15 @@ pub unsafe extern "system" fn CopyPageMappingsBatchX(_this: *mut c_void, count: 
     }
     // SAFETY: the title passes `count` batches
     let batches = unsafe { std::slice::from_raw_parts(batches, count as usize) };
-    let mut pages = PAGES.write().unwrap_or_else(|e| e.into_inner());
-    if !apply(&mut pages, batches, pool, pool_pages) && REFUSED.load(Relaxed) == 1 {
-        eprintln!("pagemap   a page mapping range was refused (pool {pool:#x}, {pool_pages} pages)");
+    {
+        let mut pages = PAGES.write().unwrap_or_else(|e| e.into_inner());
+        if !apply(&mut pages, batches, pool, pool_pages) && REFUSED.load(Relaxed) == 1 {
+            eprintln!("pagemap   a page mapping range was refused (pool {pool:#x}, {pool_pages} pages)");
+        }
     }
+    // textures over the pages read other bytes now (after the lock: cputex looks sources up here)
+    #[cfg(windows)]
+    crate::cputex::remapped(&touched(batches));
     0
 }
 
@@ -171,5 +199,8 @@ mod tests {
         assert!(!apply(&mut m, &[Batch { destination: gpu, count: 2, ranges: hole.as_ptr() }], pool, 16));
         assert_eq!(m.get(&gpu), None);
         assert_eq!(m.get(&(gpu + PAGE)), Some(&(pool + 3 * PAGE)), "the refused range changed nothing");
+        // the pages a batch touches: mapped, repeated and unmapped ones, not the ones left as they were
+        assert_eq!(touched(&b), vec![gpu, gpu + PAGE, gpu + 2 * PAGE, gpu + 4 * PAGE, gpu + 5 * PAGE]);
+        assert_eq!(touched(&[Batch { destination: gpu, count: 2, ranges: hole.as_ptr() }]), vec![gpu, gpu + PAGE, gpu + 2 * PAGE]);
     }
 }

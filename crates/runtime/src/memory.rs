@@ -296,6 +296,14 @@ pub fn watched(address: u64, bytes: u64) -> bool {
     maps.watched.range(..=address).next_back().is_some_and(|(&b, &l)| address + bytes <= b + l)
 }
 
+/// `address` lies in the arena's GPU-only memory: card pages only, never committed, the CPU never writes it.
+pub fn gpu_only(address: u64) -> bool {
+    let Some(m) = MODEL.get() else { return false };
+    let maps = lock(&m.maps);
+    let in_span = maps.spans.range(..=address).next_back().is_some_and(|(&b, &l)| address < b + l);
+    in_span && !maps.watched.range(..=address).next_back().is_some_and(|(&b, &l)| address < b + l)
+}
+
 /// Before a submission's lists: everything the CPU changed goes up, and `queue` waits for it (on the GPU).
 #[inline]
 pub fn flush_wait(queue: &ID3D12CommandQueue) {
