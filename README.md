@@ -58,7 +58,7 @@ Measured on one machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB RAM, PCIe 3.0, Win
 | **Shaders** | 0 / 25,694; core proven on the card: IR → HLSL → DXC → GPU exact, wave64 on wave32 exact ([run](runs/build4-sirtest.md)) | 25,694, wave32, 0 refused |
 | **Launcher** | settings registry built (30 options, validated); desktop launcher in progress ([design](docs/design/launcher.md)) | launcher, mods, profiles, in-game menu |
 | **Upscaler** | ✅ DLSS runs standalone through Streamline on a synthetic scene; FSR next; wiring to the title in Build 7 | DLSS on NVIDIA, FSR on AMD |
-| **Tests** | 624 green, 12 ignored (`launcher` 60, `runtime` 60, `sir` 57, `pipelines` 54, `gdk` 46, `shader` 42, `d3d12x` 29, `uma` 28, `xlist` 28, `overlay` 27, `config` 23, `dstorage` 22, `vfs` 19, `audio` 18, `input` 18, `loader` 18, `xg` 15, `cardlock` 11, `upscale` 11, `winfiles` 11, `devmenu` 10, `ffx` 9, `rebuild` 8) | |
+| **Tests** | 637 green, 14 ignored (`runtime` 68, `launcher` 60, `sir` 58, `pipelines` 54, `gdk` 49, `shader` 42, `d3d12x` 30, `uma` 28, `xlist` 28, `overlay` 27, `config` 23, `dstorage` 22, `vfs` 19, `audio` 18, `input` 18, `loader` 18, `xg` 15, `cardlock` 11, `upscale` 11, `winfiles` 11, `devmenu` 10, `ffx` 9, `rebuild` 8) | |
 
 Every result is reported as **fps · ms · draws · dropped** together, with resolution and upscaler mode.
 A faster frame that draws less of the scene is not a win.

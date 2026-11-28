@@ -1,8 +1,8 @@
 # Progress
 
 ```
-overall   █████████████░░░░░░░  63 %   work toward 30 fps, weighted by build step
-fps       card: 60 s, 1,005 frames, 18.6 fps, no GPU hang (loading screen still black) · target 30 · baseline 7.6
+overall   █████████████░░░░░░░  64 %   work toward 30 fps, weighted by build step
+fps       card: ~17 fps on the black loading screen (layer overhead, pipelines built mid-run) · target 30 · baseline 7.6
 updated   2026-11-28
 ```
 
@@ -13,11 +13,11 @@ and becomes the number that counts.
 
 | track | progress | | note |
 |---|---|--:|---|
-| **Build 5 · first frame** | `██████████████░░░░░░` | 70 % | runs clean on the card; 2 of 3 loading-screen draws run; draw 1's shaders are outside the library (on-demand graphics next) |
+| **Build 5 · first frame** | `███████████████░░░░░` | 75 % | every loading-screen draw has its shaders (0 dropped, was 935); still black; runs abort on memory (54k pipelines built up front) |
 | shaders compiled (every class) | `██████████░░░░░░░░░░` | 12,981 / 25,694 | pixel 9,965 · vertex 1,672 · compute 1,344 · of them wave-wide 4,182 ([wave64](runs/build4-wave64.md)) · agnostic 8,799 / 9,128 ([v1](runs/build4-v1.md)) |
 | shaders counted | `████░░░░░░░░░░░░░░░░` | 5,195 / 25,694 | bit-exact vs the oracle on WARP ([exec](runs/build4-exec.md)) |
 | runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
-| launcher | `█████████████████░░░` | 6 / 7 | C2 done (Play runs the title) · L5 left · not part of the 63 % |
+| launcher | `████████████████████` | 7 / 7 | C2 (Play runs the title) and L5 (in-game F10 menu) done · not part of the 64 % |
 
 | | fps | frame time | draws |
 |---|--:|--:|--:|
@@ -58,9 +58,8 @@ and becomes the number that counts.
 
 | lane | build | working on |
 |---|---|---|
-| `ondemand-gfx` | 5 | graphics programs outside the library translated at creation (the loading screen's draw 1); descriptor index ranges kept apart |
-| `framerate` | 8 | frame-rate setting: title / capped (selectable) / unlimited, vsync honoured |
-| `launch` | C2 | the launcher starts the title with the user's settings |
+| `pipelines` | 5 | host pipelines built on first use, not all 54k at creation (the out-of-memory abort); then the black frame |
+| `timestamps` | 0 (c) | the title's GPU timestamp labels, and its measured GPU time per frame |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -116,6 +115,20 @@ Older entries are never edited.
 
 > The three entries below (58, 59, 61 %) were missing; they are filled in afterwards from the commits that moved
 > the header (`6292f20`, `bafec7c`, `71c075d`). The points behind each step were not recorded.
+
+### 2026-11-28 — Every loading-screen draw has shaders; developer menu built
+
+```
+[█████████████░░░░░░░]  64 %   (Build 5 70 % → 75 %)
+title       0 draws dropped for a missing shader (was 935); still black; runs abort on memory
+```
+
+- **Merged:** #44 on-demand graphics shaders, #45 frame-rate setting (title / capped / unlimited, vsync),
+  #46 the launcher runs the title (C2), #47 script VM and natives research ([dumped.md](dumped.md)), #48 the
+  in-game menu (L5), #49 its design, #50 an offline debug sandbox (all non-loopback network blocked), #51 the
+  descriptor-index guard, #52 draw 1's shaders and on-demand build fixes.
+- **Next:** build host pipelines on first use (the memory abort), then the black frame.
+- Tests: 637 green.
 
 ### 2026-11-28 — The GPU hangs fixed: 60 s on the card, no reset
 

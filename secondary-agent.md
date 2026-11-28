@@ -315,10 +315,10 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-28 (morning): the GPU hangs fixed (heap buffers never CBVs, #37); 60 s on the card, 1,005 frames,
-          18.6 fps, no reset; loading screen black (draw 1's shaders are not in shaders.rpf)
-progress  63 % (progress.md) · shaders 12,981 / 25,694 compile, 5,195 counted
-tests     566 green (12 ignored): cargo test --release --no-fail-fast
+updated   2026-11-28 (late morning): every loading-screen draw has its shaders (0 dropped); still black; runs
+          abort on memory (54k host pipelines built at creation, being made lazy); developer menu (L5) built
+progress  64 % (progress.md) · shaders 12,981 / 25,694 compile, 5,195 counted
+tests     637 green (14 ignored): cargo test --release --no-fail-fast
 ```
 
 | build | state | where | proof |
