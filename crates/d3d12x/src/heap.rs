@@ -675,6 +675,21 @@ fn trace_entry(rec: &Record, what: &str, address: u64, d: &D3D12_RESOURCE_DESC, 
     TRACED.lock().unwrap_or_else(|e| e.into_inner()).push((index, address));
 }
 
+/// `REBUILD_TRACE_TEXTURES=<min width>` (any value; a number is the smallest width shown, default 256): one line per
+/// host texture made for the title (a resource or a placed view), with its console address, description, console
+/// layout (`0x100 | swizzle mode`) and how much of its first 64 KiB of console memory holds bytes now.
+pub fn trace_texture(what: &str, address: u64, d: &D3D12_RESOURCE_DESC) {
+    static MIN: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let Some(min) = *MIN.get_or_init(|| std::env::var("REBUILD_TRACE_TEXTURES").ok().map(|v| v.trim().parse().unwrap_or(256))) else { return };
+    if d.Width < min {
+        return;
+    }
+    eprintln!(
+        "texture   {what}: at {address:#x}, {}x{}x{} format {} mips {} dimension {} layout {:#x} flags {:#x}; {}",
+        d.Width, d.Height, d.DepthOrArraySize, d.Format.0, d.MipLevels, d.Dimension.0, d.Layout.0, d.Flags.0, nonzero(address, 64 << 10)
+    );
+}
+
 static TRACED: Mutex<Vec<(u32, u64)>> = Mutex::new(Vec::new());
 
 /// The texture view entries `REBUILD_TRACE_ENTRY` named, and their console addresses.
@@ -1305,6 +1320,11 @@ impl Resources {
         }
         let (hd, _) = format::host_desc(rd);
         let t = ctx.memory.texture(address, &hd).or_else(|| ctx.host.resource(&hd, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_NONE, None).ok().flatten());
+        trace_texture("placed view", address, rd);
+        // no console resource names it, so no barrier of the title's: it stays in the common state it starts in
+        if let Some(h) = &t {
+            ctx.memory.texture_made(address, rd, h, D3D12_BARRIER_LAYOUT_COMMON);
+        }
         placed.insert((address, *rw), t.clone());
         t
     }

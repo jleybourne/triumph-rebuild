@@ -158,6 +158,8 @@ pub fn start(device: &ID3D12Device, warp: bool) -> Option<&'static Model> {
             m.place_pages(&mut t, pages.iter().copied());
             PAGES_ON_WRITE.fetch_add(PAGES_PLACED.load(Relaxed) - before, Relaxed);
         }
+        // textures over these pages take the new bytes at the next submission (crate::cputex)
+        crate::cputex::written(pages);
     });
     m.ring.set_backer(backer);
     // quiet slices go cold when the I/O syscalls are guarded (`install_cold`, before the title ran)
@@ -285,6 +287,13 @@ pub fn freeing(base: u64, size: u64, kind: u32, free: impl FnOnce() -> windows::
         m.retire(&mut lock(&m.tiles), base.div_ceil(P) * P, (base + len) / P * P);
         r
     }
+}
+
+/// `bytes` at `address` lie in one watched region (the ring keeps the card's copy of them current).
+pub fn watched(address: u64, bytes: u64) -> bool {
+    let Some(m) = MODEL.get() else { return false };
+    let maps = lock(&m.maps);
+    maps.watched.range(..=address).next_back().is_some_and(|(&b, &l)| address + bytes <= b + l)
 }
 
 /// Before a submission's lists: everything the CPU changed goes up, and `queue` waits for it (on the GPU).

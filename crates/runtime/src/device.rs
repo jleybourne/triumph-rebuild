@@ -781,6 +781,18 @@ impl rebuild_d3d12x::Memory for Accounted {
     fn texture(&self, address: u64, desc: &windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_DESC) -> Option<windows::Win32::Graphics::Direct3D12::ID3D12Resource> {
         self.inner.texture(address, desc)
     }
+    fn texture_made(
+        &self,
+        address: u64,
+        console: &windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_DESC,
+        host: &windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+        layout: windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT,
+    ) {
+        crate::cputex::texture_made(address, console, host, layout);
+    }
+    fn texture_gone(&self, address: u64, host: &windows::Win32::Graphics::Direct3D12::ID3D12Resource) {
+        crate::cputex::texture_gone(address, host);
+    }
 }
 
 #[cfg(test)]

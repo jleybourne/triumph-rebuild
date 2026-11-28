@@ -18,6 +18,11 @@ pub mod budget;
 pub mod limits;
 pub mod device;
 pub mod cpu;
+#[cfg(windows)]
+pub mod cputex;
+#[cfg(windows)]
+pub mod bink;
+pub mod pagemap;
 pub mod drives;
 pub mod dxgi;
 pub mod frame;

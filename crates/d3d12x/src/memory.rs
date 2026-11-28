@@ -39,6 +39,13 @@ pub trait Memory: Send + Sync {
     fn texture(&self, _address: u64, _desc: &D3D12_RESOURCE_DESC) -> Option<ID3D12Resource> {
         None
     }
+    /// A host texture `host` was made for the console texture at `address` (`console`: the title's description,
+    /// its console layout included), in host barrier layout `layout` (the title's initial one; a placed view's
+    /// texture: common, and no barrier of the title's names it). A model that keeps CPU-written textures current
+    /// registers it here.
+    fn texture_made(&self, _address: u64, _console: &D3D12_RESOURCE_DESC, _host: &ID3D12Resource, _layout: D3D12_BARRIER_LAYOUT) {}
+    /// A texture [`Memory::texture_made`] named is gone.
+    fn texture_gone(&self, _address: u64, _host: &ID3D12Resource) {}
 }
 
 /// A stand-in [`Memory`]: one upload heap, mapped, with one buffer over all of it. Console

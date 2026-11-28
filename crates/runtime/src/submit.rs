@@ -76,6 +76,11 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
     if let Some(begin) = crate::present::frame_begin(q) {
         batch.push(begin);
     }
+    // textures the CPU writes (Bink's video frames): their new bytes, copied from the card's copy of their memory
+    // ahead of the lists that sample them (crate::cputex; nothing to do is one atomic load)
+    if let Some(copies) = crate::cputex::refresh(q, value) {
+        batch.push(copies);
+    }
     // the GPU time: an earlier frame's timing pairs resolved ahead of this submission's lists ([`crate::gputime`])
     let frame = crate::present::PRESENT_CALLS.load(Ordering::Relaxed);
     if let Some(r) = q.timer.begin(q, frame, value) {
