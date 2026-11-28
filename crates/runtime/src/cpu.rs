@@ -109,6 +109,18 @@ unsafe extern "system" fn handler(p: *mut EXCEPTION_POINTERS) -> i32 {
             }
         };
     }
+    // insertq / extrq (AMD SSE4a): the Intel host has neither; done here on the saved XMM registers
+    if let Some(op) = sse4a_decode(bytes) {
+        let ctx = unsafe { &mut *(*p).ContextRecord };
+        // SAFETY: the FltSave arm is the XMM state of an x64 CONTEXT (CONTEXT_FLOATING_POINT is captured for a fault)
+        let xmm = unsafe { &mut ctx.Anonymous.FltSave.XmmRegisters };
+        let get = |r: usize| (xmm[r].Low, xmm[r].High as u64);
+        let (lo, _) = sse4a_apply(op, get(op.dest), get(op.src));
+        xmm[op.dest].Low = lo;
+        ctx.Rip += op.len as u64;
+        SSE4A_EMULATED.fetch_add(1, Ordering::Relaxed);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
     let Some(n) = clwb_len(bytes) else { return EXCEPTION_CONTINUE_SEARCH };
     let mut old = PAGE_PROTECTION_FLAGS(0);
     unsafe {
@@ -123,6 +135,91 @@ unsafe extern "system" fn handler(p: *mut EXCEPTION_POINTERS) -> i32 {
     PATCHED.fetch_add(1, Ordering::Relaxed);
     // resume at the same address: now NOPs
     EXCEPTION_CONTINUE_EXECUTION
+}
+
+/// insertq / extrq executions done by the handler.
+static SSE4A_EMULATED: AtomicU32 = AtomicU32::new(0);
+
+/// How many insertq / extrq the handler has done (the run report).
+pub fn sse4a() -> u32 {
+    SSE4A_EMULATED.load(Ordering::Relaxed)
+}
+
+/// An SSE4a instruction: `insert` (insertq) or extract (extrq), its XMM operands, its bit field (None: taken from
+/// the source register, the register forms) and its length in bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sse4a {
+    pub insert: bool,
+    pub dest: usize,
+    pub src: usize,
+    pub field: Option<(u32, u32)>,
+    pub len: usize,
+}
+
+/// Decode `F2 [REX] 0F 78 /r ib ib` (insertq imm), `F2 [REX] 0F 79 /r` (insertq), `66 [REX] 0F 78 /0 ib ib`
+/// (extrq imm), `66 [REX] 0F 79 /r` (extrq). Register forms only (the instructions have no memory forms).
+pub fn sse4a_decode(code: &[u8]) -> Option<Sse4a> {
+    let insert = match code.first()? {
+        0xf2 => true,
+        0x66 => false,
+        _ => return None,
+    };
+    let mut i = 1;
+    let rex = if (0x40..=0x4f).contains(code.get(i)?) {
+        i += 1;
+        code[i - 1]
+    } else {
+        0
+    };
+    if *code.get(i)? != 0x0f {
+        return None;
+    }
+    let imm = match *code.get(i + 1)? {
+        0x78 => true,
+        0x79 => false,
+        _ => return None,
+    };
+    let modrm = *code.get(i + 2)?;
+    if modrm >> 6 != 3 {
+        return None;
+    }
+    let reg = (((modrm >> 3) & 7) | ((rex & 4) << 1)) as usize;
+    let rm = ((modrm & 7) | ((rex & 1) << 3)) as usize;
+    let mut len = i + 3;
+    let field = if imm {
+        let f = (u32::from(*code.get(len)?) & 63, u32::from(*code.get(len + 1)?) & 63);
+        len += 2;
+        Some(f)
+    } else {
+        None
+    };
+    let (dest, src) = match (insert, imm) {
+        // extrq imm: the destination is r/m, the reg field must be 0
+        (false, true) if (modrm >> 3) & 7 != 0 => return None,
+        (false, true) => (rm, rm),
+        _ => (reg, rm),
+    };
+    Some(Sse4a { insert, dest, src, field, len })
+}
+
+/// The new low 64 bits of the destination (the high 64 bits are left as they were: undefined after these).
+pub fn sse4a_apply(op: Sse4a, dest: (u64, u64), src: (u64, u64)) -> (u64, u64) {
+    let (length, index) = op.field.unwrap_or(if op.insert {
+        // insertq register form: length in source bits 69:64, index in 77:72
+        ((src.1 & 63) as u32, ((src.1 >> 8) & 63) as u32)
+    } else {
+        // extrq register form: length in source bits 5:0, index in 13:8
+        ((src.0 & 63) as u32, ((src.0 >> 8) & 63) as u32)
+    });
+    let length = if length == 0 { 64 } else { length };
+    let mask: u64 = if length >= 64 { u64::MAX } else { (1u64 << length) - 1 };
+    let lo = if op.insert {
+        let field = ((mask as u128) << index) as u64;
+        (dest.0 & !field) | ((((src.0 & mask) as u128) << index) as u64)
+    } else {
+        ((dest.0 as u128 >> index) as u64) & mask
+    };
+    (lo, dest.1)
 }
 
 const CLZERO: [u8; 3] = [0x0f, 0x01, 0xfc];
@@ -426,5 +523,47 @@ mod tests {
         assert_eq!(find_cave(&w, 0x1008, 0x1008 + 10), None, "not at a boundary");
         w[40..43].fill(0x90);
         assert_eq!(find_cave(&w, 0x1000, 0x1000 + 10), None, "five is not enough (a real int3 may lead it)");
+    }
+}
+
+#[cfg(test)]
+mod sse4a_tests {
+    use super::{sse4a_apply, sse4a_decode, Sse4a};
+
+    #[test]
+    fn the_titles_insertq_site_decodes() {
+        // exe+0x2e7ff1: insertq xmm0, xmm1, 0x10, 0x10
+        let op = sse4a_decode(&[0xf2, 0x0f, 0x78, 0xc1, 0x10, 0x10, 0xc5]).unwrap();
+        assert_eq!(op, Sse4a { insert: true, dest: 0, src: 1, field: Some((16, 16)), len: 6 });
+    }
+
+    #[test]
+    fn rex_register_forms_and_refusals() {
+        // insertq xmm9, xmm1 (register form, REX.R)
+        assert_eq!(sse4a_decode(&[0xf2, 0x44, 0x0f, 0x79, 0xc9]).unwrap(), Sse4a { insert: true, dest: 9, src: 1, field: None, len: 5 });
+        // extrq xmm10, 8, 4 (REX.B, reg field 0)
+        assert_eq!(sse4a_decode(&[0x66, 0x41, 0x0f, 0x78, 0xc2, 0x08, 0x04]).unwrap(), Sse4a { insert: false, dest: 10, src: 10, field: Some((8, 4)), len: 7 });
+        // a memory form does not exist; extrq imm with a non-zero reg field is not extrq; other opcodes are not ours
+        assert!(sse4a_decode(&[0xf2, 0x0f, 0x78, 0x01, 0x10, 0x10]).is_none());
+        assert!(sse4a_decode(&[0x66, 0x0f, 0x78, 0xc8, 0x08, 0x04]).is_none());
+        assert!(sse4a_decode(&[0xf3, 0x0f, 0x78, 0xc1, 0x10, 0x10]).is_none());
+        assert!(sse4a_decode(&[0x66, 0x0f, 0x7a, 0xc1]).is_none());
+    }
+
+    #[test]
+    fn insertq_and_extrq_move_the_bit_field() {
+        let ins = Sse4a { insert: true, dest: 0, src: 1, field: Some((16, 16)), len: 6 };
+        assert_eq!(sse4a_apply(ins, (u64::MAX, 7), (0x1234, 0)), (0xffff_ffff_1234_ffff, 7), "high half untouched");
+        // length 0 means 64: the whole low qword
+        let all = Sse4a { field: Some((0, 0)), ..ins };
+        assert_eq!(sse4a_apply(all, (1, 0), (0xdead_beef, 0)).0, 0xdead_beef);
+        // register form: length 8 and index 4 from the source's high qword
+        let reg = Sse4a { field: None, ..ins };
+        assert_eq!(sse4a_apply(reg, (0, 0), (0xab, (4 << 8) | 8)).0, 0xab0);
+        let ext = Sse4a { insert: false, dest: 0, src: 0, field: Some((8, 4)), len: 7 };
+        assert_eq!(sse4a_apply(ext, (0xabcd, 9), (0xabcd, 9)), (0xbc, 9));
+        // extrq register form: length 4 and index 8 from the source's low qword
+        let ext_reg = Sse4a { field: None, src: 1, ..ext };
+        assert_eq!(sse4a_apply(ext_reg, (0xf00, 0), ((8 << 8) | 4, 0)).0, 0xf);
     }
 }

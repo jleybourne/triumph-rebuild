@@ -246,6 +246,10 @@ fn device_report() {
     if z + ze > 0 {
         println!("cpu       {z} clzero sites detoured, {ze} executions emulated (AMD-only; the host CPU has none)");
     }
+    let s4 = rebuild_runtime::cpu::sse4a();
+    if s4 > 0 {
+        println!("cpu       {s4} insertq/extrq executions emulated (AMD SSE4a; the host CPU has none)");
+    }
     let (n, iid) = rebuild_runtime::device::unknown_iid();
     if n > 0 {
         println!("  QueryInterface: {n} asks for interfaces the device does not serve; last {iid:02x?}");
