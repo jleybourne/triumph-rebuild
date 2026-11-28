@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+rebuild-storage = { path = "../storage" }
 rebuild-vfs = { path = "../vfs" }
 # Zlib licence; pure Rust, no C toolchain.
 zlib-rs = "0.6.9"

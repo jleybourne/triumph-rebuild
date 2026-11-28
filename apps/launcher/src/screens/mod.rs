@@ -9,6 +9,7 @@ mod profiles;
 mod runs;
 mod saves;
 mod settings;
+mod storage;
 
 pub use saves::SavesUi;
 
@@ -296,6 +297,17 @@ impl App {
         }
         match self.library.remove(id, delete_data) {
             Ok(()) => {
+                if delete_data {
+                    // the game's caches and logs too (their roots may be elsewhere); saves went with its folder
+                    let g = self.storage.game(id);
+                    if let Err(e) = g.clear_cache(None) {
+                        self.toast(Tone::Danger, e);
+                    }
+                    let _ = std::fs::remove_dir(&g.cache);
+                    if g.logs.parent() == Some(self.storage.logs_dir().as_path()) && rebuild_storage::is_game_id(id) {
+                        let _ = std::fs::remove_dir_all(&g.logs);
+                    }
+                }
                 self.arts.remove(id);
                 self.detections.remove(id);
                 if was_selected {

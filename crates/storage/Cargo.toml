@@ -1,0 +1,18 @@
+[package]
+name = "rebuild-storage"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+# Where every file the launcher and the layer keep lives (docs/design/storage.md): the one owner of every
+# per-user path. No other crate reads APPDATA or LOCALAPPDATA.
+
+[dependencies]
+toml = "0.8"
+# export/import archives: deflate (MIT / Apache-2.0) and CRC-32 (MIT / Apache-2.0); content hashes (CC0 / Apache-2.0)
+flate2 = "1.1"
+crc32fast = "1.5.6"
+blake3 = "1.8.7"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }

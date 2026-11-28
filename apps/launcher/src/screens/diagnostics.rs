@@ -157,6 +157,8 @@ impl App {
         ui.add_space(th::S2);
         self.sessions_card(ui, "Sessions", false);
         ui.add_space(th::S2);
+        self.storage_card(ui);
+        ui.add_space(th::S2);
         self.proof_card(ui);
         ui.add_space(th::S2);
         self.about_card(ui);
@@ -212,6 +214,7 @@ impl App {
             ("overlay", self.home.overlay_dir()),
             ("sessions", self.home.sessions_dir()),
             ("launcher", rebuild_launcher::prefs::file(&self.root)),
+            ("caches", self.storage.cache.clone()),
         ];
         w::card(ui, None, |ui| {
             egui::CollapsingHeader::new(egui::RichText::new(format!("About · launcher {} · GPL-3.0-only", env!("CARGO_PKG_VERSION"))).font(th::medium(13.5)).color(c.text)).id_salt("about").show(ui, |ui| {

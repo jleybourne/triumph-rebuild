@@ -8,6 +8,9 @@
 //! S:   persistent local storage: overlay only, kept between runs (the GDK reports this root)
 //! ```
 //!
+//! Where they live is `rebuild_storage`'s (`docs/design/storage.md`): the overlay (G: writes, T:) in the game's
+//! `overlay\`, S: in its `storage\`, and the user's saves (XGameSave) in its `saves\`.
+//!
 //! **D: is not mounted, on purpose.** On the console it is the devkit's developer scratch partition ("for use
 //! during development only", the GDK's "Local storage on XBOX console" page); a retail console has none. The title
 //! only probes `D:\decorations\presets`, `\presetgroups` and `/compressed_textures` for optional designer files
@@ -31,16 +34,28 @@ pub const STORAGE: char = 'S';
 /// Where the drives are, for one run.
 pub struct Drives {
     pub game: PathBuf,
+    /// the write overlay: G: writes and T:
     pub overlay: PathBuf,
+    /// S:, the title's persistent local storage
+    pub storage: PathBuf,
+    /// the user's game saves (XGameSave): `<saves>\<user>\<scid>\`
+    pub saves: PathBuf,
     pub mods: ModSet,
     /// the BCPack format tables (`dstorage.bcpack_tables`); `None` = `REBUILD_BCPACK_TABLES` or the default place
     pub bcpack_tables: Option<PathBuf>,
 }
 
 impl Drives {
-    /// The game folder, the default overlay root, and no mods.
+    /// The game folder, its folders in the data root (`rebuild_storage::game_for`), and no mods.
     pub fn new(game: impl Into<PathBuf>) -> Drives {
-        Drives { game: game.into(), overlay: rebuild_vfs::default_overlay_root(), mods: ModSet::default(), bcpack_tables: None }
+        let game = game.into();
+        let store = rebuild_storage::game_for(&game);
+        Drives::in_store(game, &store)
+    }
+
+    /// The game folder over a given game's folders.
+    pub fn in_store(game: PathBuf, store: &rebuild_storage::GameStore) -> Drives {
+        Drives { game, overlay: store.overlay_dir(), storage: store.storage_dir(), saves: store.saves_root(), mods: ModSet::default(), bcpack_tables: None }
     }
 }
 
@@ -53,17 +68,17 @@ pub fn install(d: &Drives) -> Result<Arc<Vfs>, String> {
     let vfs = VfsBuilder::new(&d.overlay)
         .package('G', &d.game, &d.mods)
         .writable('T')
-        .writable(STORAGE)
+        .writable_at(STORAGE, &d.storage)
         .build()
         .map_err(|e| format!("drives: {e}"))?;
     let vfs = Arc::new(vfs);
     // the GDK's persistent local storage is the S: drive; its used space is the host folder behind it
     let profile = rebuild_gdk::profile::Profile {
         storage_drive: STORAGE,
-        storage_host: Some(d.overlay.join(STORAGE.to_string())),
+        storage_host: Some(d.storage.clone()),
         // the user's game saves (XGameSave): beside the drive, not on it, so they never count against the
         // storage quota or show on S:
-        saves_host: Some(d.overlay.join("GameSave")),
+        saves_host: Some(d.saves.clone()),
         ..rebuild_gdk::profile::Profile::default()
     };
     rebuild_gdk::profile::configure(profile)?;

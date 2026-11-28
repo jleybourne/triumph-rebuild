@@ -65,6 +65,7 @@ pub const NOT_RUNTIME: &[(&str, &str)] = &[
     ("title.fsr_quality", "the launcher writes it into the overlay copy of the title's settings.xml (L3)"),
     ("game.title_settings", "the launcher's source for that copy"),
     ("launcher.theme", "the launcher only"),
+    ("storage.cache_dir", "launcher-wide (launcher.toml): rebuild_storage resolves it, and the launcher passes REBUILD_CACHE_DIR"),
     ("diagnostics.retention_days", "the launcher prunes sessions"),
     ("menu.key", "the in-game menu (L5), not built"),
     ("display.width", "not read yet: the title renders at its own size; the upscale path is not in the runtime"),
