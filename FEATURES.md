@@ -82,7 +82,7 @@
 | ✅ | **Export and import** | a game's saves and/or settings as one zip, checked file by file; import shows what it will replace and backs up first |
 | ✅ | **Save editor** | the title's save format decoded from its own code; edit settings saves field by field (volume, field of view, HUD, controls…) and player saves by value |
 | ✅ | **Safe by design** | a backup before every write, undo, never while the game runs, and nothing written the game would reject |
-| ✅ | **Import from Triumph** | brings saves from the older Triumph build across, leaving its folder untouched |
+| ✅ | **One Import** | drop in any export, save file, edited save or older-build saves folder: it works out what it is, shows what changes, backs up, then imports |
 | ⏳ | **Story-progress saves** | these are encrypted and signed by the title, so they are shown read-only |
 
 ## 🕹️ In game
@@ -114,7 +114,7 @@
 | ✅ | **Frame line** | one line a second: fps, frame time, GPU time, draws, upload, translation |
 | ✅ | **Scripted input and captures** | `REBUILD_INPUT_SCRIPT="40s:A,60s:cap"`: timed presses and full-resolution captures, without the overlays unless asked |
 | 🔄 | **Live control** | a pipe to press buttons and take captures while the game runs |
-| ✅ | **Tests** | 800 tests; GPU tests run on WARP, so no card is needed |
+| ✅ | **Tests** | 809 tests; GPU tests run on WARP, so no card is needed |
 | ✅ | **Shader checker** | every translated shader compared bit-for-bit against a reference on WARP |
 | ✅ | **Traces** | lists, textures, descriptors, Bink, files, saves: each behind its own switch |
 
