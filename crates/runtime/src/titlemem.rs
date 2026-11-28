@@ -63,7 +63,7 @@ pub fn allocation(va: u64) -> Option<(u64, u64)> {
 fn walked_allocation(va: u64) -> Option<(u64, u64)> {
     let mut m = MEMORY_BASIC_INFORMATION::default();
     let size = std::mem::size_of::<MEMORY_BASIC_INFORMATION>();
-    if unsafe { VirtualQuery(Some(va as *const c_void), &mut m, size) } == 0 || m.State != MEM_COMMIT || !writable(m.Protect) {
+    if unsafe { VirtualQuery(Some(va as *const c_void), &mut m, size) } == 0 || m.State != MEM_COMMIT || !writable(PAGE_PROTECTION_FLAGS(rebuild_d3d12x::vmem::effective(va, m.Protect.0))) {
         return None;
     }
     let base = m.AllocationBase as u64;

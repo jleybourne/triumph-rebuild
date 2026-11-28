@@ -160,6 +160,8 @@ pub fn start(device: &ID3D12Device, warp: bool) -> Option<&'static Model> {
         }
     });
     m.ring.set_backer(backer);
+    // quiet slices go cold when the I/O syscalls are guarded (`install_cold`, before the title ran)
+    m.ring.set_cold(rebuild_uma::cold::enabled());
     // what the title made before the device: with no allocation or free running meanwhile
     crate::exports::with_watched(|regions| {
         for &(base, size) in regions {
@@ -218,9 +220,26 @@ pub fn reserved(base: u64, size: u64) {
     }
 }
 
+/// Cold slices (`rebuild_uma::cold`): watched memory no write touched for a while is made read-only and no
+/// longer scanned; a write faults it hot again. On unless `REBUILD_COLD=0`, and only once the I/O syscalls are
+/// guarded (`kwrite`): a kernel write into a read-only page would fail. Call before the title runs.
+pub fn install_cold() {
+    if std::env::var("REBUILD_COLD").is_ok_and(|v| v == "0") || standin() {
+        eprintln!("memory    cold slices off (REBUILD_COLD=0 or the stand-in): every pass reads all watched memory");
+        return;
+    }
+    if crate::kwrite::install() {
+        rebuild_uma::cold::enable();
+        // what asks the protection of the title's memory sees what the title made, not our read-only marks
+        rebuild_d3d12x::vmem::set_tracked(rebuild_uma::cold::original);
+    }
+}
+
 /// `size` bytes at `at` were committed. Under `REBUILD_MEMORY=eager`, watched pages get card pages now; else on
 /// their first write (the ring) or under a resource.
 pub fn committed(at: u64, size: u64) {
+    // fresh pages in a cold slice: it turns hot (scanned) before the title can write them
+    rebuild_uma::cold::touch(at, size);
     let Some(m) = MODEL.get() else { return };
     if !m.eager {
         return;
@@ -322,11 +341,13 @@ pub fn report() -> String {
     };
     let passes = t.passes.load(Relaxed).max(1);
     let per = |a: &AtomicU64| a.load(Relaxed) as f64 / passes as f64 / 1000.0;
+    let cold = rebuild_uma::cold::counters();
     format!(
         "memory    tiles: {n} watched regions ({} MiB), {used} card pages in use ({} MiB of heaps), {} sub-windows, {} views placed; pages placed {} ({} on first write), retired {}, zeroed {}, refused {}, map failures {}; regions added {}, removed {}\n\
          arena     {} MiB of resources at console addresses, {} refused; {} buffers sharing card pages by address; {} allocations, {} frees\n\
          upload    {} passes for {} flushes, {} MiB sent, {:.2} ms a pass, flush -> signalled {:.2} ms; carried {} pages, {} chunks with no sub-window, {} failed passes\n\
-         upload    a pass, ms: region lock {:.2}, slot wait {:.2}, watch {:.2}, diff {:.2}, gather {:.2}, record {:.2}",
+         upload    a pass, ms: region lock {:.2}, slot wait {:.2}, watch {:.2}, diff {:.2}, gather {:.2}, record {:.2}; after it, making slices cold {:.2}
+         cold      {}: write-watch read {} MiB a pass, {} MiB of cold slices not read; slices made cold {} ({:.2} ms each), refused {}; write faults {} ({:.1} us each), kernel writes guarded {}, commits {}; check: {} pages found written in cold slices",
         bytes >> 20,
         heaps >> 20,
         m.subs.iter().filter(|s| !s.load(Relaxed).is_null()).count(),
@@ -358,6 +379,18 @@ pub fn report() -> String {
         per(&t.diff_us),
         per(&t.gather_us),
         per(&t.record_us),
+        per(&t.cool_us),
+        if rebuild_uma::cold::enabled() { "on" } else { "off" },
+        t.watched_bytes.load(Relaxed) / passes >> 20,
+        t.cold_bytes.load(Relaxed) / passes >> 20,
+        cold.went_cold.load(Relaxed),
+        cold.cold_us.load(Relaxed) as f64 / cold.went_cold.load(Relaxed).max(1) as f64 / 1000.0,
+        cold.refused.load(Relaxed),
+        cold.faults.load(Relaxed),
+        cold.fault_us.load(Relaxed) as f64 / cold.faults.load(Relaxed).max(1) as f64,
+        cold.kernel_writes.load(Relaxed),
+        cold.commits.load(Relaxed),
+        t.cold_dirty.load(Relaxed),
     )
 }
 

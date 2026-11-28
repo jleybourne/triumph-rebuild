@@ -51,6 +51,25 @@ pub fn allocation_of(va: u64) -> Option<Allocation> {
     Some(Allocation { base: r.AllocationBase as u64, size: r.RegionSize as u64, commit: r.CommitSize as u64, protect: r.AllocationProtect, private })
 }
 
+/// Who knows memory made read-only for write tracking only (the runtime's cold slices): the protection it had.
+static TRACKED: std::sync::OnceLock<fn(u64) -> Option<u32>> = std::sync::OnceLock::new();
+
+/// Set once by the runtime: `f(va)` names the protection the owner gave `va` when it is read-only for write
+/// tracking only (a write there makes it writable again at once).
+pub fn set_tracked(f: fn(u64) -> Option<u32>) {
+    let _ = TRACKED.set(f);
+}
+
+/// The protection `p` that `VirtualQuery` reported at `va`, as the memory's owner made it.
+pub fn effective(va: u64, p: u32) -> u32 {
+    if p & (PAGE_READONLY.0 | PAGE_EXECUTE_READ.0) != 0 {
+        if let Some(o) = TRACKED.get().and_then(|f| f(va)) {
+            return o;
+        }
+    }
+    p
+}
+
 /// Protection bits that allow reads, and writes.
 pub const READ: u32 = 0x02 | 0x04 | 0x08 | 0x20 | 0x40 | 0x80;
 pub const WRITE: u32 = 0x04 | 0x08 | 0x40 | 0x80;
@@ -74,7 +93,7 @@ pub fn committed_protect(at: u64, len: u64) -> Option<u32> {
     if unsafe { VirtualQuery(Some(at as *const c_void), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
         return None;
     }
-    (m.State == MEM_COMMIT && end <= m.BaseAddress as u64 + m.RegionSize as u64).then_some(m.Protect.0)
+    (m.State == MEM_COMMIT && end <= m.BaseAddress as u64 + m.RegionSize as u64).then(|| effective(at, m.Protect.0))
 }
 
 #[cfg(test)]

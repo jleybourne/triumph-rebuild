@@ -113,6 +113,36 @@ Card, start screen (t 36-50 s), same machine and hour, master vs this: 15 fps vs
 `REBUILD_FRAME_RATE=unlimited`, ~120 fps (7-9 ms a frame, GPU 1-1.5 ms, upload pass 5.3 ms of which write-watch
 5.3). `titlemem` opens 346 on both. Next: the write-watch scan (every pass reads all 5.2 GiB).
 
+**Cold slices (`uma::cold`, exact).** `GetWriteWatch` costs by the range read, not by what changed (~1.1-1.6 ms a
+GiB, reserved or touched; one call ~0.08 ms of its own), so every pass paid ~5 ms for 5.2 GiB while menus write
+~0.01 MB a frame, and each `ExecuteCommandLists` waits for a pass. Watched memory is cut into 32 MiB slices. A slice
+no write touched for 300 ms goes **cold** after a pass (off the GPU's wait, at most 2 ms of it a pass): its
+committed read-write pages become read-only and the ring stops reading its write-watch. Nothing is missed:
+
+- a CPU write faults; the vectored handler (first in line) makes that 64 KiB block writable and the slice hot
+  before the write runs (~4 µs a fault), so write-watch records it and the next pass reads it;
+- a kernel write into a read-only page fails instead of faulting, so `kwrite` hooks `NtReadFile`,
+  `NtReadFileScatter`, `NtDeviceIoControlFile` and `NtFsControlFile` in ntdll (all or none, only if the stubs are
+  the expected x64 syscall stubs; installed before the title runs): their output buffers are made writable and
+  their slices pinned hot for the call and 2 s after (asynchronous completions; a pending file read has its buffer
+  locked by then);
+- commits (`memory::committed`) and decommits/frees forget our marks and turn the slice hot;
+- going cold marks the slice cold first, protects, then reads its write-watch once more: a write that raced the
+  protection is carried to the next pass;
+- `vmem::effective` and `XMemVirtualQuery` report the protection the title made, not our read-only marks.
+
+Allocations `titlemem` opened as D3D12 heaps in place (the title's labels live there) cannot be re-protected
+(`VirtualProtect`: "the parameter is incorrect": the graphics kernel secured them), so their slices stay hot for
+good: ~1.4 GiB of the 5.2 here, still read every pass. `REBUILD_COLD=0` turns cold slices off;
+`REBUILD_COLD_CHECK=1` reads cold slices too and counts pages found written there (must be 0).
+
+Card, start screen, `REBUILD_FRAME_RATE=unlimited`, before vs after: ~120 fps vs ~250-300 fps (frame 7-9 ms vs
+3.3-4.0 ms; GPU 1-1.5 ms vs 0.5 ms); upload pass 5.3 ms (all 5.2 GiB read) vs 2.2-2.5 ms (1.4 GiB read, 3.8 GiB
+cold); flush to signalled 9.6 vs 3.7-4.5 ms. ~230 slices made cold (0.16-0.19 ms each), ~1,700 write faults over
+60 s (2-7 µs each), ~3,000 kernel writes guarded. The check run: 0 pages written in cold slices. At the title's
+cap: 30 fps, upload 2.3 ms. The rest of a menu frame is still the pass (each `ExecuteCommandLists` waits for
+one, ~1.4 a frame): the hot 1.4 GiB `titlemem` opened is the next cost.
+
 ## Cost
 
 Submit thread: one channel send and one queue `Wait` per `ExecuteCommandLists`. Per draw: nothing new (views are

@@ -31,6 +31,9 @@ pub mod tileproof;
 pub mod ring;
 
 #[cfg(windows)]
+pub mod cold;
+
+#[cfg(windows)]
 pub mod labels;
 
 #[cfg(windows)]
