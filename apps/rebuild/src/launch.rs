@@ -177,6 +177,9 @@ fn device_report() {
                 rebuild_runtime::titlemem::OPEN_FAILED.load(Relaxed)
             );
             println!("{}", rebuild_runtime::memory::report());
+            println!("cputex    {}", rebuild_runtime::cputex::report());
+            println!("bink      {}", rebuild_runtime::bink::report());
+            println!("pagemap   {}", rebuild_runtime::pagemap::report());
             println!(
                 "gputime   {} GPU timestamp labels written into the title's memory; {} host-list timing pairs read, {} dropped",
                 rebuild_xlist::console::STAMP_LABELS.load(Relaxed),

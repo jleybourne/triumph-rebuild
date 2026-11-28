@@ -141,6 +141,9 @@ pub(crate) fn heap_object<'a>(p: Raw) -> Option<&'a HeapObject> {
 impl Drop for Resource {
     fn drop(&mut self) {
         let ctx = &self.head.common.ctx;
+        if let (Some(h), false) = (&self.host, self.is_buffer()) {
+            ctx.memory.texture_gone(self.address, h);
+        }
         let entries: Vec<u32> = self.entries.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|e| e.1).collect();
         ctx.entries.release(self as *const Resource as usize, &entries);
         if self.owned && self.address != 0 {
@@ -386,6 +389,18 @@ impl Resources {
             },
             _ => None,
         };
+        if desc.Dimension.0 != DIMENSION_BUFFER {
+            let what = match (owned, parent.is_null()) {
+                (true, _) => "committed resource",
+                (false, false) => "placed resource",
+                (false, true) => "resource at an address",
+            };
+            crate::heap::trace_texture(what, address, desc);
+        }
+        // a texture over memory the CPU may write: the model may keep it current (from the layout it starts in)
+        if let (Some(h), false) = (&host, desc.Dimension.0 == DIMENSION_BUFFER) {
+            ctx.memory.texture_made(address, desc, h, initial_layout(initial, &hd));
+        }
         if !parent.is_null() {
             object::add_ref(parent);
         }

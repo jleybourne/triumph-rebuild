@@ -55,6 +55,12 @@ impl Resolver for Combined<'_> {
             };
             if let Some(rva) = rva {
                 self.from_title += 1;
+                // Bink's calls: ours first, so textures over its buffers learn of each frame (crate::bink, crate::cputex)
+                if let Symbol::Name { name, .. } = symbol {
+                    if let Some(ours) = crate::bink::wrap_title_export(dll, name, t.base + rva as u64) {
+                        return Some(ours);
+                    }
+                }
                 return Some(t.base + rva as u64);
             }
         }
