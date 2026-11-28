@@ -42,6 +42,10 @@ impl<P: PipelineSource + Send + Sync> ListHost for Host<P> {
         self.resources.host_resource(console)
     }
     #[inline]
+    fn uav_resource(&self, console: Raw, cpu: usize) -> Option<Raw> {
+        self.resources.uav_resource(console, cpu)
+    }
+    #[inline]
     fn uav_twin(&self, console: Raw) -> Option<rebuild_xlist::console::UavTwin> {
         self.resources.uav_twin(console)
     }

@@ -449,6 +449,11 @@ pub trait ListHost: PipelineSource + Send + Sync {
     fn uav_twin(&self, _console: Raw) -> Option<UavTwin> {
         None
     }
+    /// The host resource the UAV at console CPU handle `cpu` views, when it is not `console`'s own host resource
+    /// (a twin, [`twin`]): a UAV clear must name it. `None`: the resource's own.
+    fn uav_resource(&self, _console: Raw, _cpu: usize) -> Option<Raw> {
+        None
+    }
     /// A console descriptor heap (device 0x70) bound by `SetDescriptorHeaps`.
     fn descriptor_heap(&self, console: Raw) -> Option<HeapBinding>;
     /// A console CPU descriptor handle (RTV, DSV, or the CPU side of a UAV clear) as a host CPU

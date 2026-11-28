@@ -56,9 +56,9 @@ pub struct Resource {
     /// console bytes it covers (its footprint)
     pub bytes: u64,
     pub host: Option<ID3D12Resource>,
-    /// a depth texture the title also writes as a UAV: the colour texture its UAVs name
-    /// (`docs/design/depth-uav.md`; the list keeps the two in step at the title's barriers)
-    pub twin: Option<ID3D12Resource>,
+    /// a depth texture the title also writes as a UAV: the colour textures its UAVs name, by plane (depth,
+    /// stencil) (`docs/design/depth-uav.md`; the list keeps them in step at the title's barriers)
+    pub twins: [Option<ID3D12Resource>; 2],
     /// the typed format views default to (the host texture is typeless)
     pub view_format: u32,
     /// memory we allocated (freed with the resource)
@@ -93,28 +93,46 @@ impl Resource {
     pub fn uav_stripped(&self) -> bool {
         self.desc.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 != 0 && format::host_desc(&self.desc).0.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0
     }
-    /// What the title's UAVs of it write: its twin, else the host resource.
-    pub fn uav_raw(&self) -> Raw {
-        self.twin.as_ref().map_or_else(|| self.host_raw(), |t| t.as_raw())
+    /// The twin of plane `plane`, if it has one.
+    pub fn twin(&self, plane: u32) -> Option<&ID3D12Resource> {
+        self.twins.get(plane as usize)?.as_ref()
     }
 }
 
-/// A UAV of `r` (description `desc`, null = the default) is a view of its twin: `r` has one and the view is of
-/// the depth plane (the twin has no stencil plane; a stencil UAV stays a null view).
-pub(crate) fn twin_takes(r: &Resource, desc: Option<&D3D12_UNORDERED_ACCESS_VIEW_DESC>) -> bool {
-    if r.twin.is_none() {
-        return false;
-    }
-    let Some(v) = desc else { return true };
+/// The plane a texture UAV names (2D and 2D array views have one; the rest plane 0).
+fn uav_plane(v: &D3D12_UNORDERED_ACCESS_VIEW_DESC) -> u32 {
     // SAFETY: the member the dimension selects.
-    let plane = unsafe {
+    unsafe {
         match v.ViewDimension {
             D3D12_UAV_DIMENSION_TEXTURE2D => v.Anonymous.Texture2D.PlaneSlice,
             D3D12_UAV_DIMENSION_TEXTURE2DARRAY => v.Anonymous.Texture2DArray.PlaneSlice,
             _ => 0,
         }
-    };
-    plane == 0
+    }
+}
+
+/// A UAV of `r` (description `desc`, null = the default) is a view of a twin: `r` has one for the plane it names.
+pub(crate) fn twin_takes(r: &Resource, desc: Option<&D3D12_UNORDERED_ACCESS_VIEW_DESC>) -> bool {
+    r.twin(desc.map_or(0, uav_plane)).is_some()
+}
+
+/// The resource a texture UAV `v` of `r` is made on: the twin of the plane it names (`v` then names the twin's
+/// one plane, in a format of the twin's: [`format::twin_view_format`]), else the host resource.
+pub(crate) fn uav_target(r: &Resource, v: &mut D3D12_UNORDERED_ACCESS_VIEW_DESC) -> Raw {
+    let plane = uav_plane(v);
+    let Some(t) = r.twin(plane) else { return r.host_raw() };
+    // SAFETY: a live host resource.
+    let tf = unsafe { t.GetDesc() }.Format.0 as u32;
+    v.Format = DXGI_FORMAT(format::twin_view_format(plane, tf, v.Format.0 as u32) as i32);
+    // SAFETY: the member the dimension selects.
+    unsafe {
+        match v.ViewDimension {
+            D3D12_UAV_DIMENSION_TEXTURE2D => v.Anonymous.Texture2D.PlaneSlice = 0,
+            D3D12_UAV_DIMENSION_TEXTURE2DARRAY => v.Anonymous.Texture2DArray.PlaneSlice = 0,
+            _ => {}
+        }
+    }
+    t.as_raw()
 }
 
 /// `REBUILD_DEPTH_TWINS=0` makes no twins (their UAVs are null views again, their UAV layouts only parked): for
@@ -371,7 +389,8 @@ impl Resources {
             }
         };
         // a depth texture the title also writes as a UAV: its twin, resting in unordered access
-        let twin = match (host.is_some() && twins_on(), format::twin_desc(desc)) {
+        // (plane 0, and plane 1 for a depth format with stencil)
+        let make = |td: Option<D3D12_RESOURCE_DESC>| match (host.is_some() && twins_on(), td) {
             (true, Some(td)) => match ctx.host.resource_in(&td, None, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS) {
                 Ok(t) => {
                     if t.is_some() && TWINS.fetch_add(1, Ordering::Relaxed) == 0 {
@@ -386,6 +405,7 @@ impl Resources {
             },
             _ => None,
         };
+        let twins = [make(format::twin_desc(desc)), make(format::stencil_twin_desc(desc))];
         if !parent.is_null() {
             object::add_ref(parent);
         }
@@ -397,7 +417,7 @@ impl Resources {
             address,
             bytes: info.size,
             host,
-            twin,
+            twins,
             view_format,
             owned,
             parent,
@@ -607,6 +627,24 @@ impl Resources {
         resource(p).and_then(|r| r.host.as_ref().map(|h| h.as_raw()))
     }
 
+    /// `ListHost::uav_resource`: the resource the UAV at console CPU handle `cpu` is a view of, for a clear of a
+    /// texture with twins (a stencil UAV clears the stencil twin, a depth one the depth twin). `None` otherwise.
+    pub fn uav_resource(&self, p: Raw, cpu: usize) -> Option<Raw> {
+        let r = resource(p)?;
+        if r.twins.iter().all(Option::is_none) || cpu == 0 {
+            return None;
+        }
+        // SAFETY: the descriptor slot the title's clear names (its record, written by `create_uav`).
+        let w = unsafe { (cpu as *const [u32; 8]).read_unaligned() };
+        match crate::records::Record::decode(&w)? {
+            crate::records::Record::Entry { index, generation } => match self.inner.entries.get(index, generation)? {
+                crate::records::EntryView::Texture(crate::views::HostView::Uav { resource, .. }) => Some(resource),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// `ListHost::uav_twin`: a texture whose host resource lost the unordered access the console gave it, with its
     /// twin (null when its format has none). Answered only for those, so every other barrier costs one check.
     pub fn uav_twin(&self, p: Raw) -> Option<rebuild_xlist::console::UavTwin> {
@@ -620,7 +658,7 @@ impl Resources {
         let planes = if d.Format.0 == 19 || d.Format.0 == 44 { 2 } else { 1 };
         Some(rebuild_xlist::console::UavTwin {
             depth: host.as_raw(),
-            twin: r.twin.as_ref().map_or(std::ptr::null_mut(), |t| t.as_raw()),
+            twins: [0, 1].map(|p| r.twin(p).map_or(std::ptr::null_mut(), |t| t.as_raw())),
             mips: u32::from(d.MipLevels.max(1)),
             arrays: u32::from(d.DepthOrArraySize.max(1)),
             planes,

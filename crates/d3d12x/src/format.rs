@@ -80,13 +80,15 @@ pub fn element(format: u32) -> Option<(u64, u64)> {
     })
 }
 
-/// A console format as the host has it: the 16-bit depth with stencil (no PC format) becomes
-/// the 24-bit one; everything else keeps its number.
+/// A console format as the host has it: the 16-bit depth with stencil (no PC format) becomes the 32-bit float
+/// one with stencil (D32S8: its planes copy into UAV-capable twins, R32 and R8, where 24/8's depth plane copies
+/// into none; `docs/design/depth-uav.md`), its depth and stencil reads that format's; everything else keeps its
+/// number.
 pub fn host_format(format: u32) -> u32 {
     match format {
-        118 => 45,
-        119 => 46,
-        120 => 47,
+        118 => 20, // D16S8 -> D32_FLOAT_S8X24_UINT
+        119 => 21, // R16_UNORM_X8 -> R32_FLOAT_X8X24_TYPELESS (depth plane)
+        120 => 22, // X16_G8_UINT -> X32_TYPELESS_G8X24_UINT (stencil plane)
         other => other,
     }
 }
@@ -291,12 +293,26 @@ pub fn twin_desc(d: &D3D12_RESOURCE_DESC) -> Option<D3D12_RESOURCE_DESC> {
     Some(D3D12_RESOURCE_DESC { Format: DXGI_FORMAT(f as i32), Flags: D3D12_RESOURCE_FLAGS(UAV), ..h })
 }
 
-/// A UAV format of a depth texture as a view of its twin: depth formats as their colour reading.
-pub fn twin_view_format(f: u32) -> u32 {
-    match f {
-        40 | 20 | 21 => 41, // D32 / D32S8 / R32 of R32X8X24: R32_FLOAT
-        55 => 56,           // D16: R16_UNORM
-        f => f,
+/// The stencil plane's twin of such a texture (plane 1: R8 with unordered access), for a depth format with
+/// stencil (D32S8, and the console's D16S8 that the host keeps as D32S8); `None` for the others.
+pub fn stencil_twin_desc(d: &D3D12_RESOURCE_DESC) -> Option<D3D12_RESOURCE_DESC> {
+    let t = twin_desc(d)?;
+    (host_desc(d).0.Format.0 == 19).then_some(D3D12_RESOURCE_DESC { Format: DXGI_FORMAT(60), ..t })
+}
+
+/// A UAV format of a depth texture as a view of its plane-`plane` twin of typeless format `twin` (R16 53, R32
+/// 39, R8 60): the depth plane as its colour reading (an R16 UAV of the console's D16S8 reads its R32 twin as
+/// R32_FLOAT: typed loads and stores see floats either way), the stencil plane as R8_UINT.
+pub fn twin_view_format(plane: u32, twin: u32, f: u32) -> u32 {
+    match (plane, twin, f) {
+        (1, ..) | (_, 60, _) => match f {
+            61..=64 => f,
+            _ => 62, // R8_UINT
+        },
+        (_, 39, 41..=43) => f,
+        (_, 39, _) => 41, // R32_FLOAT
+        (_, _, 53 | 55) => 56, // D16 / R16 typeless: R16_UNORM
+        _ => f,
     }
 }
 
@@ -355,7 +371,8 @@ mod tests {
         let (h, view) = host_desc(&tex(64, 64, 115, 1, 0));
         assert_eq!((h.Format.0, view), (115, 115), "B4G4R4A4 sampled only: kept");
         let (h, view) = host_desc(&tex(64, 64, 118, 1, 2));
-        assert_eq!((h.Format.0, view), (44, 45), "console 16/8 depth: the 24/8 one");
+        assert_eq!((h.Format.0, view), (19, 20), "console 16/8 depth: D32S8 (its planes copy into UAV twins)");
+        assert_eq!((host_format(119), host_format(120)), (21, 22), "its depth and stencil reads, plane 0 and 1");
         assert_eq!(default_view_format(40, false), 41);
         assert_eq!(default_view_format(40, true), 40);
         assert_eq!(h.Layout, D3D12_TEXTURE_LAYOUT_UNKNOWN);
@@ -367,11 +384,15 @@ mod tests {
         assert_eq!(t(53, 0x6), Some((53, 0x4)), "D16 + UAV: an R16 twin with unordered access only");
         assert_eq!(t(39, 0x8030_0006_u32 as i32), Some((39, 0x4)), "D32 + UAV (console bits): R32");
         assert_eq!(t(19, 0x6), Some((39, 0x4)), "D32S8: its depth plane, R32");
-        assert_eq!(t(118, 0x6), None, "the console's D16S8 is 24/8 here: no 16-bit twin");
+        assert_eq!(t(118, 0x6), Some((39, 0x4)), "the console's D16S8 is D32S8 here: an R32 twin");
+        let st = |format| stencil_twin_desc(&tex(512, 512, format, 1, 0x6)).map(|d| (d.Format.0, d.Flags.0));
+        assert_eq!((st(118), st(19), st(53), st(39)), (Some((60, 0x4)), Some((60, 0x4)), None, None), "an R8 stencil twin with stencil only");
         assert_eq!(t(53, 0x2), None, "depth only");
         assert_eq!(t(28, 0x4), None, "a colour UAV keeps its own unordered access");
         let d = twin_desc(&tex(256, 256, 53, 3, 0x6)).unwrap();
         assert_eq!((d.Width, d.Height, d.MipLevels, d.Layout), (256, 256, 3, D3D12_TEXTURE_LAYOUT_UNKNOWN));
-        assert_eq!((twin_view_format(56), twin_view_format(21), twin_view_format(40)), (56, 41, 41));
+        assert_eq!((twin_view_format(0, 53, 56), twin_view_format(0, 53, 55)), (56, 56), "D16's R16 twin");
+        assert_eq!((twin_view_format(0, 39, 56), twin_view_format(0, 39, 21), twin_view_format(0, 39, 42)), (41, 41, 42), "an R32 twin: R32_FLOAT unless an R32 integer view");
+        assert_eq!((twin_view_format(1, 60, 62), twin_view_format(1, 60, 22), twin_view_format(1, 60, 61)), (62, 62, 61), "the stencil twin: R8_UINT");
     }
 }

@@ -28,11 +28,11 @@ use windows::Win32::Graphics::Direct3D12::*;
 pub struct UavTwin {
     /// the host depth texture (borrowed)
     pub depth: Raw,
-    /// the twin the title's UAVs write (borrowed), or null: none for this format
-    pub twin: Raw,
+    /// the twins the title's UAVs write (borrowed), by plane: depth, stencil; null where a plane has none
+    pub twins: [Raw; 2],
     pub mips: u32,
     pub arrays: u32,
-    /// planes of the host depth texture (2 with stencil); the twin has plane 0's
+    /// planes of the host depth texture (2 with stencil); a twin has one
     pub planes: u32,
 }
 
@@ -123,18 +123,18 @@ impl Plan {
     }
 }
 
-/// Plane 0's subresources a range names, as `(mip, slice)`; `None` for every one.
-fn plane0(r: &[u32; 6], t: &UavTwin) -> Option<Vec<(u32, u32)>> {
+/// Plane `p`'s subresources a range names, as `(mip, slice)`; `None` for every one.
+fn plane_subs(r: &[u32; 6], t: &UavTwin, p: u32) -> Option<Vec<(u32, u32)>> {
     let (m, a) = (t.mips.max(1), t.arrays.max(1));
     if r[1] == 0 {
         if r[0] == u32::MAX {
             return None;
         }
         let i = r[0];
-        return Some(if i / (m * a) == 0 { vec![(i % m, i / m)] } else { Vec::new() });
+        return Some(if i / (m * a) == p { vec![(i % m, (i / m) % a)] } else { Vec::new() });
     }
     let planes = r[4]..r[4] + r[5].max(1);
-    if !planes.contains(&0) {
+    if !planes.contains(&p) {
         return Some(Vec::new());
     }
     let mut v = Vec::new();
@@ -146,20 +146,28 @@ fn plane0(r: &[u32; 6], t: &UavTwin) -> Option<Vec<(u32, u32)>> {
     Some(v)
 }
 
-/// The twin's range for a depth range (plane 0 only), and the copies between them (`to_twin`: depth into the
-/// twin). `None` when the range has no plane-0 subresource.
-fn twin_range(r: &[u32; 6], t: &UavTwin, to_twin: bool, copies: &mut Vec<Copy>) -> Option<[u32; 6]> {
-    let (src, dst) = if to_twin { (t.depth, t.twin) } else { (t.twin, t.depth) };
-    match plane0(r, t) {
+/// Plane `p`'s twin range for a depth range, and the copies between them (`to_twin`: depth into the twin; depth
+/// subresource `mip + slice * mips + p * mips * arrays`, twin subresource `mip + slice * mips`). `None` when the
+/// range names nothing of plane `p` or the plane has no twin.
+fn twin_range(r: &[u32; 6], t: &UavTwin, p: u32, to_twin: bool, copies: &mut Vec<Copy>) -> Option<[u32; 6]> {
+    let twin = *t.twins.get(p as usize)?;
+    if twin.is_null() {
+        return None;
+    }
+    let (m, a) = (t.mips.max(1), t.arrays.max(1));
+    let mut push = |mip: u32, s: u32| {
+        let (ti, di) = (mip + s * m, mip + s * m + p * m * a);
+        copies.push(if to_twin { (twin, ti, t.depth, di) } else { (t.depth, di, twin, ti) });
+    };
+    match plane_subs(r, t, p) {
         None if t.planes <= 1 => {
-            copies.push((dst, u32::MAX, src, u32::MAX));
+            copies.push(if to_twin { (twin, u32::MAX, t.depth, u32::MAX) } else { (t.depth, u32::MAX, twin, u32::MAX) });
             Some([u32::MAX, 0, 0, 0, 0, 0])
         }
         None => {
-            for s in 0..t.arrays.max(1) {
-                for mip in 0..t.mips.max(1) {
-                    let i = mip + s * t.mips.max(1);
-                    copies.push((dst, i, src, i));
+            for s in 0..a {
+                for mip in 0..m {
+                    push(mip, s);
                 }
             }
             Some([u32::MAX, 0, 0, 0, 0, 0])
@@ -167,72 +175,72 @@ fn twin_range(r: &[u32; 6], t: &UavTwin, to_twin: bool, copies: &mut Vec<Copy>) 
         Some(v) if v.is_empty() => None,
         Some(v) => {
             for &(mip, s) in &v {
-                let i = mip + s * t.mips.max(1);
-                copies.push((dst, i, src, i));
+                push(mip, s);
             }
-            Some(if r[1] == 0 { [v[0].0 + v[0].1 * t.mips.max(1), 0, 0, 0, 0, 0] } else { [r[0], r[1], r[2], r[3].max(1), 0, 1] })
+            Some(if r[1] == 0 { [v[0].0 + v[0].1 * m, 0, 0, 0, 0, 0] } else { [r[0], r[1], r[2], r[3].max(1), 0, 1] })
         }
     }
 }
 
+/// Plan the host side of title barrier `b` (resource already the host depth texture) on a texture with twins `t`:
+/// each plane the barrier names that has a twin gets its barriers and copies.
+/// `quiet`: this list recorded the phase's other edge itself and no work since: at an exit, the twins cannot have
+/// been written since the enter; at an enter, depth and twins are still equal since the exit. `None` when the
+/// barrier does not touch unordered access (it goes through as it is).
+///
 /// (The debug layer's rules: an access of NO_ACCESS with a layout change needs that side's sync to be NONE, and
-/// every sync bit must suit the access, so the parked depth is always "read by a copy" at `SYNC_COPY` and the
-/// resting twin "in unordered access" at `SYNC_ALL`.)
-/// Plan the host side of title barrier `b` (resource already the host depth texture) on a texture with twin `t`.
-/// `quiet`: this list recorded the phase's other edge itself and no work since: at an exit, the twin cannot have
-/// been written since the enter; at an enter, depth and twin are still equal since the exit. `None` when the barrier does not touch unordered access (it goes through as it is).
+/// every sync bit must suit the access, so the parked depth is always "read by a copy" at `SYNC_COPY` and a resting
+/// twin "in unordered access" at `SYNC_ALL`.)
 pub fn plan(b: &TextureBarrier, t: &UavTwin, quiet: bool, out: &mut Plan) -> Option<Phase> {
     let (ub, ua) = (is_uav_layout(b.layout_before), is_uav_layout(b.layout_after));
+    if !ub && !ua {
+        return None;
+    }
     let d = TextureBarrier { resource: t.depth, ..*b };
+    // (plane's twin, its range, plane) for each plane the barrier names that has a twin
     let mut scratch = Vec::new();
-    let twin = (!t.twin.is_null()).then(|| twin_range(&b.range, t, true, &mut scratch)).flatten();
-    let tb = |range: [u32; 6], sb, sa, ab, aa, lb, la| TextureBarrier {
-        sync_before: sb,
-        sync_after: sa,
-        access_before: ab,
-        access_after: aa,
-        layout_before: lb,
-        layout_after: la,
-        resource: t.twin,
-        range,
-        flags: 0,
-    };
+    let twins: Vec<(Raw, [u32; 6], u32)> = (0..t.planes.clamp(1, 2)).filter_map(|p| twin_range(&b.range, t, p, true, &mut scratch).map(|r| (t.twins[p as usize], r, p))).collect();
+    #[allow(clippy::too_many_arguments)]
+    fn tb(resource: Raw, range: [u32; 6], sb: i32, sa: i32, ab: i32, aa: i32, lb: i32, la: i32) -> TextureBarrier {
+        TextureBarrier { sync_before: sb, sync_after: sa, access_before: ab, access_after: aa, layout_before: lb, layout_after: la, resource, range, flags: 0 }
+    }
     match (ub, ua) {
-        (false, false) => None,
         (true, true) => {
-            // ordering between UAV writers: the twin's alone (the depth stays parked)
-            if let Some(r) = twin {
-                let aa = if b.sync_after == SYNC_NONE { NO_ACCESS } else { A_UAV };
-                let ab = if b.sync_before == SYNC_NONE { NO_ACCESS } else { A_UAV };
-                out.pre.push(tb(r, b.sync_before, b.sync_after, ab, aa, UAV, UAV));
+            // ordering between UAV writers: the twins' alone (the depth stays parked)
+            let aa = if b.sync_after == SYNC_NONE { NO_ACCESS } else { A_UAV };
+            let ab = if b.sync_before == SYNC_NONE { NO_ACCESS } else { A_UAV };
+            for &(tw, r, _) in &twins {
+                out.pre.push(tb(tw, r, b.sync_before, b.sync_after, ab, aa, UAV, UAV));
             }
             Some(Phase::Within)
         }
         (false, true) => {
             // park the depth where the copy reads it
             out.pre.push(TextureBarrier { sync_after: SYNC_COPY, access_after: A_COPY_SOURCE, layout_after: COPY_SOURCE, flags: d.flags & !DISCARD, ..d });
-            let keep = b.layout_before != UNDEFINED && b.flags & DISCARD == 0 && !quiet;
-            if let (Some(r), true) = (twin, keep) {
-                twin_range(&b.range, t, true, &mut out.copies);
-                out.pre.push(tb(r, SYNC_ALL, SYNC_COPY, A_UAV, A_COPY_DEST, UAV, COPY_DEST));
+            if b.layout_before != UNDEFINED && b.flags & DISCARD == 0 && !quiet {
                 let (sa, aa) = if b.sync_after == SYNC_NONE { (SYNC_NONE, NO_ACCESS) } else { (b.sync_after, A_UAV) };
-                out.post.push(tb(r, SYNC_COPY, sa, A_COPY_DEST, aa, COPY_DEST, UAV));
+                for &(tw, r, p) in &twins {
+                    twin_range(&b.range, t, p, true, &mut out.copies);
+                    out.pre.push(tb(tw, r, SYNC_ALL, SYNC_COPY, A_UAV, A_COPY_DEST, UAV, COPY_DEST));
+                    out.post.push(tb(tw, r, SYNC_COPY, sa, A_COPY_DEST, aa, COPY_DEST, UAV));
+                }
             }
             Some(Phase::Enter)
         }
-        (true, false) => {
+        _ => {
             let keep = b.layout_after != UNDEFINED && b.flags & DISCARD == 0 && !quiet;
-            match (twin, keep) {
-                (Some(r), true) => {
-                    twin_range(&b.range, t, false, &mut out.copies);
-                    out.pre.push(tb(r, SYNC_ALL, SYNC_COPY, A_UAV, A_COPY_SOURCE, UAV, COPY_SOURCE));
-                    out.pre.push(TextureBarrier { sync_before: SYNC_COPY, sync_after: SYNC_COPY, access_before: A_COPY_SOURCE, access_after: A_COPY_DEST, layout_before: COPY_SOURCE, layout_after: COPY_DEST, flags: 0, ..d });
-                    out.post.push(TextureBarrier { sync_before: SYNC_COPY, access_before: A_COPY_DEST, layout_before: COPY_DEST, flags: 0, ..d });
+            if keep && !twins.is_empty() {
+                for &(tw, r, p) in &twins {
+                    twin_range(&b.range, t, p, false, &mut out.copies);
+                    out.pre.push(tb(tw, r, SYNC_ALL, SYNC_COPY, A_UAV, A_COPY_SOURCE, UAV, COPY_SOURCE));
                     // later work waits for the copy's read before writing the twin again
-                    out.post.push(tb(r, SYNC_COPY, SYNC_ALL, A_COPY_SOURCE, A_UAV, COPY_SOURCE, UAV));
+                    out.post.push(tb(tw, r, SYNC_COPY, SYNC_ALL, A_COPY_SOURCE, A_UAV, COPY_SOURCE, UAV));
                 }
+                out.pre.push(TextureBarrier { sync_before: SYNC_COPY, sync_after: SYNC_COPY, access_before: A_COPY_SOURCE, access_after: A_COPY_DEST, layout_before: COPY_SOURCE, layout_after: COPY_DEST, flags: 0, ..d });
+                out.post.push(TextureBarrier { sync_before: SYNC_COPY, access_before: A_COPY_DEST, layout_before: COPY_DEST, flags: 0, ..d });
+            } else {
                 // only a copy touched the parked depth (sync bits must suit the access: COPY alone)
-                _ => out.pre.push(TextureBarrier { sync_before: SYNC_COPY, access_before: A_COPY_SOURCE, layout_before: COPY_SOURCE, flags: d.flags & !DISCARD, ..d }),
+                out.pre.push(TextureBarrier { sync_before: SYNC_COPY, access_before: A_COPY_SOURCE, layout_before: COPY_SOURCE, flags: d.flags & !DISCARD, ..d });
             }
             Some(Phase::Exit)
         }
@@ -247,8 +255,10 @@ mod tests {
     const TWIN: Raw = 0x2000 as Raw;
     const ALL: [u32; 6] = [u32::MAX, 0, 0, 0, 0, 0];
 
+    const STENCIL: Raw = 0x3000 as Raw;
+
     fn twin(planes: u32) -> UavTwin {
-        UavTwin { depth: DEPTH, twin: TWIN, mips: 1, arrays: 3, planes }
+        UavTwin { depth: DEPTH, twins: [TWIN, std::ptr::null_mut()], mips: 1, arrays: 3, planes }
     }
 
     fn b(lb: i32, la: i32, sb: i32, sa: i32, ab: i32, aa: i32) -> TextureBarrier {
@@ -304,7 +314,7 @@ mod tests {
         let (t, d) = (p.pre[0], p.pre[1]);
         assert_eq!((t.resource, t.layout_before, t.layout_after, t.access_before), (TWIN, UAV, COPY_SOURCE, A_UAV));
         assert_eq!((d.resource, d.layout_before, d.layout_after, d.sync_before), (DEPTH, COPY_SOURCE, COPY_DEST, SYNC_COPY));
-        let (d, t) = (p.post[0], p.post[1]);
+        let (t, d) = (p.post[0], p.post[1]);
         assert_eq!((d.resource, d.layout_before, d.layout_after, d.sync_after, d.access_after), (DEPTH, COPY_DEST, DW, S_DS, A_DSW));
         assert_eq!((t.resource, t.layout_before, t.layout_after, t.sync_after), (TWIN, COPY_SOURCE, UAV, SYNC_ALL));
     }
@@ -336,7 +346,7 @@ mod tests {
 
     #[test]
     fn without_a_twin_the_uav_layout_is_only_parked() {
-        let none = UavTwin { twin: std::ptr::null_mut(), ..twin(2) };
+        let none = UavTwin { twins: [std::ptr::null_mut(); 2], ..twin(2) };
         let mut p = Plan::default();
         plan(&b(DW, UAV, S_DS, S_CS, A_DSW, A_UAV), &none, false, &mut p);
         plan(&b(UAV, UAV, S_CS, S_CS, A_UAV, A_UAV), &none, false, &mut p);
@@ -373,6 +383,32 @@ mod tests {
         plan(&r, &t, false, &mut p);
         assert_eq!(p.copies, vec![(DEPTH, 1, TWIN, 1), (DEPTH, 3, TWIN, 3)]);
         assert_eq!(p.pre[0].range, [1, 1, 0, 2, 0, 1]);
+    }
+
+    #[test]
+    fn a_stencil_twin_takes_plane_one() {
+        // D32S8 with both twins, 2 mips x 2 slices: plane 1 of the depth is subresources 4..8
+        let t = UavTwin { mips: 2, arrays: 2, twins: [TWIN, STENCIL], ..twin(2) };
+        let mut p = Plan::default();
+        plan(&b(UAV, DW, S_CS, S_DS, A_UAV, A_DSW), &t, false, &mut p);
+        let stencil: Vec<_> = p.copies.iter().filter(|c| c.2 == STENCIL).copied().collect();
+        assert_eq!(stencil, vec![(DEPTH, 4, STENCIL, 0), (DEPTH, 5, STENCIL, 1), (DEPTH, 6, STENCIL, 2), (DEPTH, 7, STENCIL, 3)]);
+        assert_eq!(p.copies.len(), 8, "both planes");
+        let twins: Vec<_> = p.pre.iter().map(|x| x.resource).collect();
+        assert_eq!(twins, vec![TWIN, STENCIL, DEPTH]);
+        // a stencil-only barrier: the stencil twin alone, its range one plane of the twin
+        let mut s = b(DW, UAV, S_DS, S_CS, A_DSW, A_UAV);
+        s.range = [0, 2, 0, 2, 1, 1];
+        let mut p = Plan::default();
+        plan(&s, &t, false, &mut p);
+        assert_eq!(p.copies, vec![(STENCIL, 0, DEPTH, 4), (STENCIL, 1, DEPTH, 5), (STENCIL, 2, DEPTH, 6), (STENCIL, 3, DEPTH, 7)]);
+        assert_eq!(p.pre.iter().map(|x| (x.resource, x.range)).collect::<Vec<_>>(), vec![(DEPTH, [0, 2, 0, 2, 1, 1]), (STENCIL, [0, 2, 0, 2, 0, 1])]);
+        // one stencil subresource by index (mip 1, slice 1, plane 1 = 7): twin subresource 3
+        let mut one = b(UAV, UAV, S_CS, S_CS, A_UAV, A_UAV);
+        one.range = [7, 0, 0, 0, 0, 0];
+        let mut p = Plan::default();
+        plan(&one, &t, false, &mut p);
+        assert_eq!(p.pre.iter().map(|x| (x.resource, x.range[0])).collect::<Vec<_>>(), vec![(STENCIL, 3)]);
     }
 
     #[test]
