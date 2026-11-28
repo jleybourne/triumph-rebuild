@@ -6,7 +6,7 @@ built around the right memory model from the first line, aiming at 30 frames a s
 <p align="center">
   <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-71%25-yellow?style=for-the-badge"></a>
   <a href="progress.md"><img alt="frame" src="https://img.shields.io/badge/frame%202-presented-blue?style=for-the-badge"></a>
-  <a href="tasks.md"><img alt="shaders" src="https://img.shields.io/badge/shaders-5%2C195%20%2F%2025%2C694-yellow?style=for-the-badge"></a>
+  <a href="tasks.md"><img alt="shaders" src="https://img.shields.io/badge/shaders-5%2C994%20%2F%2025%2C694-yellow?style=for-the-badge"></a>
   <a href="plan.md"><img alt="target" src="https://img.shields.io/badge/target-30%20fps-blue?style=for-the-badge"></a>
 </p>
 
@@ -56,7 +56,7 @@ Measured on one machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB RAM, PCIe 3.0, Win
 | **CPU → GPU upload** | ✅ the ring: submit thread 32 µs a frame; 34 MB lands in 19 ms on workers, verified ([Build 2](runs/build2-ring.md)) | inside a frame, overlapped |
 | **List translation** | ✅ 0.43 µs a draw with the driver, 1.9 ms a frame ([Build 0 b](runs/build0b-lists.md)) | ≤ 7.4 µs a draw |
 | **Descriptors** | ✅ 12,027 a frame from a dirty list: 2.0 ms | no scan |
-| **Shaders** | 12,981 / 25,694 compile, 5,195 checked bit-exact on WARP ([exec](runs/build4-exec.md)) | 25,694, wave32, 0 refused |
+| **Shaders** | 12,981 / 25,694 compile, 5,994 checked bit-exact on WARP ([exec](runs/build4-exec.md)) | 25,694, wave32, 0 refused |
 | **Launcher** | ✅ library, recommended settings for the PC, profiles, mods, save editor, storage with export/import, in-game menu ([features](FEATURES.md)) | launcher, mods, profiles, in-game menu |
 | **Upscaler** | ✅ DLSS runs standalone through Streamline on a synthetic scene; FSR next; wiring to the title in Build 7 | DLSS on NVIDIA, FSR on AMD |
 | **Tests** | 637 green, 14 ignored (`runtime` 68, `launcher` 60, `sir` 58, `pipelines` 54, `gdk` 49, `shader` 42, `d3d12x` 30, `uma` 28, `xlist` 28, `overlay` 27, `config` 23, `dstorage` 22, `vfs` 19, `audio` 18, `input` 18, `loader` 18, `xg` 15, `cardlock` 11, `upscale` 11, `winfiles` 11, `devmenu` 10, `ffx` 9, `rebuild` 8) | |

@@ -107,7 +107,7 @@ decision 4.
 | todo | wave64 → wave32 lowering for every vendor; reductions that cannot reconverge are named | the 7 wave-64 pipelines build; divergence tests pass |
 | todo | DXIL emit, validated by the platform validator | N programs compile, 0 validator errors |
 | todo | root signatures always set `SAMPLER_HEAP_DIRECTLY_INDEXED` (fork trap: 311 refusals) | 0 refusals from root signatures |
-| todo | oracle diff against the fork's translation, per program | 25,694 / 25,694 match or differ with a named reason |
+| doing | oracle diff against the fork's translation, per program: **5,994 / 25,694 bit-exact on WARP** (cs 369 · ps 4,633 · vs 992); of the 9,128 agnostic, 948 differ, 631 vacuous, 217 crash, 1,331 untested ([exec](runs/build4-exec.md)); bindless programs now run through a recording pass | 25,694 / 25,694 match or differ with a named reason |
 | todo | pipelines built into a hash-keyed library at start (fork: 8,169 pipelines) | 0 runtime compiles; library build time on the frame line |
 
 **Translation (decided 2026-11-27; `docs/design/shader-ir.md` "Translation from GFX10"):**

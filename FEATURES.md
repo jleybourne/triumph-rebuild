@@ -44,7 +44,7 @@
 | ✅ | **Textures written by the CPU** | video frames, font glyphs and UI gradients reach the GPU |
 | ✅ | **Bink 2 video** | the intro video plays |
 | ✅ | **Tiled textures written by the CPU** | converted from the console's tile layouts on the GPU; streamed world textures and the loading-screen artwork draw |
-| 🔄 | **Shaders** | RDNA2 shaders translated to DXIL: 12,981 of 25,694 compile, 5,195 checked bit-exact |
+| 🔄 | **Shaders** | RDNA2 shaders translated to DXIL: 12,981 of 25,694 compile, 5,994 checked bit-exact |
 | 🔄 | **Shader library built on your PC** | built once from your own copy of the game; nothing translated is shipped |
 | ⏳ | **Upscaling** | DLSS on NVIDIA, FSR on everything else; both run standalone, wiring to the title is next |
 

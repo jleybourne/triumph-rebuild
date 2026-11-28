@@ -1,6 +1,6 @@
 # Build 4 — execution against the oracle (lane `shaderexec`)
 
-`execcheck` · 2026-11-28 · **WARP** (the lead's rule after three driver resets on 2026-11-27: translated programs
+`execcheck` · 2026-11-28, re-run 2026-11-29 on the current translator (post-remap, after #37/#65/#70) · **WARP** (the lead's rule after three driver resets on 2026-11-27: translated programs
 run on the software rasterizer; the card only for a straight-line smoke set under `agents\CARD`). DXC 1.8.2502.11.
 Code: `apps/rebuild/src/bin/execcheck/`. Per program: [`build4-exec.csv`](build4-exec.csv) (hash, stage, v0/v1,
 verdict, reason).
@@ -13,32 +13,55 @@ REBUILD_SHADERS=D:\victory-data\shaders.rpf cargo run --release --bin execcheck 
 ## The counted number
 
 ```
-shaders counted (bit-exact on every input set)      5,195 / 25,694     compute 252 · pixel 3,980 · vertex 963
-  + float within a few ulp, bit-exact under -Gis       +28 → 5,223      named: DXC's float contraction or reassociation
-v0 set (straight-line agnostic, 2,881)              2,762 bit-exact    compute 110 / 132 · pixel 1,733 / 1,798 · vertex 919 / 951
+shaders counted (bit-exact on every input set)      5,994 / 25,694     compute 369 · pixel 4,633 · vertex 992
+                                        was         5,195              compute 252 · pixel 3,980 · vertex 963
+v0 set (straight-line agnostic, 2,881)              2,815 bit-exact    compute 121 / 132 · pixel 1,763 / 1,798 · vertex 931 / 951
+untested (of the 9,128 agnostic)                    1,331              was 2,837
 ```
 
 A program **counts** when every output word of ours equals the oracle's on all three input sets and at least one set
-wrote something. 28 more differ only within 1-4096 ulp and become bit-exact when ours is compiled with `-Gis` (IEEE
-strictness): the task's "ULP-tolerant with a named reason". Whether to compile with `-Gis` is a performance decision
-for the lead (`rebuild_pipelines::translate::DXC_ARGS`); the counted number above does not assume it.
+wrote something. The `-Gis` variant (IEEE strictness: 28 more programs bit-exact in the first pass) was not re-run;
+the counted number never assumes it. Whether to compile with `-Gis` is a performance decision for the lead
+(`rebuild_pipelines::translate::DXC_ARGS`).
 
 ## Per stage
 
-| stage | set | programs | match (bit-exact) | match (named ulp) | differ | vacuous | error | crash | untested |
-|:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|
-| cs | v0 | 132 | 110 | 0 | 2 | 5 | 0 | 0 | 15 |
-| cs | v1 | 553 | 142 | 3 | 23 | 17 | 1 | 0 | 367 |
-| cs | all | 685 | 252 | 3 | 25 | 22 | 1 | 0 | 382 |
-| ps | v0 | 1798 | 1733 | 6 | 21 | 31 | 0 | 0 | 7 |
-| ps | v1 | 4991 | 2247 | 16 | 235 | 723 | 0 | 6 | 1764 |
-| ps | all | 6789 | 3980 | 22 | 256 | 754 | 0 | 6 | 1771 |
-| vs | v0 | 951 | 919 | 3 | 4 | 0 | 0 | 0 | 25 |
-| vs | v1 | 703 | 44 | 0 | 0 | 0 | 0 | 0 | 659 |
-| vs | all | 1654 | 963 | 3 | 4 | 0 | 0 | 0 | 684 |
+| stage | set | programs | match (bit-exact) | differ | vacuous | error | crash | untested |
+|:--|:--|--:|--:|--:|--:|--:|--:|--:|
+| cs | v0 | 132 | 121 | 3 | 6 | 0 | 0 | 2 |
+| cs | v1 | 553 | 248 | 79 | 34 | 7 | 6 | 179 |
+| cs | all | 685 | 369 | 82 | 40 | 7 | 6 | 181 |
+| ps | v0 | 1798 | 1763 | 30 | 1 | 0 | 0 | 4 |
+| ps | v1 | 4991 | 2870 | 824 | 590 | 0 | 211 | 496 |
+| ps | all | 6789 | 4633 | 854 | 591 | 0 | 211 | 500 |
+| vs | v0 | 951 | 931 | 9 | 0 | 0 | 0 | 11 |
+| vs | v1 | 703 | 61 | 3 | 0 | 0 | 0 | 639 |
+| vs | all | 1654 | 992 | 12 | 0 | 0 | 0 | 650 |
+| **all** | | **9128** | **5994** | **948** | **631** | **7** | **217** | **1331** |
 
 `programs` is every agnostic program of the stage (9,128); `v0` one basic block, `v1` several. `vacuous`: nothing to
 compare (the program writes nothing, or nothing on these inputs: every pixel discarded, every write out of range).
+`differ` includes the float-within-ulp classes (named in the CSV).
+
+## The second pass (2026-11-29): testing what the first could not
+
+One pass, 3 shards side by side (`--shard k/3 --stage all`, one DXC each), WARP, batched workers (`--batch 150`, a
+set that never finishes skipped after 10 s). 9,128 rows, against the first pass:
+
+| first pass said | programs | now match | differ | vacuous | crash | untested |
+|:--|--:|--:|--:|--:|--:|--:|
+| untested: dynamic descriptor index over mixed views (bindless) | 953 | 14 | 503 | 20 | 102 | 314 |
+| untested: the oracle packs its pixel inputs differently | 125 | 8 | 0 | 112 | 0 | 5 |
+| untested: everything else (mostly not translated then) | 1,759 | 479 | 132 | 38 | 92 | 1,012 |
+
+New matches 821 (479 newly translated by `shadercov` #37/#65, 295 that were vacuous and now compare coverage or
+write, 21 that differed: `v_cvt_f16_f32` round-to-nearest-even and code-data `s_load`, both in this branch), 22
+regressions (match → 7 vacuous, 6 words differ, 5 racing writes, 3 crash, 1 within 16 ulp), net **+799**.
+
+What changed in the harness: the recording pass (`record.rs`) for bindless programs; the heap covers every index
+`sir_vi` can name; the descriptor remap's page table in the shadow buffer; raw buffers read through a CBV range given
+the oracle as CBVs; coverage compared for pixel programs with no outputs; the oracle's feeding vertex shader built
+from its own ISG1 rows and PSV0 interpolation modes, padded so DXC keeps its rows.
 
 ## How a program runs
 
@@ -76,41 +99,38 @@ Every `sirtest` and random-program test is unchanged (the IR, emitter and interp
 
 | stage | verdict | programs | reason | examples |
 |:--|:--|--:|:--|:--|
-| ps | untested | 952 | dynamic descriptor index over mixed views | 007bb29b393d08c5 00d279b806d20217 01b5ba8f45e5157b |
-| ps · vs · cs | untested | 692 · 684 · 350 | not translated (opcode coverage: lane `shadercov`) | 006267451f43e7de 000113cc1e1aa543 00167d58cc5a78d7 |
-| ps | vacuous | 519 | no output word written | 0040e42215faaf10 007e40d70587a1b1 00a3fd9db2df200f |
-| ps | vacuous | 235 | no outputs to compare (the program writes nothing) | 0156324081446274 016cca23d08da25a 01c04398d190c31b |
-| ps | differ | 177 | words differ | 00df3177d86d2f14 01335908a16cddb3 035539af40c67b97 |
-| ps | untested | 125 | the oracle packs its pixel inputs differently (the feeding vertex shader links to ours only) | 000cf64578e85220 089eda9f1ae026a8 0da17dda7586c5ca |
-| ps | differ | 70 | float within 4096 ulp | 0360f43d8f564b04 03d540b63d10f581 045ccb32b906db0d |
-| cs | untested | 21 | the oracle needs wave size 64 (no adapter here runs it) | 196bf6114ff3a131 1e39de85388c6540 34d88edf583f3778 |
-| cs | vacuous | 17 + 5 | no output word written · the program writes nothing | 08055d95e9ee79c0 342bb35d9dcadea5 |
-| cs | differ | 13 | words differ | 0c35931f998617b7 1c149749f2e45123 269d0f4c25ac5b3a |
-| cs | differ | 10 | float within 16 ulp | 0b0fd196f77470a7 17fba369586b4b79 373b741488154ac3 |
-| cs · ps | untested | 6 · 2 | the oracle binds root views | 1a77e876755eff12 01250e3bd6a6fb99 |
-| ps | crash | 6 | no input set completes (loops or device loss) | 488b335d556ef168 8b80bb84637f9118 c9b1aa037ac50d98 |
-| vs | differ | 4 | words differ | 1f5b53605b7f844d 50dd41e4e8574def 6823b7116ea6c249 |
-| cs · ps | differ | 2 · 3 | racing writes (our own runs differ) | 17218ee0955e2a1f 36c0d9dac5185d9f |
-| ps | differ | 3 | words differ, bit-exact under -Gis (DXC float freedom) | 4e2e3dc7c62a4a1b 552c1219de163b28 63e37b1200bff988 |
-| cs | untested | 4 | one descriptor read as two kinds (sampled and stored, raw and CBV) | 04be1ad677ff1627 3f2cbdc7d80ca3da |
+| ps | differ | 800 | words differ (532 of all differing rows are recorded bindless programs) | 007bb29b393d08c5 0151212fe3c4e847 022c5f45e13ed7b6 |
+| ps | vacuous | 587 | no output word written | 000cf64578e85220 007e40d70587a1b1 00a3fd9db2df200f |
+| vs | untested | 444 | the oracle binds root views | 000113cc1e1aa543 00752e3accbe0c99 00803876d05875ef |
+| ps | untested | 429 + 8 | one descriptor read as Tex(1) and Tex(5) (recorded): one slot sampled as 2D and as 2D array | 00d279b806d20217 00d2bf895b978cc9 016c1c4d4dd2de8a |
+| vs · cs · ps | untested | 206 · 67 · 56 | not translated (opcode coverage: lane `shadercov`) | 01296256bd7c30a7 00167d58cc5a78d7 006267451f43e7de |
+| ps · cs | crash | 211 · 6 | no input set completes (loops or device loss) | 01510150f274bf09 0203930d6dc7e88b 26815466213f68f9 |
+| cs | untested | 62 | the oracle binds root views | 00f607218c949e38 010a50ce68d02c16 0743686596b14ec9 |
+| cs | differ | 49 | words differ | 088735d999e0c9f4 0c35931f998617b7 17f11dd08620363c |
+| cs | untested | 47 | the oracle needs wave size 64 (no adapter here runs it) | 01d0c7a8cab915bd 0709e8356abd9082 0df635ace0117319 |
+| cs | vacuous | 31 + 9 | no output word written · the program writes nothing | 08055d95e9ee79c0 214cae4f6e1ef745 |
+| ps · cs · vs | differ | 39 · 21 · 4 | float within 1 / 16 / 4096 ulp | 0a474d0c7d8821be 0b0fd196f77470a7 d1732ad58b731d00 |
+| ps · cs | differ | 15 · 7 | racing writes (our own runs differ) | 36c0d9dac5185d9f 17218ee0955e2a1f |
+| vs | differ | 8 | words differ | 05cd62db489af324 0d4b64b415259785 1f5b53605b7f844d |
+| cs | error | 7 | the oracle's pipeline refused | 128424b3011dae43 1e99b7e849e2882f 3d070f0d7e05150f |
+| ps | untested | 5 | the oracle's pixel pipeline refused (E_INVALIDARG, signatures match ours) | 1a3c05a4c0bec967 57f90253f26a29c7 |
 
 What each needs:
 
-- **Dynamic indices over mixed views (952 pixel)**: bindless material programs index the heap from data and read
-  several view kinds (2D and 2D-array textures, raw buffers, CBVs). The harness cannot place them without knowing
-  each index. Next: a recording pass (our program instrumented to write each heap index it computes), then views
-  placed at exactly those slots.
-- **Opcode coverage (1,726)**: lane `shadercov`.
-- **Vacuous pixel programs (519)**: alpha tests that discard every pixel on these inputs, and similar. Next: an input
-  set built to pass the test (textures near 1).
-- **Words differ (177 pixel, 13 compute, 4 vertex)**: not yet read one by one. Families repeat (the same first
-  differing word across hashes), so a few reads should close many.
-- **The oracle packs its pixel inputs differently (125, all v1)**: an interface difference the S6 check has not
-  covered for v1 (it checked v0). Worth an `oraclediff` pass over the v1 set: whether the title's vertex shaders link
-  to ours is the real question.
-- **Wave size 64 (21 compute oracles)**: the oracle declares `[WaveSize(64)]`; neither WARP nor the RTX runs it.
-- **Implicit-derivative sampling in compute**: the oracle samples level 0 (an approximation); ours takes host-quad
-  derivatives. Named in the harness; after the fixes above no counted program falls in it.
+- **Recorded bindless programs that differ (532)**: most match on set 0 (small integers) and differ on set 1
+  (floats in [-2, 2)): 333 differ on set 1 only, 126 on sets 1 and 2, 61 on all three. An index computed from float
+  data names slots the recording gave a dummy; the oracle, with its own descriptor arithmetic, reads another slot.
+  First read: whether the two sides agree on the index (record the oracle's too), else input sets whose words used
+  as indices land in the filled region.
+- **One slot read as 2D and 2D array (437 pixel)**: a recorded slot sampled both ways; needs the harness to serve one slot
+  to both declarations (two views of the same texture are not possible in one slot; a per-side plan or a copy).
+- **The oracle binds root views (444 vertex, 62 compute)**: the harness has no root-descriptor path for the oracle's
+  root signature yet.
+- **Crash (217)**: 102 are bindless programs whose recorded indices loop or leave every view; 92 are newly
+  translated. Each named set is in `hung.k.txt` (965 sets across the three shards).
+- **Vacuous pixel programs (587)**: alpha tests that discard every pixel on these inputs. Next: an input set built
+  to pass the test (textures near 1).
+- **Wave size 64 (47 compute oracles)**: the oracle declares `[WaveSize(64)]`; neither WARP nor the RTX runs it.
 
 ## On the card
 

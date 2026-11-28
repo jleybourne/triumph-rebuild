@@ -4,10 +4,9 @@ Status: **built and run** (2026-11-28). Results: [`runs/build4-exec.md`](../runs
 [`runs/build4-exec.csv`](../runs/build4-exec.csv).
 
 ```
-measured   shaders counted (bit-exact, every input set, WARP)   5,195 / 25,694   cs 252 · ps 3,980 · vs 963
-           + within a few ulp, bit-exact under -Gis (named)       +28 → 5,223
-           v0 set                                                 2,762 / 2,881    cs 110 · ps 1,733 · vs 919
-           tested: every agnostic program (9,128); 1,726 are not translated yet (opcode coverage)
+measured   shaders counted (bit-exact, every input set, WARP)   5,994 / 25,694   cs 369 · ps 4,633 · vs 992   (2026-11-29; was 5,195)
+           v0 set                                                 2,815 / 2,881    cs 121 · ps 1,763 · vs 931
+           tested: every agnostic program (9,128); untested 1,331 (was 2,837); 329 not translated yet
 ```
 
 ## Rules from the lead (2026-11-27, 21:23 and later)
