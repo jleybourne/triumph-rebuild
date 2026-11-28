@@ -114,6 +114,29 @@ pub const CONSOLE_VIEWS: u32 = 750_000;
 /// Null views after [`CONSOLE_VIEWS`]: see [`NullKind::slot`].
 pub const NULL_BANK: u32 = 24;
 
+/// Console view indices reach the host's `[0, CONSOLE_VIEWS)` through a page map (`rebuild_xlist::console::pages`):
+/// pages of `1 << VIEW_PAGE_SHIFT` descriptors, a console page given a host page when first used (most at their own
+/// index). The runtime maps the indices it sees (records it mirrors, descriptor tables it writes into user data:
+/// those are host offsets already); an index a translated program computes from the title's own data (from a
+/// dynamic-resource heap base) is mapped by the program: [`page_index`].
+pub const VIEW_PAGE_SHIFT: u32 = 8;
+/// Entries of the page table translated programs read: console indices up to 2^21 (the title's heap has 1,245,184);
+/// entries past the console heap, and an index past 2^21, read the null bank.
+pub const PAGE_TABLE_PAGES: u32 = (1 << 21) >> VIEW_PAGE_SHIFT;
+/// Where in the shadow buffer (`sir_shadow`) the page table is: after the shadow entries `0..=CONSOLE_VIEWS`. Per
+/// console page, a u32: the host index of its first descriptor (`CONSOLE_VIEWS` when it has no host page).
+pub const PAGE_TABLE_BYTE: u32 = (CONSOLE_VIEWS + 1) * 16;
+
+/// The host index of console view index `index` (a u32 expression), through the page table: one load from the
+/// shadow buffer.
+pub fn page_index(index: &str) -> String {
+    format!(
+        "sir_shadow.Load({PAGE_TABLE_BYTE}u + (min(({index}) >> {VIEW_PAGE_SHIFT}u, {}u) << 2u)) + (({index}) & {}u)",
+        PAGE_TABLE_PAGES - 1,
+        (1u32 << VIEW_PAGE_SHIFT) - 1
+    )
+}
+
 /// The view type a null-bank slot holds: `CONSOLE_VIEWS + slot()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NullKind {

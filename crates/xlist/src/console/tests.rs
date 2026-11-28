@@ -69,7 +69,7 @@ impl ListHost for TestHost {
         (console != BAD).then_some((console as usize ^ 0x1_0000) as Raw)
     }
     fn descriptor_heap(&self, console: Raw) -> Option<HeapBinding> {
-        (console == HEAP).then_some(HeapBinding { heap: 0x4EA9 as Raw, console_base: 0x1000_0000, console_bytes: 1 << 20, console_stride: 32, host_base: 0x9_0000_0000, host_stride: 64, shadow_va: 0 })
+        (console == HEAP).then_some(HeapBinding { heap: 0x4EA9 as Raw, console_base: 0x1000_0000, console_bytes: 1 << 20, console_stride: 32, host_base: 0x9_0000_0000, host_stride: 64, shadow_va: 0, pages: None })
     }
     fn cpu_descriptor(&self, console: usize) -> Option<usize> {
         (console != 0xBAD).then_some(console + 0x100)
@@ -678,8 +678,8 @@ impl ListHost for SeamHost {
     }
     fn descriptor_heap(&self, console: Raw) -> Option<HeapBinding> {
         match console {
-            HEAP => Some(HeapBinding { heap: 0x4EA9 as Raw, console_base: SEAM_BASE, console_bytes: 1 << 20, console_stride: 32, host_base: 0x9_0000_0000, host_stride: 64, shadow_va: SHADOW }),
-            SEAM_SAMPLERS => Some(HeapBinding { heap: 0x4EAA as Raw, console_base: SAMPLER_BASE, console_bytes: 1 << 16, console_stride: 16, host_base: 0x9_1000_0000, host_stride: 32, shadow_va: 0 }),
+            HEAP => Some(HeapBinding { heap: 0x4EA9 as Raw, console_base: SEAM_BASE, console_bytes: 1 << 20, console_stride: 32, host_base: 0x9_0000_0000, host_stride: 64, shadow_va: SHADOW, pages: None }),
+            SEAM_SAMPLERS => Some(HeapBinding { heap: 0x4EAA as Raw, console_base: SAMPLER_BASE, console_bytes: 1 << 16, console_stride: 16, host_base: 0x9_1000_0000, host_stride: 32, shadow_va: 0, pages: None }),
             _ => None,
         }
     }
@@ -878,6 +878,7 @@ impl BenchHost {
                 host_base: setup.map_or(0x9_0000_0000, |s| s.heap_gpu_start()),
                 host_stride: setup.map_or(32, |s| s.view_increment()),
                 shadow_va: 0,
+                pages: None,
             },
             memory: MemoryRange {
                 console: lay.memory_base,

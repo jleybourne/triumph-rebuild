@@ -535,7 +535,15 @@ impl ListState {
                 match heap {
                     Some(h) => {
                         self.note_span(h.console_base, a.console, u64::from(bytes.max(h.console_stride)));
-                        tr!("user data side {k} table slot {slot}: {:#x} in heap {:#x}: offset {:#x} (index {})", a.console, h.console_base, a.console - h.console_base, (a.console - h.console_base) / u64::from(h.console_stride.max(1)));
+                        let host = h.table_offset(a.console - h.console_base, bytes);
+                        tr!(
+                            "user data side {k} table slot {slot}: {:#x} in heap {:#x}: offset {:#x} (index {}; host index {})",
+                            a.console,
+                            h.console_base,
+                            a.console - h.console_base,
+                            (a.console - h.console_base) / u64::from(h.console_stride.max(1)),
+                            host / h.console_stride.max(1)
+                        );
                         if trace::on() && h.console_stride == 32 {
                             // the table's first descriptors as the title's memory holds them now (records: 'XD' tag)
                             // SAFETY: inside the heap's bytes (the lookup above), which are the title's memory or ours
@@ -549,7 +557,7 @@ impl ListState {
                                 tr!("  buffer {va:#x} words {:08x?}", b);
                             }
                         }
-                        (a.console - h.console_base) as u32
+                        host
                     }
                     None => {
                         tr!("user data side {k} table slot {slot}: {:#x} (kind {}) in no bound heap: 0", a.console, a.kind);

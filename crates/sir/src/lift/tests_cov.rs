@@ -250,6 +250,29 @@ fn a_descriptor_word_3_read_at_run_time_picks_the_range_check() {
     compile(&l, "cov_window_oob");
 }
 
+/// A descriptor from a table is indexed by the table's offset (a host one: the runtime maps it when it writes the
+/// user data); one from a dynamic-resource heap base by an index from the title's own data, mapped through the
+/// page table in the shadow buffer.
+#[test]
+fn a_dynamic_heap_index_goes_through_the_page_table_and_a_table_offset_does_not() {
+    use crate::lift::{PAGE_TABLE_BYTE, PAGE_TABLE_PAGES, VIEW_PAGE_SHIFT};
+    let (layout, used) = table();
+    let l = lifted(&[smem("s_load_dwordx4", 8, 0, 64)], &layout, &used);
+    assert!(l.body.contains("s8 = (uint)((int)s0 + 64) / 32u;"), "{}", l.body);
+    assert!(!l.body.contains(&format!("{PAGE_TABLE_BYTE}u")));
+    let heap = vec![RootParam { root: RootType::ResourceHeap, table_offset_dwords: 0, sgprs: 1, base_register: 0, user_data: 0, slot: 0 }];
+    let l = lifted(&[smem("s_load_dwordx4", 8, 0, 64)], &heap, &[]);
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let want = format!(
+        "s8 = sir_shadow.Load({PAGE_TABLE_BYTE}u + (min((((uint)((int)s0 + 64) / 32u)) >> {VIEW_PAGE_SHIFT}u, {}u) << 2u)) + ((((uint)((int)s0 + 64) / 32u)) & {}u);",
+        PAGE_TABLE_PAGES - 1,
+        (1 << VIEW_PAGE_SHIFT) - 1
+    );
+    assert!(l.body.contains(&want), "{}", l.body);
+    assert!(l.uses_shadow);
+    compile(&l, "cov_page_table");
+}
+
 #[test]
 fn a_buffer_descriptors_stride_and_records_come_from_the_shadow_table() {
     let (layout, used) = table();

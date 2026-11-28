@@ -38,6 +38,7 @@
 mod alloc;
 pub mod indirect;
 mod list;
+pub mod pages;
 pub mod rect;
 mod slots;
 pub mod stamps;
@@ -285,16 +286,53 @@ pub struct HeapBinding {
     pub console_stride: u32,
     pub host_base: u64,
     pub host_stride: u32,
-    /// GPU address of the heap's descriptor shadow table (16 bytes per console index, bound at
+    /// GPU address of the heap's descriptor shadow table (16 bytes per host index, bound at
     /// `t0, space101` for translated programs); 0 for a heap without one (samplers).
     pub shadow_va: u64,
+    /// Console indices to host ones ([`pages`]); `None`: index for index.
+    pub pages: Option<&'static pages::PageMap>,
 }
 
 impl HeapBinding {
+    /// The host index of console index `i` (a page with no host page yet is given one).
+    #[inline]
+    fn host_index(&self, i: u32) -> Option<u32> {
+        match self.pages {
+            Some(p) => p.host_or_map(i),
+            None => Some(i),
+        }
+    }
+
     #[inline]
     fn map(&self, handle: u64) -> Option<u64> {
         let off = handle.wrapping_sub(self.console_base);
-        (off < self.console_bytes).then(|| self.host_base + (off >> self.console_stride.trailing_zeros()) * self.host_stride as u64)
+        if off >= self.console_bytes {
+            return None;
+        }
+        let i = self.host_index((off >> self.console_stride.trailing_zeros()) as u32)?;
+        Some(self.host_base + u64::from(i) * u64::from(self.host_stride))
+    }
+
+    /// The user-data dword of a descriptor table at byte `off` of the console heap, `bytes` long: the byte offset
+    /// of its first descriptor in the host heap, in console sizes (translated shaders add console byte offsets to
+    /// it and divide by the console stride). A table no host page can hold reads the null bank.
+    #[inline]
+    pub fn table_offset(&self, off: u64, bytes: u32) -> u32 {
+        let sh = self.console_stride.trailing_zeros();
+        match self.pages {
+            None => off as u32,
+            Some(p) => {
+                let i = (off >> sh) as u32;
+                let n = bytes.div_ceil(self.console_stride.max(1));
+                (p.table(i, n) << sh) | (off as u32 & (self.console_stride - 1))
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for pages::PageMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PageMap({} of {} pages of {})", self.taken(), self.host_pages, 1u32 << self.shift)
     }
 }
 

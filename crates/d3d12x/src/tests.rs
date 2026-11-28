@@ -724,7 +724,9 @@ fn console_indices_and_alternates_never_share_host_slots() {
                     r.create_uav(b, std::ptr::null_mut(), &uav_buffer(0, 16, 0, true, DXGI_FORMAT_R32_TYPELESS), start + 32 * u64::from(i));
                 }
             }
-            let a = st.shadow.as_ref().unwrap().read(i)[2];
+            let host = st.pages.unwrap().host(i).unwrap();
+            assert!(host < CONSOLE_VIEWS, "console {i} at host {host}");
+            let a = st.shadow.as_ref().unwrap().read(host)[2];
             assert!(ok(a), "count {count}, index {i}: alternate {a} is where a console index or a window can reach");
         }
         release(h);
@@ -733,7 +735,8 @@ fn console_indices_and_alternates_never_share_host_slots() {
 }
 
 #[test]
-fn the_titles_heap_of_1245184_views_keeps_indices_and_counts_what_does_not_fit() {
+fn the_titles_heap_of_1245184_views_keeps_indices_and_pages_the_rest_in() {
+    use rebuild_sir::lift::{PAGE_TABLE_BYTE, VIEW_PAGE_SHIFT};
     let rig = rig_with(Limits::TIER2, 64 << 20);
     let r = &rig.r;
     let p = r.view_index_limit();
@@ -741,10 +744,12 @@ fn the_titles_heap_of_1245184_views_keeps_indices_and_counts_what_does_not_fit()
     let b = buffer(r, KIB_64);
     let (h, start) = heap(&rig, 0, 1_245_184, true, true);
     let st = r.heap_state(h).unwrap();
-    assert_eq!((st.mirrored, st.host.count, st.null_index), (750_000, 1_000_000, 750_000));
+    let page = 1u32 << VIEW_PAGE_SHIFT;
+    assert_eq!((st.mirrored, st.host.count, st.null_index), (750_000 / page * page, 1_000_000, 750_000));
     let binding = r.binding(h).unwrap();
-    assert_eq!(binding.console_bytes, 750_000 * 32, "the list translator maps only mirrored indices");
+    assert_eq!(binding.console_bytes, 1_245_184 * 32, "every console index reaches the host heap");
     assert_eq!(binding.console_stride, 32);
+    let pages = st.pages.unwrap();
     // a typed SRV has an alternate (a CBV has none: it is only its raw SRV)
     let typed = |i: u64| unsafe { r.create_srv(b, &srv_buffer(0, 16, 0, false, DXGI_FORMAT_R32G32B32A32_FLOAT), start + 32 * i) };
     typed(0);
@@ -753,13 +758,29 @@ fn the_titles_heap_of_1245184_views_keeps_indices_and_counts_what_does_not_fit()
     let a1 = st.shadow.as_ref().unwrap().read(720_000)[2];
     assert!(a0 > p && a1 > p && a0 != a1, "pooled alternates");
     assert!(rig.fake.at(st.host.cpu_at(720_000)).unwrap().is_raw_srv(), "index kept: console 720,000 is host 720,000");
-    // an index past the mirror: recorded in the title's memory, counted and noted, never mirrored
+    // an index past the host range: its page gets a free host page, and the record is mirrored there
     typed(800_000);
     assert!(record_at(start + 32 * 800_000).is_some());
-    assert_eq!(st.stats.beyond.load(Ordering::Relaxed), 1);
+    let h8 = pages.host(800_000).unwrap();
+    assert!(h8 < st.mirrored && h8 % page == 800_000 % page, "host {h8}");
+    assert!(rig.fake.at(st.host.cpu_at(h8)).unwrap().is_raw_srv());
+    let a8 = st.shadow.as_ref().unwrap().read(h8)[2];
+    assert!(a8 > p && a8 != a0 && a8 != a1, "its own alternate");
+    assert_eq!(st.stats.beyond.load(Ordering::Relaxed), 0);
     assert_eq!(st.stats.highest.load(Ordering::Relaxed), 800_000);
+    // the shader copy of the map names it; a page with no host page reads the null bank
+    let table = |c: u32| st.shadow.as_ref().unwrap().read(PAGE_TABLE_BYTE / 16 + c / 4)[(c % 4) as usize];
+    assert_eq!(table(800_000 >> VIEW_PAGE_SHIFT), h8 - 800_000 % page);
+    assert_eq!(table(0), 0);
+    assert_eq!(table(1_000_000 >> VIEW_PAGE_SHIFT), p);
+    // a descriptor table bound near the top (the UI's, at 868,112) gets a page when bound: the user-data offset is
+    // the host one, in console bytes
+    let ui = binding.table_offset(868_112 * 32, 4 * 32);
+    let hu = pages.host(868_112).unwrap();
+    assert_eq!(ui, hu * 32);
+    assert!(hu < st.mirrored);
+    assert_eq!(pages.split_tables.load(Ordering::Relaxed), 0);
     let notes = rig.notes.0.lock().unwrap().clone();
-    assert!(notes.contains(&("descriptor index past the host heap", 800_000)));
     assert!(notes.iter().any(|n| n.0 == "console heap larger than the host mirrors"));
     // overwriting a slot with a view that needs no alternate gives its alternate back
     unsafe { r.create_srv(b, &srv_buffer(0, 4, 0, true, DXGI_FORMAT_R32_TYPELESS), start) };

@@ -223,7 +223,16 @@ impl Lifter<'_> {
         }
         self.out.sgprs.insert(dst);
         self.wrote(dst);
-        let _ = writeln!(self.out.body, "    s{dst} = (uint)((int)s{base} + {byte_off}) / {stride}u;");
+        if p.root == RootType::ResourceHeap {
+            // an index from the title's own data (a dynamic-resource heap): a console index, which the host heap
+            // holds where the page map put its page (`super::page_index`, one load from the shadow buffer); a
+            // table's offset is a host one already (the runtime maps it when it writes the user data)
+            self.out.uses_shadow = true;
+            let i = format!("((uint)((int)s{base} + {byte_off}) / {stride}u)");
+            let _ = writeln!(self.out.body, "    s{dst} = {};", super::page_index(&i));
+        } else {
+            let _ = writeln!(self.out.body, "    s{dst} = (uint)((int)s{base} + {byte_off}) / {stride}u;");
+        }
         self.f.descs.insert(dst, Desc { heap, dwords, user_data: p.user_data });
         if let Some(o) = const_off {
             self.f.desc_off.insert(dst, o);

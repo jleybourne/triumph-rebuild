@@ -149,6 +149,7 @@ fn dispatch(gpu: &Gpu, programs: &Programs, walk: &census::Walk, hash: &str, vie
                 host_base: heap.GetGPUDescriptorHandleForHeapStart().ptr,
                 host_stride: step,
                 shadow_va: table.GetGPUVirtualAddress(),
+                pages: None,
             },
         });
         let a = console::create_allocator(0, device, host).unwrap();
