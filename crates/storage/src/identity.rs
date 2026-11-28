@@ -7,6 +7,8 @@
 //!   this layout).
 //! - **build:** the identity's `Version`; without one, `m` and a hash of the manifest's bytes (it changes with
 //!   the package); `unknown` without a manifest.
+//! - **title id:** the manifest's `<TitleId>` (hex, `0x` optional), whichever the id came from: what
+//!   `XGameGetXboxTitleId` answers, and so the title's service configuration id (its saves folder).
 
 use std::path::Path;
 
@@ -16,6 +18,8 @@ pub struct Identity {
     pub build: String,
     /// where the id came from: "identity", "title-id" or "path"
     pub source: &'static str,
+    /// the manifest's `<TitleId>`, if it has a valid one
+    pub title_id: Option<u32>,
 }
 
 const MAX_ID: usize = 64;
@@ -91,16 +95,27 @@ fn build_of(version: Option<String>, manifest: &[u8]) -> String {
         .unwrap_or_else(|| format!("m{:016x}", fnv(manifest)))
 }
 
+/// The manifest's `<TitleId>` as a number: 1-8 hex digits, `0x` optional.
+fn title_id_of(text: &str) -> Option<u32> {
+    let t = element(text, "TitleId")?;
+    let t = t.trim_start_matches("0x").trim_start_matches("0X");
+    if t.is_empty() || t.len() > 8 {
+        return None;
+    }
+    u32::from_str_radix(t, 16).ok()
+}
+
 /// The identity from a manifest's text; `dir` is only used for the path fallback.
 pub fn identify_manifest(text: &str, dir: &Path) -> Identity {
     let build = build_of(attr(text, "Identity", "Version"), text.as_bytes());
+    let title_id = title_id_of(text);
     if let Some(id) = attr(text, "Identity", "Name").and_then(|n| sanitize(&n)) {
-        return Identity { id, build, source: "identity" };
+        return Identity { id, build, source: "identity", title_id };
     }
     if let Some(t) = element(text, "TitleId").map(|t| t.trim_start_matches("0x").to_lowercase()).filter(|t| !t.is_empty() && t.len() <= 16 && t.chars().all(|c| c.is_ascii_hexdigit())) {
-        return Identity { id: format!("title-{t}"), build, source: "title-id" };
+        return Identity { id: format!("title-{t}"), build, source: "title-id", title_id };
     }
-    Identity { id: path_id(dir), build, source: "path" }
+    Identity { id: path_id(dir), build, source: "path", title_id }
 }
 
 /// The identity of the game in a folder: `MicrosoftGame.config` (any case) read once, read-only.
@@ -108,7 +123,7 @@ pub fn identify(dir: &Path) -> Identity {
     let cfg = std::fs::read_dir(dir).into_iter().flatten().flatten().find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case("MicrosoftGame.config"));
     match cfg.and_then(|e| std::fs::read_to_string(e.path()).ok()) {
         Some(text) => identify_manifest(&text, dir),
-        None => Identity { id: path_id(dir), build: "unknown".into(), source: "path" },
+        None => Identity { id: path_id(dir), build: "unknown".into(), source: "path", title_id: None },
     }
 }
 
@@ -121,7 +136,7 @@ mod tests {
         let m = r#"<Game configVersion="1"><Identity Name="Studio.SomeTitle" Publisher="CN=Placeholder, O=Name=x" Version="1.2.3.0" /><TitleId>ABCD1234</TitleId></Game>"#;
         let a = identify_manifest(m, Path::new(r"C:\games\one"));
         let b = identify_manifest(m, Path::new(r"E:\elsewhere\two"));
-        assert_eq!(a, Identity { id: "studio.sometitle".into(), build: "1.2.3.0".into(), source: "identity" });
+        assert_eq!(a, Identity { id: "studio.sometitle".into(), build: "1.2.3.0".into(), source: "identity", title_id: Some(0xabcd_1234) });
         assert_eq!(a, b, "the folder does not matter");
         // a new build of the same title: same id, new build
         let up = identify_manifest(&m.replace("1.2.3.0", "1.2.4.0"), Path::new(r"C:\games\one"));
@@ -136,6 +151,11 @@ mod tests {
         let t = identify_manifest("<Game><TitleId>0x1A2B3C4D</TitleId></Game>", Path::new("x"));
         assert_eq!(t.id, "title-1a2b3c4d");
         assert_eq!(t.source, "title-id");
+        assert_eq!(t.title_id, Some(0x1a2b_3c4d));
+        // not a title id: too long for 32 bits, not hex, empty
+        for bad in ["<TitleId>123456789</TitleId>", "<TitleId>XYZ</TitleId>", "<TitleId></TitleId>", "<TitleId>0x</TitleId>"] {
+            assert_eq!(identify_manifest(bad, Path::new("x")).title_id, None, "{bad}");
+        }
         assert!(t.build.starts_with('m') && t.build.len() == 17, "{}", t.build);
         let p = identify_manifest("<Game><Executable Name=\"x.exe\" /></Game>", Path::new(r"C:\Games\Title\"));
         assert_eq!(p.id, path_id(Path::new(r"c:\games\title")));
