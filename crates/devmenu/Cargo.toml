@@ -5,3 +5,6 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+
+[dev-dependencies]
+rebuild-storage = { path = "../storage" }

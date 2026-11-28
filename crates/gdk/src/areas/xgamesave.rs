@@ -1,5 +1,5 @@
 //! XGameSave offline: the signed-in user's game saves (containers of named blobs), kept on the host
-//! in the profile's saves folder (`overlay\GameSave`, beside the storage drive's folder), one folder per
+//! in the profile's saves folder (the game's `saves\` from `rebuild_storage`, beside its storage folder), one folder per
 //! user and service configuration. Nothing goes to a cloud: every container is in sync, `needsSync` is
 //! always false, and no call ever conflicts or asks the user anything.
 //!

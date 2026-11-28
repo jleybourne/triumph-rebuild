@@ -14,7 +14,7 @@
 //! pipelines async    GPU: the same 117 compute + 1,374 graphics pipelines through the pool and the pipeline
 //!                    library cache, as the title would ask for them (all requested in a burst, then each
 //!                    waited for in order, as first draws would). Cache and session record in
-//!                    REBUILD_PSO_CACHE_DIR (default %LOCALAPPDATA%\triumph-rebuild\pipelines\bench).
+//!                    REBUILD_PSO_CACHE_DIR (default the shared pipelines cache's bench folder).
 //!                    --threads N      workers (default: logical processors less two, at most 12)
 //!                    --fresh          delete the cache and the session record first
 //!                    --no-cache       no pipeline library

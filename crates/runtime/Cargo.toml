@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+rebuild-storage = { path = "../storage" }
 rebuild-loader = { path = "../loader" }
 rebuild-vfs = { path = "../vfs" }
 rebuild-winfiles = { path = "../winfiles" }

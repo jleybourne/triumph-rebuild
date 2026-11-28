@@ -23,6 +23,7 @@ path = "src/bin/fake-layer.rs"
 [dependencies]
 rebuild-config = { path = "../../crates/config" }
 rebuild-vfs = { path = "../../crates/vfs" }
+rebuild-storage = { path = "../../crates/storage" }
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
 rfd = "0.15"
 egui-phosphor = { version = "0.9", features = ["regular"] }

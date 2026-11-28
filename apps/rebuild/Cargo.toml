@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+rebuild-storage = { path = "../../crates/storage" }
 rebuild-uma = { path = "../../crates/uma" }
 rebuild-xlist = { path = "../../crates/xlist" }
 rebuild-d3d12x = { path = "../../crates/d3d12x" }

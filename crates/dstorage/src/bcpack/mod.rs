@@ -165,8 +165,8 @@ pub fn tables_path(configured: Option<&Path>) -> Option<PathBuf> {
     match configured {
         Some(p) if !p.as_os_str().is_empty() => Some(p.to_path_buf()),
         _ => std::env::var_os("REBUILD_BCPACK_TABLES").filter(|v| !v.is_empty()).map(PathBuf::from).or_else(|| {
-            // the default place, outside git: %LOCALAPPDATA%\triumph-rebuild\bcpack-tables.bin, when it exists
-            let p = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("triumph-rebuild").join("bcpack-tables.bin");
+            // the default place, outside git: `bcpack-tables.bin` in the local data root (rebuild_storage), when it exists
+            let p = rebuild_storage::storage().bcpack_tables();
             p.is_file().then_some(p)
         }),
     }

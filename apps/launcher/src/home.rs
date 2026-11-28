@@ -1,13 +1,13 @@
-//! Where the launcher keeps its files, and profiles (named sets of settings, exported and imported as
-//! `.toml`). Never the game folder.
+//! A game's files as the launcher uses them, and profiles (named sets of settings, exported and imported
+//! as `.toml`). Never the game folder. Where they are is `rebuild_storage`'s (`docs/design/storage.md`).
 //!
 //! ```text
-//! <home>/rebuild.toml        the active settings, passed to the layer with --config
+//! <home>/settings.toml       the active settings, passed to the layer with --config (was rebuild.toml)
 //! <home>/profiles/<n>.toml   saved profiles
 //! <home>/mods/<name>/        mods: files that replace title files by path
-//! <home>/overlay/            the launcher's write overlay (the copy of settings.xml, U3)
+//! <home>/overlay/            the game's write overlay (the copy of settings.xml, U3)
 //! <home>/frame-line.log      the frame line of a proof run without a session (U5)
-//! <home>/sessions/<stamp>-<profile>/   one folder per launch (L6, `session.rs`)
+//! <sessions>/<stamp>-<profile>/   one folder per launch (L6, `session.rs`): <local>/logs/<game id>/
 //! ```
 
 use rebuild_config::Config;
@@ -16,26 +16,24 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct Home {
     pub dir: PathBuf,
+    /// where this game's session folders go
+    pub sessions: PathBuf,
 }
 
 impl Home {
-    /// `REBUILD_LAUNCHER_HOME`; else beside the launcher if a `rebuild.toml` is there (portable);
-    /// else `%APPDATA%\triumph-rebuild`.
-    pub fn locate() -> Home {
-        if let Some(d) = std::env::var_os("REBUILD_LAUNCHER_HOME") {
-            return Home { dir: d.into() };
-        }
-        if let Some(exe_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
-            if exe_dir.join("rebuild.toml").is_file() {
-                return Home { dir: exe_dir };
-            }
-        }
-        let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-        Home { dir: base.join("triumph-rebuild") }
+    /// A home with its sessions inside it (no game selected; tests).
+    pub fn at(dir: impl Into<PathBuf>) -> Home {
+        let dir = dir.into();
+        Home { sessions: crate::session::sessions_dir(&dir), dir }
+    }
+
+    /// A game's home: its folder in the data root and its logs.
+    pub fn for_game(store: &rebuild_storage::GameStore) -> Home {
+        Home { dir: store.dir.clone(), sessions: store.sessions_dir() }
     }
 
     pub fn rebuild_toml(&self) -> PathBuf {
-        self.dir.join("rebuild.toml")
+        self.dir.join("settings.toml")
     }
     pub fn profiles_dir(&self) -> PathBuf {
         self.dir.join("profiles")
@@ -50,7 +48,7 @@ impl Home {
         self.dir.join("frame-line.log")
     }
     pub fn sessions_dir(&self) -> PathBuf {
-        crate::session::sessions_dir(&self.dir)
+        self.sessions.clone()
     }
 
     /// The active settings; a missing file is all defaults.
@@ -157,7 +155,7 @@ mod tests {
 
     #[test]
     fn profiles_save_list_load_export_import() {
-        let home = Home { dir: crate::temp_dir("home") };
+        let home = Home::at(crate::temp_dir("home"));
         let mut c = home.load().unwrap();
         assert_eq!(c.changed().count(), 0, "no file = defaults");
         c.set("display.width", Value::Int(2560)).unwrap();
@@ -177,7 +175,7 @@ mod tests {
 
     #[test]
     fn builtins_cannot_be_overwritten() {
-        let home = Home { dir: crate::temp_dir("builtin") };
+        let home = Home::at(crate::temp_dir("builtin"));
         let c = Config::parse("").unwrap();
         for b in rebuild_config::BUILTIN_PROFILES {
             assert!(home.save_profile(b.name, &c).unwrap_err().contains("built-in"), "{}", b.name);
@@ -195,7 +193,7 @@ mod tests {
 
     #[test]
     fn the_matrix_writes_one_parsing_file_per_builtin() {
-        let home = Home { dir: crate::temp_dir("matrix") };
+        let home = Home::at(crate::temp_dir("matrix"));
         let mut base = Config::parse("").unwrap();
         base.set("game.dir", Value::Path(r"D:\games\title".into())).unwrap();
         base.set("display.vsync", Value::Bool(true)).unwrap();
@@ -218,7 +216,7 @@ mod tests {
 
     #[test]
     fn an_imported_file_with_problems_reports_them() {
-        let home = Home { dir: crate::temp_dir("import") };
+        let home = Home::at(crate::temp_dir("import"));
         let p = home.dir.join("bad.toml");
         std::fs::write(&p, "[settings]\n\"display.width\" = 1\n\"no.such\" = true\n").unwrap();
         let c = load_file(&p).unwrap();

@@ -189,13 +189,7 @@ pub struct Vfs {
     has_pending: std::sync::atomic::AtomicBool,
 }
 
-/// `%APPDATA%\triumph-rebuild\overlay` (or `./overlay` without `APPDATA`).
-pub fn default_overlay_root() -> PathBuf {
-    match std::env::var_os("APPDATA") {
-        Some(appdata) => Path::new(&appdata).join("triumph-rebuild").join("overlay"),
-        None => PathBuf::from("overlay"),
-    }
-}
+// The overlay root is the caller's: the game's `overlay` folder from `rebuild_storage` (the layer's drives).
 
 /// Where `p` is or would be once created: its deepest existing ancestor canonicalized, the rest appended.
 fn resolve(p: &Path) -> io::Result<PathBuf> {
@@ -243,11 +237,13 @@ fn overlaps(a: &Path, b: &Path) -> bool {
 pub struct VfsBuilder {
     overlay_root: PathBuf,
     drives: Vec<(char, Option<(PathBuf, ModSet)>)>,
+    /// drives whose overlay folder is given rather than `<overlay root>\<letter>`
+    folders: Vec<(char, PathBuf)>,
 }
 
 impl VfsBuilder {
     pub fn new(overlay_root: impl Into<PathBuf>) -> Self {
-        Self { overlay_root: overlay_root.into(), drives: Vec::new() }
+        Self { overlay_root: overlay_root.into(), drives: Vec::new(), folders: Vec::new() }
     }
 
     /// A drive over a read-only base folder (the package, `G:`), with mods layered on it.
@@ -262,6 +258,15 @@ impl VfsBuilder {
         self
     }
 
+    /// A drive that is only the overlay, in a folder of its own (the title's persistent storage, `S:`, kept
+    /// with the game's data rather than inside the overlay).
+    pub fn writable_at(mut self, letter: char, folder: impl Into<PathBuf>) -> Self {
+        let letter = letter.to_ascii_uppercase();
+        self.drives.push((letter, None));
+        self.folders.push((letter, folder.into()));
+        self
+    }
+
     /// Every drive is checked before anything is created: an overlay that would sit inside the base or a mod
     /// (or hold one) is refused without making a folder there.
     pub fn build(self) -> Result<Vfs> {
@@ -273,7 +278,7 @@ impl VfsBuilder {
             if planned.iter().any(|d| d.0 == letter) {
                 return Err(Error::Unsafe(format!("drive {letter}: mounted twice")));
             }
-            let dir = self.overlay_root.join(letter.to_string());
+            let dir = self.folders.iter().find(|f| f.0 == letter).map(|f| f.1.clone()).unwrap_or_else(|| self.overlay_root.join(letter.to_string()));
             let mut lower = Vec::new();
             if let Some((base, mods)) = base {
                 let mut roots: Vec<(Layer, PathBuf)> =
