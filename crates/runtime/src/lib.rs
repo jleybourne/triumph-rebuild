@@ -69,12 +69,19 @@ pub enum Tier {
 /// Host functions whose meaning differs on the console, by function name (any DLL that exports it:
 /// the same function is reached through several API-set names).
 pub const OVERRIDES: &[(&str, &str)] = &[
-    // the title's own windows stay hidden: the frame is presented into ours (titlewindow.rs)
+    // the title's own windows never appear (message-only): the frame is presented into ours (titlewindow.rs);
+    // ordinals and GetProcAddress reach the same overrides by the host address (titlewindow::override_host_address)
     ("CreateWindowExW", "window"),
     ("CreateWindowExA", "window"),
     ("ShowWindow", "window"),
     ("ShowWindowAsync", "window"),
     ("SetWindowPos", "window"),
+    ("DeferWindowPos", "window"),
+    ("SetWindowLongPtrW", "window"),
+    ("SetWindowLongPtrA", "window"),
+    ("SetWindowLongW", "window"),
+    ("SetWindowLongA", "window"),
+    ("SetParent", "window"),
     // the console's device type: the registry value OEM\ConsoleMode (registry.rs)
     ("RegOpenKeyW", "registry"),
     // traced only with REBUILD_TRACE_READS (winfiles::trace); otherwise the host's
@@ -273,6 +280,10 @@ pub mod host {
             }
             let has_dll = self.host.dll(dll).is_some();
             let f = self.host.function(dll, name, ordinal);
+            // a window function by ordinal (user32) or through a forwarder: ours, by the host address it lands on
+            if let Some(ours) = f.and_then(crate::titlewindow::override_host_address) {
+                return Some(ours);
+            }
             let tier = super::classify(name.unwrap_or(""), has_dll, f.is_some());
             if let (super::Tier::Override, Some(n)) = (tier, name) {
                 if let Some(ours) = crate::modules::override_export(n) {

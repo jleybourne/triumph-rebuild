@@ -51,6 +51,10 @@ fn report(started: Instant) {
     if let Some(r) = rebuild_runtime::gameinput::report() {
         println!("{r}");
     }
+    let tw = rebuild_runtime::titlewindow::count();
+    if tw > 0 {
+        println!("window    the title made {tw} windows ({} message-only), none shown", rebuild_runtime::titlewindow::message_only_count());
+    }
     let m = misses();
     if !m.is_empty() {
         println!("lookups that found nothing (GetProcAddress / LoadLibrary): {}", m.len());

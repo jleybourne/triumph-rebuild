@@ -39,6 +39,9 @@ pub struct EnvEntry {
 pub const RUNTIME_KEYS: &[(&str, &str)] = &[
     ("game.dir", "REBUILD_GAME_DIR"),
     ("game.console", "REBUILD_CONSOLE"),
+    ("display.window", "REBUILD_WINDOW"),
+    ("display.width", "REBUILD_WINDOW_SIZE"),
+    ("display.height", "REBUILD_WINDOW_SIZE"),
     ("display.vsync", "REBUILD_VSYNC"),
     ("display.frame_rate", "REBUILD_FRAME_RATE"),
     ("display.frame_cap", "REBUILD_FRAME_RATE"),
@@ -65,9 +68,6 @@ pub const NOT_RUNTIME: &[(&str, &str)] = &[
     ("launcher.theme", "the launcher only"),
     ("diagnostics.retention_days", "the launcher prunes sessions"),
     ("menu.key", "the in-game menu (L5), not built"),
-    ("display.width", "not read yet: the window takes the title's size"),
-    ("display.height", "not read yet: the window takes the title's size"),
-    ("display.window", "not read yet"),
     ("upscaler.mode", "not read yet: the upscale path is not in the runtime"),
     ("memory.upload_workers", "not read yet"),
     ("memory.labels", "not read yet"),
@@ -107,6 +107,13 @@ impl Config {
 
         put("game.dir", "REBUILD_GAME_DIR", path("game.dir"), ex("game.dir"));
         put("game.console", "REBUILD_CONSOLE", set(self.choice("game.console")), ex("game.console"));
+        // the window: its mode always; its client size in a window, and only when the file sets one (else the
+        // runtime's 1280x720). Borderless and full screen take the display's size and ignore it.
+        let mode = self.choice("display.window");
+        put("display.window", "REBUILD_WINDOW", set(mode.clone()), ex("display.window"));
+        if mode == "windowed" && (ex("display.width") || ex("display.height")) {
+            put("display.width", "REBUILD_WINDOW_SIZE", set(format!("{}x{}", self.int("display.width"), self.int("display.height"))), true);
+        }
         put("display.vsync", "REBUILD_VSYNC", set(if self.bool("display.vsync") { "1" } else { "0" }.into()), ex("display.vsync"));
         let rate_ex = ex("display.frame_rate") || ex("display.frame_cap");
         put("display.frame_rate", "REBUILD_FRAME_RATE", set(crate::frame_rate_env(self)), rate_ex);
@@ -200,8 +207,9 @@ mod tests {
         assert_eq!(e.get("REBUILD_WARP"), Some(&EnvValue::Remove));
         assert_eq!(e.get("REBUILD_D3D_DEBUG"), Some(&EnvValue::Remove));
         assert_eq!(e.get("REBUILD_LIMIT_RAM_MB"), Some(&EnvValue::Set("0".into())));
-        // empty paths: the variable the layer was started with stays
-        for v in ["REBUILD_GAME_DIR", "REBUILD_DLSS_DLL", "REBUILD_STREAMLINE_DIR", "REBUILD_FIDELITYFX_DIR", "REBUILD_FRAME_LOG"] {
+        assert_eq!(e.get("REBUILD_WINDOW"), Some(&EnvValue::Set("windowed".into())), "a window by default, never the whole screen");
+        // empty paths, and a size the file never set: the variable the layer was started with stays
+        for v in ["REBUILD_GAME_DIR", "REBUILD_DLSS_DLL", "REBUILD_STREAMLINE_DIR", "REBUILD_FIDELITYFX_DIR", "REBUILD_FRAME_LOG", "REBUILD_WINDOW_SIZE"] {
             assert!(!e.contains_key(v), "{v}");
         }
         assert!(c.runtime_env().iter().all(|x| !x.explicit));
@@ -247,6 +255,36 @@ mod tests {
         // the frame log off removes the variable, whatever the path
         let off = Config::parse("[settings]\n\"diagnostics.frame_log\" = false\n\"diagnostics.frame_log_path\" = 'C:\\x.log'").unwrap();
         assert_eq!(env_of(&off).get("REBUILD_FRAME_LOG"), Some(&EnvValue::Remove));
+    }
+
+    /// The launcher's display settings reach `present.rs`'s `window_mode()`: the mode as `REBUILD_WINDOW`, and in a
+    /// window the size the file sets as `REBUILD_WINDOW_SIZE=WxH`; borderless and full screen carry no size.
+    #[test]
+    fn the_display_settings_map_to_the_window_variables() {
+        let env = |text: &str| env_of(&Config::parse(&format!("[settings]\n{text}")).unwrap());
+        let set = |v: &str| Some(EnvValue::Set(v.into()));
+        let w = env("\"display.window\" = \"windowed\"\n\"display.width\" = 1600\n\"display.height\" = 900");
+        assert_eq!(w.get("REBUILD_WINDOW").cloned(), set("windowed"));
+        assert_eq!(w.get("REBUILD_WINDOW_SIZE").cloned(), set("1600x900"));
+        // one of the two set: the other is its default
+        let one = env("\"display.width\" = 1920");
+        assert_eq!(one.get("REBUILD_WINDOW_SIZE").cloned(), set("1920x2160"));
+        for mode in ["borderless", "fullscreen"] {
+            let b = env(&format!("\"display.window\" = \"{mode}\"\n\"display.width\" = 1600\n\"display.height\" = 900"));
+            assert_eq!(b.get("REBUILD_WINDOW").cloned(), set(mode));
+            assert!(!b.contains_key("REBUILD_WINDOW_SIZE"), "{mode}: the display's size");
+        }
+        // the file's size wins over a size the layer was started with; a default mode leaves REBUILD_WINDOW alone
+        let c = Config::parse("[settings]\n\"display.width\" = 1600\n\"display.height\" = 900").unwrap();
+        let started: HashMap<&str, &str> = [("REBUILD_WINDOW", "borderless"), ("REBUILD_WINDOW_SIZE", "800x600")].into();
+        let m: HashMap<_, _> = resolve(&c.runtime_env(), |v| started.get(v).map(|s| s.to_string())).into_iter().collect();
+        assert_eq!(m.get("REBUILD_WINDOW_SIZE"), Some(&Some("1600x900".to_string())));
+        assert!(!m.contains_key("REBUILD_WINDOW"), "the mode is the default: the environment's stays");
+        // what present.rs reads: windowed|borderless|fullscreen, and WxH
+        for (key, var) in [("display.window", "REBUILD_WINDOW"), ("display.width", "REBUILD_WINDOW_SIZE"), ("display.height", "REBUILD_WINDOW_SIZE")] {
+            assert!(RUNTIME_KEYS.contains(&(key, var)), "{key}");
+            assert!(!NOT_RUNTIME.iter().any(|(k, _)| *k == key), "{key}");
+        }
     }
 
     #[test]
