@@ -252,9 +252,20 @@ mod tests {
     use rebuild_input::{Fake, PadState, MENU_KEY, NEUTRAL, PAD_CHORD};
 
     fn service(save_to: Option<PathBuf>) -> (Service<Fake, FakeBackend>, Arc<Shared>) {
+        service_with(save_to, Config::default())
+    }
+
+    /// The monitor off: only the menu draws.
+    fn quiet() -> (Service<Fake, FakeBackend>, Arc<Shared>) {
+        let mut c = Config::default();
+        c.set("diagnostics.overlay", Value::Bool(false)).unwrap();
+        service_with(None, c)
+    }
+
+    fn service_with(save_to: Option<PathBuf>, config: Config) -> (Service<Fake, FakeBackend>, Arc<Shared>) {
         let shared = Shared::new();
         let b = FakeBackend::default();
-        let menu = Menu::new(Config::default(), &b, Registry::default().with_placeholders());
+        let menu = Menu::new(config, &b, Registry::default().with_placeholders());
         let input = Input::new(Fake::default()).with_pad_chord(PAD_CHORD);
         (Service::new(input, menu, b, shared.clone(), Box::new(Font::synthetic), save_to, "F10"), shared)
     }
@@ -270,7 +281,7 @@ mod tests {
 
     #[test]
     fn nothing_is_shown_until_the_present_has_a_target_and_the_menu_opens() {
-        let (mut s, shared) = service(None);
+        let (mut s, shared) = quiet();
         let mut t = Instant::now();
         s.step(t);
         assert!(!shared.visible() && shared.scene().is_none());
@@ -295,7 +306,7 @@ mod tests {
 
     #[test]
     fn the_title_sees_neutral_input_while_the_menu_is_used() {
-        let (mut s, shared) = service(None);
+        let (mut s, shared) = quiet();
         shared.set_target(1920, 1080);
         let mut t = Instant::now();
         s.input().source_mut().pads[0] = Some(NEUTRAL);
@@ -358,20 +369,22 @@ mod tests {
     }
 
     #[test]
-    fn the_readout_shows_while_closed_when_diagnostics_overlay_is_on() {
+    fn the_monitor_shows_while_closed_by_default_and_the_menu_turns_it_off() {
         let (mut s, shared) = service(None);
         shared.set_target(1920, 1080);
         let mut t = Instant::now();
+        s.step(t);
+        assert_eq!(s.input().phase(), Phase::Closed);
+        let scene = shared.scene().expect("the monitor, on by default");
+        assert!(scene.panels[0][0] > 960.0, "top right");
+        // the menu's setting turns it off (the fourth setting)
         tap(&mut s, &mut t, MENU_KEY);
-        // Diagnostics overlay is the fourth setting
         for k in [vk::UP, vk::RETURN] {
             tap(&mut s, &mut t, k);
         }
-        assert!(s.menu().config().bool("diagnostics.overlay"));
+        assert!(!s.menu().config().bool("diagnostics.overlay"));
         tap(&mut s, &mut t, MENU_KEY);
-        assert_eq!(s.input().phase(), Phase::Closed);
-        let scene = shared.scene().expect("the readout");
-        assert!(scene.panels[0][0] > 960.0);
+        assert!(!shared.visible() && shared.scene().is_none(), "off: nothing drawn while closed");
     }
 
     #[test]

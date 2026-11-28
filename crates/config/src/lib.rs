@@ -159,7 +159,7 @@ pub static REGISTRY: &[Setting] = &[
     s("memory.labels", "GPU→CPU labels", "gpu = written by the GPU into title memory (65 µs before the fence); relay = a CPU worker (17 µs after).", Kind::Choice { options: &["gpu", "relay"] }, Default::Choice("gpu"), Restart, Stable),
     s("memory.direct_read", "Direct read of title memory", "Let the GPU read rarely-written title memory over PCIe instead of uploading it. Unmeasured: Build 5.", Kind::Bool, Default::Bool(false), Restart, Experimental),
     s("shaders.wave64", "Wave64 programs", "doubled = one host lane carries two console lanes (exact, proven); split = two host waves.", Kind::Choice { options: &["doubled", "split"] }, Default::Choice("doubled"), Restart, Stable),
-    s("diagnostics.overlay", "Frame line overlay", "fps · ms · draws · dropped · upload · translation · resolution · upscaler, drawn on the output.", Kind::Bool, Default::Bool(false), Live, Stable),
+    s("diagnostics.overlay", "Resource monitor", "fps, frame and GPU time, draws; process CPU, RAM, VRAM; upload; drawn on the output (on by default; REBUILD_HUD=0 hides it).", Kind::Bool, Default::Bool(true), Live, Stable),
     s("diagnostics.frame_log", "Frame line log", "Append the frame line once a second to a file the launcher reads.", Kind::Bool, Default::Bool(true), Live, Stable),
     s("diagnostics.capture_dir", "Capture folder", "Where frame captures go. Empty = off.", Kind::Path, Default::Path(""), Live, Stable),
     s("diagnostics.d3d12_debug", "D3D12 debug layer", "Names why a pipeline or command is refused. Slow: never for measuring.", Kind::Bool, Default::Bool(false), Restart, Experimental),

@@ -7,8 +7,10 @@
 //! Manager included) until a reboot. So every physical-page section is charged here first, and a
 //! request past the budget fails as the console fails one past its budget.
 //!
-//! Default: the smaller of 12 GiB and a third of the host's physical memory. `REBUILD_MEMORY_BUDGET_MB`
-//! lowers or raises it.
+//! Default: half of the host's physical memory, but at most what the system can still commit at launch less
+//! 16 GiB (so the run never starves Windows), and never below 4 GiB. A 64 GiB machine gives the title up to
+//! 32 GiB, far past the console's ~13 GiB, so the title's budget is never the limit. `REBUILD_MEMORY_BUDGET_MB`
+//! lowers or raises it; `limits.ram_mb` caps it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -34,10 +36,13 @@ pub fn host_commit_available() -> u64 {
     if unsafe { GlobalMemoryStatusEx(&mut m) }.is_ok() { m.ullAvailPageFile } else { 0 }
 }
 
-/// The default budget for a host with `physical` bytes of memory.
-pub fn default_limit(physical: u64) -> u64 {
-    let third = if physical == 0 { 4 * GIB } else { physical / 3 };
-    third.min(12 * GIB)
+/// The default budget for a host with `physical` bytes of memory and `commit` bytes the system can still
+/// commit: half the memory, at most the commit less 16 GiB, at least 4 GiB.
+pub fn default_limit(physical: u64, commit: u64) -> u64 {
+    if physical == 0 {
+        return 4 * GIB;
+    }
+    (physical / 2).min(commit.saturating_sub(16 * GIB)).max(4 * GIB)
 }
 
 /// The budget in bytes. A user RAM limit ([`crate::limits`]) gives the physical pages at most half of it;
@@ -48,10 +53,10 @@ pub fn limit() -> u64 {
             mb << 20
         } else {
             #[cfg(windows)]
-            let physical = host_physical();
+            let (physical, commit) = (host_physical(), host_commit_available());
             #[cfg(not(windows))]
-            let physical = 0;
-            default_limit(physical)
+            let (physical, commit) = (0, 0);
+            default_limit(physical, commit)
         };
         match crate::limits::get().ram_bytes() {
             Some(ram) => base.min(ram / 2),
@@ -61,11 +66,11 @@ pub fn limit() -> u64 {
 }
 
 /// The cap on the process's own committed memory: with a RAM limit, what the physical pages leave of it;
-/// otherwise the budget plus 4 GiB (Rust, our heaps, the title's private allocations).
+/// otherwise the budget plus 8 GiB (Rust, our heaps and caches, the title's private allocations).
 pub fn private_cap() -> u64 {
     match crate::limits::get().ram_bytes() {
         Some(ram) => ram.saturating_sub(limit()).max(1 << 30),
-        None => limit() + 4 * GIB,
+        None => limit() + 8 * GIB,
     }
 }
 
@@ -100,10 +105,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_is_a_third_of_memory_capped_at_12_gib() {
-        assert_eq!(default_limit(32 * GIB), 32 * GIB / 3);
-        assert_eq!(default_limit(64 * GIB), 12 * GIB);
-        assert_eq!(default_limit(0), 4 * GIB);
+    fn the_default_is_half_of_memory_within_what_the_system_can_commit() {
+        // 64 GiB, plenty of commit: half
+        assert_eq!(default_limit(64 * GIB, 60 * GIB), 32 * GIB);
+        // a busy system: the commit less 16 GiB
+        assert_eq!(default_limit(64 * GIB, 40 * GIB), 24 * GIB);
+        // little memory or commit: never below 4 GiB (the launch check refuses a run that cannot fit)
+        assert_eq!(default_limit(8 * GIB, 10 * GIB), 4 * GIB);
+        assert_eq!(default_limit(0, 0), 4 * GIB);
     }
 
     #[test]
