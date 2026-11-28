@@ -656,6 +656,55 @@ fn a_heap_over_records_mirrors_them_when_made() {
 
 // ---- the oversized heap ----
 
+/// A console index past the mirrored range (the title's heap is 1,245,184 views, the host's 1,000,000) must
+/// never reach an alternate or a window view: translated shaders send it to the null bank, which holds a null
+/// of every declared view type, and alternates live only after the bank and below the windows (or past
+/// 1,000,000 on a larger heap).
+#[test]
+fn console_indices_and_alternates_never_share_host_slots() {
+    use rebuild_sir::lift::{NullKind, CONSOLE_VIEWS, NULL_BANK, WINDOW_HEAP_BASE};
+    assert_eq!(Limits::TIER2.null_index(), CONSOLE_VIEWS, "the index translated shaders compare with");
+    assert_eq!(Limits::TIER2.alternate_ranges(), [CONSOLE_VIEWS + NULL_BANK..WINDOW_HEAP_BASE, 1_000_000..1_000_000]);
+    let big = Limits { views: 1 << 21, samplers: 2048 };
+    assert_eq!(big.null_index(), CONSOLE_VIEWS);
+    assert_eq!(big.alternate_ranges(), [CONSOLE_VIEWS + NULL_BANK..WINDOW_HEAP_BASE, 1_000_000..1 << 21]);
+
+    let rig = rig_with(Limits::TIER2, 64 << 20);
+    let r = &rig.r;
+    let b = buffer(r, KIB_64);
+    let ok = |a: u32| (CONSOLE_VIEWS + NULL_BANK..WINDOW_HEAP_BASE).contains(&a);
+    // the title's oversized heap (pooled alternates) and a small one (fixed alternates)
+    for count in [1_245_184u32, 64] {
+        let (h, start) = heap(&rig, 0, count, true, true);
+        let st = r.heap_state(h).unwrap();
+        assert_eq!(st.null_index, CONSOLE_VIEWS);
+        // the null bank: one typed null per kind
+        for k in NullKind::all() {
+            let v = rig.fake.at(st.host.cpu_at(CONSOLE_VIEWS + k.slot())).unwrap();
+            assert_eq!(v.describe(), crate::heap::null_view(k).describe(), "{k:?}");
+        }
+        assert!(rig.fake.at(st.host.cpu_at(CONSOLE_VIEWS + 2)).unwrap().describe().starts_with("srv typed 0x0 fmt 2"));
+        assert!(rig.fake.at(st.host.cpu_at(CONSOLE_VIEWS + 17)).unwrap().describe().starts_with("uav texture 0x0 fmt 42 dim 4"));
+        // what a shader past the range reads from the shadow table: no stride, no records, the bank
+        assert_eq!(st.shadow.as_ref().unwrap().read(CONSOLE_VIEWS), [0, 0, CONSOLE_VIEWS, 0]);
+        // typed SRVs and UAVs at the first and last mirrored indices: their alternates are past the bank
+        let last = count.min(CONSOLE_VIEWS) - 1;
+        for i in [0, 1, last] {
+            unsafe {
+                if i % 2 == 0 {
+                    r.create_srv(b, &srv_buffer(0, 16, 0, false, DXGI_FORMAT_R32G32B32A32_FLOAT), start + 32 * u64::from(i));
+                } else {
+                    r.create_uav(b, std::ptr::null_mut(), &uav_buffer(0, 16, 0, true, DXGI_FORMAT_R32_TYPELESS), start + 32 * u64::from(i));
+                }
+            }
+            let a = st.shadow.as_ref().unwrap().read(i)[2];
+            assert!(ok(a), "count {count}, index {i}: alternate {a} is where a console index or a window can reach");
+        }
+        release(h);
+    }
+    release(b);
+}
+
 #[test]
 fn the_titles_heap_of_1245184_views_keeps_indices_and_counts_what_does_not_fit() {
     let rig = rig_with(Limits::TIER2, 64 << 20);

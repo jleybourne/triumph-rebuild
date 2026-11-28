@@ -189,8 +189,8 @@ fn image_atomics_are_interlocked_on_32_and_64_bit_texels() {
     );
     assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
     let b = &l.body;
-    assert!(b.contains("RWTexture2D<uint> t = ResourceDescriptorHeap[s8]; { uint o; InterlockedMin(t[uint2((uint)v0, (uint)v1)], v4, o); v4 = (uint)o; }"), "{b}");
-    assert!(b.contains("RWTexture2D<uint64_t> t = ResourceDescriptorHeap[s8]; { uint64_t o; InterlockedMax(t[uint2((uint)v0, (uint)v1)], (uint64_t)(((uint64_t)v7 << 32) | (uint64_t)v6)); }"), "{b}");
+    assert!(b.contains("RWTexture2D<uint> t = ResourceDescriptorHeap[sir_vi(s8, 17u)]; { uint o; InterlockedMin(t[uint2((uint)v0, (uint)v1)], v4, o); v4 = (uint)o; }"), "{b}");
+    assert!(b.contains("RWTexture2D<uint64_t> t = ResourceDescriptorHeap[sir_vi(s8, 17u)]; { uint64_t o; InterlockedMax(t[uint2((uint)v0, (uint)v1)], (uint64_t)(((uint64_t)v7 << 32) | (uint64_t)v6)); }"), "{b}");
     assert!(b.contains("RWTexture2D<int> t") && b.contains("InterlockedMax(t[uint2((uint)v0, (uint)v1)], (int)v8);"), "{b}");
     assert!(b.contains("InterlockedCompareExchange(t[uint2((uint)v0, (uint)v1)], v11, v10, o); v10 = (uint)o;"), "{b}");
     assert!(b.contains("InterlockedAdd(t[uint2((uint)v0, (uint)v1)], (uint)0 - v12);"), "{b}");
@@ -260,9 +260,9 @@ fn a_buffer_descriptors_stride_and_records_come_from_the_shadow_table() {
     let l = lifted(&parts, &layout, &used);
     assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
     let b = &l.body;
-    assert!(b.contains("(sir_shadow.Load(s8 * 16u) << 16) >> (16u & 31)"), "{b}");
-    assert!(b.contains("sir_bfe_u((sir_shadow.Load(s8 * 16u) << 16), 917520u & 31"), "{b}");
-    assert!(b.contains("sir_shadow.Load(s8 * 16u + 4u) << (2u & 31)"), "{b}");
+    assert!(b.contains("(sir_shadow.Load(sir_sh(s8)) << 16) >> (16u & 31)"), "{b}");
+    assert!(b.contains("sir_bfe_u((sir_shadow.Load(sir_sh(s8)) << 16), 917520u & 31"), "{b}");
+    assert!(b.contains("sir_shadow.Load(sir_sh(s8) + 4u) << (2u & 31)"), "{b}");
     assert!(l.uses_shadow);
     compile(&l, "cov_shadow_words");
     // the address bits of word 1, and word 3, are not in the shadow table
@@ -286,7 +286,7 @@ fn a_typed_access_with_no_index_and_no_offset_is_element_0() {
     let l = lifted(&parts, &layout, &used);
     assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
     // the typed view is the shadow entry's alternate
-    assert!(l.body.contains("Buffer<float4> b = ResourceDescriptorHeap[sir_shadow.Load(s8 * 16u + 8u)]; float4 r = b[0u];"), "{}", l.body);
+    assert!(l.body.contains("Buffer<float4> b = ResourceDescriptorHeap[sir_va(sir_shadow.Load(sir_sh(s8) + 8u), 2u)]; float4 r = b[0u];"), "{}", l.body);
     compile(&l, "cov_typed0");
 }
 
@@ -417,7 +417,7 @@ fn buffer_and_lds_atomics() {
     );
     assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
     let b = &l.body;
-    assert!(b.contains("uint4 sh = sir_shadow.Load4(s8 * 16u); RWByteAddressBuffer w = ResourceDescriptorHeap[sh.z];"), "{b}");
+    assert!(b.contains("uint4 sh = sir_shadow.Load4(sir_sh(s8)); RWByteAddressBuffer w = ResourceDescriptorHeap[sir_va(sh.z, 1u)];"), "{b}");
     assert!(b.contains("uint a = sh.w + sir_i * 0u + sir_o + 0u;") && b.contains("w.InterlockedAdd(a & ~3u, v4, o);"), "{b}");
     assert!(b.contains("int o = 0; if (true) w.InterlockedMax(a & ~3u, (int)v5, o);"), "{b}");
     assert!(b.contains("w.InterlockedCompareExchange(a & ~3u, v7, v6, o);") && b.contains("v6 = (uint)o;"), "{b}");
@@ -493,7 +493,7 @@ fn buffer_views_are_the_heaps_alternates_and_raw_reads_apply_the_lead() {
     // a CBV range of a table: read as the raw SRV at the console index all the same (never a CBV from the heap)
     let l = lifted(&[smem("s_load_dwordx4", 8, 0, 0), smem("s_buffer_load_dwordx2", 12, 8, 16)], &layout, &cbv);
     assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
-    assert!(l.body.contains("ByteAddressBuffer c = ResourceDescriptorHeap[s8]; uint sir_ld = sir_shadow.Load(s8 * 16u + 12u);"), "{}", l.body);
+    assert!(l.body.contains("ByteAddressBuffer c = ResourceDescriptorHeap[sir_vi(s8, 0u)]; uint sir_ld = sir_shadow.Load(sir_sh(s8) + 12u);"), "{}", l.body);
     assert!(l.body.contains("s12 = c.Load(sir_ld + 16u);") && l.body.contains("s13 = c.Load(sir_ld + 20u);"), "{}", l.body);
     assert!(!l.body.contains("ConstantBuffer") && !l.uses_cb, "{}", l.body);
     compile(&l, "cov_alt_cbv");
@@ -513,9 +513,9 @@ fn buffer_views_are_the_heaps_alternates_and_raw_reads_apply_the_lead() {
     );
     assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
     let b = &l.body;
-    assert!(b.contains("ByteAddressBuffer c = ResourceDescriptorHeap[s8]; uint sir_ld = sir_shadow.Load(s8 * 16u + 12u);") && b.contains("s12 = c.Load(sir_ld + 4u);"), "{b}");
-    assert!(b.contains("ByteAddressBuffer b = ResourceDescriptorHeap[s8]; uint4 sh = sir_shadow.Load4(s8 * 16u); uint2 r = b.Load2(sh.w + v0 + 0u + 0u);"), "{b}");
-    assert!(b.contains("uint4 sh = sir_shadow.Load4(s8 * 16u); RWByteAddressBuffer b = ResourceDescriptorHeap[sh.z]; if (true) b.Store(sh.w + v0 + 0u + 0u, v6);"), "{b}");
+    assert!(b.contains("ByteAddressBuffer c = ResourceDescriptorHeap[sir_vi(s8, 0u)]; uint sir_ld = sir_shadow.Load(sir_sh(s8) + 12u);") && b.contains("s12 = c.Load(sir_ld + 4u);"), "{b}");
+    assert!(b.contains("ByteAddressBuffer b = ResourceDescriptorHeap[sir_vi(s8, 0u)]; uint4 sh = sir_shadow.Load4(sir_sh(s8)); uint2 r = b.Load2(sh.w + v0 + 0u + 0u);"), "{b}");
+    assert!(b.contains("uint4 sh = sir_shadow.Load4(sir_sh(s8)); RWByteAddressBuffer b = ResourceDescriptorHeap[sir_va(sh.z, 1u)]; if (true) b.Store(sh.w + v0 + 0u + 0u, v6);"), "{b}");
     assert!(b.contains("uint a = sh.w + 0u + sir_i * sir_st + sir_o;"), "{b}");
     compile(&l, "cov_alt_raw");
 }
@@ -536,7 +536,52 @@ fn heap_buffer_loads_are_never_cbvs() {
     assert!(l.desc_uses.iter().all(|u| u.view != res::View::Cbv), "{:?}", l.desc_uses);
     assert!(b.contains("s16 = c.Load(sir_ld + 4u);"), "{b}");
     assert!(b.contains("uint b = (s20 + 8u) >> 2;") && b.contains("s15 = c.Load(sir_ld + ((b + 3u) << 2));"), "{b}");
-    assert!(b.contains("ByteAddressBuffer b = ResourceDescriptorHeap[s8]; uint4 sh = sir_shadow.Load4(s8 * 16u); uint2 r = b.Load2(sh.w + v0 + 0u + 0u);"), "{b}");
+    assert!(b.contains("ByteAddressBuffer b = ResourceDescriptorHeap[sir_vi(s8, 0u)]; uint4 sh = sir_shadow.Load4(sir_sh(s8)); uint2 r = b.Load2(sh.w + v0 + 0u + 0u);"), "{b}");
     assert!(!b.contains("NonUniformResourceIndex"), "uniform heap indices stay uniform: {b}");
     compile(&l, "cov_never_cbv");
+}
+
+/// The title's heap is larger than the host's: a console index past `CONSOLE_VIEWS` must never reach the host
+/// heap's alternate or window ranges (another view type there). Every heap read goes through `sir_vi` (console
+/// index) or `sir_va` (alternate), and every shadow read through `sir_sh`.
+#[test]
+fn console_view_indices_never_reach_the_alternates() {
+    use crate::lift::{NullKind, CONSOLE_VIEWS, NULL_BANK, WINDOW_HEAP_BASE};
+    // the null bank: one slot per kind, inside the bank, below the windows
+    let slots: Vec<u32> = NullKind::all().iter().map(|k| k.slot()).collect();
+    let mut sorted = slots.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), slots.len(), "one slot per kind");
+    assert!(slots.iter().all(|&s| s < NULL_BANK));
+    assert!(CONSOLE_VIEWS + NULL_BANK < WINDOW_HEAP_BASE);
+    // the prelude's literals are the constants
+    assert!(PRELUDE.contains(&format!("i < {CONSOLE_VIEWS}u ? i : {CONSOLE_VIEWS}u + k")));
+    assert!(PRELUDE.contains(&format!("z >= {CONSOLE_VIEWS}u && z < {}u", CONSOLE_VIEWS + NULL_BANK)));
+    assert!(PRELUDE.contains(&format!("min(i, {CONSOLE_VIEWS}u) * 16u")));
+
+    let (layout, used) = table();
+    let mubuf = |name: &str, vdata: u32| build(&e::MUBUF, Encoding::Mubuf, name, &[("offen", 1), ("vaddr", 0), ("vdata", vdata), ("srsrc", 2), ("soffset", 128)]);
+    let l = lifted(
+        &[
+            smem("s_load_dwordx4", 8, 0, 0),
+            smem("s_buffer_load_dword", 12, 8, 4),
+            mubuf("buffer_load_dwordx2", 4),
+            mubuf("buffer_store_dword", 6),
+            build(&e::MTBUF, Encoding::Mtbuf, "tbuffer_load_format_x", &[("offen", 1), ("format", 22), ("vaddr", 0), ("vdata", 7), ("srsrc", 2), ("soffset", 128)]),
+        ],
+        &layout,
+        &used,
+    );
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let b = &l.body;
+    for (at, _) in b.match_indices("DescriptorHeap[") {
+        let rest = &b[at + "DescriptorHeap[".len()..];
+        assert!(rest.starts_with("sir_vi(") || rest.starts_with("sir_va("), "an unguarded heap index: {}", &rest[..rest.len().min(60)]);
+    }
+    for (at, _) in b.match_indices("sir_shadow.Load") {
+        let rest = &b[at..];
+        assert!(rest.starts_with("sir_shadow.Load(sir_sh(") || rest.starts_with("sir_shadow.Load4(sir_sh("), "an unguarded shadow read: {}", &rest[..rest.len().min(60)]);
+    }
+    compile(&l, "cov_view_guard");
 }

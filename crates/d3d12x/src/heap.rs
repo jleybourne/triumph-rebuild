@@ -8,10 +8,18 @@
 //! shader-visible views    one host heap of Limits::views descriptors:
 //!   [0, mirrored)           console index i at host index i. Buffers: a raw SRV of the
 //!                           descriptor's bytes; textures: the title's view
-//!   null_index (P)          a null view: translated shaders clamp indices to P
-//!   (P, views)              alternate views: a buffer descriptor's own kind (typed SRV, UAV;
-//!                           never a CBV: CBVs are only raw SRVs here), at the index its shadow entry names
-//! shadow table            per console index 16 bytes (stride, records, alternate, lead), t0 space101
+//!   [P, P + NULL_BANK)      null views, one per view type translated shaders declare
+//!                           (`rebuild_sir::lift::NullKind`): a console index at or past P reads
+//!                           the null of its type there (`sir_vi`), and so does an alternate that
+//!                           names the bank (`sir_va`). P = `rebuild_sir::lift::CONSOLE_VIEWS`
+//!                           on a real device (750,000), so no console index ever reaches:
+//!   [P + NULL_BANK, W)      alternate views: a buffer descriptor's own kind (typed SRV, UAV;
+//!   and [1,000,000, views)  never a CBV: CBVs are only raw SRVs here), at the index its shadow
+//!                           entry names
+//!   [W, 1,000,000)          window views (W = `rebuild_sir::lift::WINDOW_HEAP_BASE`): never an
+//!                           alternate
+//! shadow table            per console index 16 bytes (stride, records, alternate, lead), t0 space101;
+//!                         entry P (what a shader past the range reads) is (0, 0, P, 0)
 //! shader-visible samplers host heap of min(count, Limits::samplers), index for index
 //! CPU-only views, RTV, DSV host heap of count, index for index (the natural view)
 //! ```
@@ -84,11 +92,28 @@ impl Limits {
         Limits { views, samplers: Limits::TIER2.samplers }
     }
 
-    /// The null slot of every shader-visible view heap, and the first index a console index
-    /// cannot have: three quarters of the heap for console indices, the rest alternates.
-    /// 750,000 at the tier-2 limit, above the 720,000 the fork saw the title use.
+    /// The first null slot of every shader-visible view heap, and the first index a console
+    /// index cannot have: `rebuild_sir::lift::CONSOLE_VIEWS` (750,000, above the 720,000 the fork
+    /// saw the title use), which translated shaders compare with. A heap smaller than 1,000,000
+    /// (test rigs only: every host has at least that) keeps three quarters.
     pub fn null_index(&self) -> u32 {
-        self.views - self.views / 4
+        if self.views >= 1_000_000 {
+            rebuild_sir::lift::CONSOLE_VIEWS
+        } else {
+            self.views - self.views / 4
+        }
+    }
+
+    /// The host indices alternates may take: after the null bank, below the window range, and
+    /// past 1,000,000 on a larger heap. Disjoint from every index a console index or a window
+    /// can reach.
+    pub fn alternate_ranges(&self) -> [std::ops::Range<u32>; 2] {
+        let first = self.null_index() + rebuild_sir::lift::NULL_BANK;
+        if self.views >= 1_000_000 {
+            [first..rebuild_sir::lift::WINDOW_HEAP_BASE, 1_000_000..self.views]
+        } else {
+            [first..self.views, self.views..self.views]
+        }
     }
 }
 
@@ -554,6 +579,34 @@ enum BufferKind {
 
 /// The host resource takes unordered access (resources from the lead's model, or a null
 /// resource in the recording stand-in, which takes everything).
+/// The null view of one null-bank kind: the type translated shaders declare for it, so a read past the
+/// mirrored range (or of a missing alternate) is a typed null read, never a type mismatch.
+pub(crate) fn null_view(k: rebuild_sir::lift::NullKind) -> HostView {
+    use rebuild_sir::lift::NullKind;
+    // the console's dim (0 1D, 1 2D, 2 3D, 3 cube, 4 1D array, 5 2D array) as a host SRV / UAV dimension
+    let srv_dim = |d: u8| [D3D12_SRV_DIMENSION_TEXTURE1D, D3D12_SRV_DIMENSION_TEXTURE2D, D3D12_SRV_DIMENSION_TEXTURE3D, D3D12_SRV_DIMENSION_TEXTURECUBE, D3D12_SRV_DIMENSION_TEXTURE1DARRAY, D3D12_SRV_DIMENSION_TEXTURE2DARRAY][usize::from(d.min(5))];
+    // a cube has no UAV: the translator declares none (RW cubes read as 2D arrays)
+    let uav_dim = |d: u8| [D3D12_UAV_DIMENSION_TEXTURE1D, D3D12_UAV_DIMENSION_TEXTURE2D, D3D12_UAV_DIMENSION_TEXTURE3D, D3D12_UAV_DIMENSION_TEXTURE2DARRAY, D3D12_UAV_DIMENSION_TEXTURE1DARRAY, D3D12_UAV_DIMENSION_TEXTURE2DARRAY][usize::from(d.min(5))];
+    let uav_tex = |d: u8, format: DXGI_FORMAT| {
+        let mut desc = D3D12_UNORDERED_ACCESS_VIEW_DESC { Format: format, ViewDimension: uav_dim(d), ..Default::default() };
+        if matches!(desc.ViewDimension, D3D12_UAV_DIMENSION_TEXTURE2DARRAY | D3D12_UAV_DIMENSION_TEXTURE1DARRAY) {
+            desc.Anonymous.Texture2DArray = D3D12_TEX2D_ARRAY_UAV { ArraySize: 1, ..Default::default() };
+        } else if desc.ViewDimension == D3D12_UAV_DIMENSION_TEXTURE3D {
+            desc.Anonymous.Texture3D = D3D12_TEX3D_UAV { WSize: 1, ..Default::default() };
+        }
+        HostView::Uav { resource: std::ptr::null_mut(), desc }
+    };
+    match k {
+        NullKind::Raw => HostView::NullBuffer,
+        NullKind::RwRaw => HostView::NullUav,
+        NullKind::Typed => HostView::typed_srv(std::ptr::null_mut(), DXGI_FORMAT_R32G32B32A32_FLOAT.0 as u32, 0, 1),
+        NullKind::RwTyped => HostView::typed_uav(std::ptr::null_mut(), DXGI_FORMAT_R32G32B32A32_FLOAT.0 as u32, 0, 1),
+        NullKind::Tex(d) => HostView::NullTexture(srv_dim(d).0),
+        NullKind::RwTex(d) => uav_tex(d, DXGI_FORMAT_R32G32B32A32_FLOAT),
+        NullKind::RwTexUint(d) => uav_tex(d, DXGI_FORMAT_R32_UINT),
+    }
+}
+
 fn resource_uav(r: Raw) -> bool {
     match unsafe { ID3D12Resource::from_raw_borrowed(&r) } {
         None => true,
@@ -698,8 +751,12 @@ impl Resources {
         let (host_count, mirrored, alt, null_index) = match kind {
             VIEWS if visible => {
                 let p = limits.null_index();
-                let room = limits.views - p - 1;
-                let alt = if count <= room { Alt::Fixed(p + 1) } else { Alt::Pool(Mutex::new((p + 1..limits.views).rev().collect())) };
+                let [low, high] = limits.alternate_ranges();
+                let alt = if count.min(p) <= low.end - low.start {
+                    Alt::Fixed(low.start)
+                } else {
+                    Alt::Pool(Mutex::new(high.rev().chain(low.rev()).collect()))
+                };
                 (limits.views, count.min(p), alt, p)
             }
             SAMPLERS if visible => (count.min(limits.samplers), count.min(limits.samplers), Alt::None, 0),
@@ -742,6 +799,15 @@ impl Resources {
             alts: (0..if pool { mirrored } else { 0 }).map(|_| AtomicU32::new(NO_ALT)).collect(),
             stats: HeapStats::default(),
         });
+        // the null bank, and the shadow entry a console index past the range reads
+        if kind == VIEWS && visible {
+            for k in rebuild_sir::lift::NullKind::all() {
+                ctx.write_view(state.host.cpu_at(null_index + k.slot()), &null_view(k));
+            }
+            if let Some(s) = &state.shadow {
+                s.write(null_index, [0, 0, null_index, 0]);
+            }
+        }
         {
             let mut heaps = ctx.heaps.write().unwrap_or_else(|e| e.into_inner());
             let k = heaps.partition_point(|r| r.start < start);

@@ -79,6 +79,75 @@ pub const WINDOW_HEAP_BASE: u32 = 1_000_000 - WINDOW_COUNT;
 /// Windows the heap range holds: every 4 GiB window of a 47-bit address space.
 pub const WINDOW_COUNT: u32 = 1 << 15;
 
+/// Console view indices a host shader-visible view heap mirrors at the same index: `[0, CONSOLE_VIEWS)`. The
+/// title's heap has 1,245,184 views and the host's at most 1,000,000 (tiers 1-2 and NVIDIA), so not every index
+/// fits; the heap's other ranges must never be reached by a console index, or a shader reads an alternate or
+/// window view (another type) where the title put its descriptor. Every console index a translated program uses
+/// goes through `sir_vi` (and every alternate through `sir_va`): one at or past `CONSOLE_VIEWS` reads the null
+/// view of the declared type in the null bank instead.
+///
+/// ```text
+/// [0, CONSOLE_VIEWS)                         console index i at host index i
+/// [CONSOLE_VIEWS, + NULL_BANK)               null views, one per view type the translator declares ([`NullKind`])
+/// [CONSOLE_VIEWS + NULL_BANK, WINDOW_HEAP_BASE)   alternates (and, on a larger heap, from 1,000,000 up)
+/// [WINDOW_HEAP_BASE, 1,000,000)              window views
+/// ```
+pub const CONSOLE_VIEWS: u32 = 750_000;
+/// Null views after [`CONSOLE_VIEWS`]: see [`NullKind::slot`].
+pub const NULL_BANK: u32 = 24;
+
+/// The view type a null-bank slot holds: `CONSOLE_VIEWS + slot()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NullKind {
+    /// `ByteAddressBuffer`
+    Raw,
+    /// `RWByteAddressBuffer`
+    RwRaw,
+    /// `Buffer<float4>`
+    Typed,
+    /// `RWBuffer<float4>`
+    RwTyped,
+    /// `Texture*<float4>` by the console's `dim` (0 1D, 1 2D, 2 3D, 3 cube, 4 1D array, 5 2D array)
+    Tex(u8),
+    /// `RWTexture*<float4>` by `dim`
+    RwTex(u8),
+    /// `RWTexture*<uint>` (and wider integer elements) by `dim`: image atomics
+    RwTexUint(u8),
+}
+
+impl NullKind {
+    pub fn slot(self) -> u32 {
+        match self {
+            NullKind::Raw => 0,
+            NullKind::RwRaw => 1,
+            NullKind::Typed => 2,
+            NullKind::RwTyped => 3,
+            NullKind::Tex(d) => 4 + u32::from(d.min(5)),
+            NullKind::RwTex(d) => 10 + u32::from(d.min(5)),
+            NullKind::RwTexUint(d) => 16 + u32::from(d.min(5)),
+        }
+    }
+
+    /// Every kind, in slot order (slots 22 and 23 are spare: raw nulls).
+    pub fn all() -> Vec<NullKind> {
+        let mut v = vec![NullKind::Raw, NullKind::RwRaw, NullKind::Typed, NullKind::RwTyped];
+        v.extend((0..6).map(NullKind::Tex));
+        v.extend((0..6).map(NullKind::RwTex));
+        v.extend((0..6).map(NullKind::RwTexUint));
+        v
+    }
+}
+
+/// `sir_vi(index, kind)`: a console view index as the host heap index to read (see [`CONSOLE_VIEWS`]).
+pub fn view_index(index: &str, kind: NullKind) -> String {
+    format!("sir_vi({index}, {}u)", kind.slot())
+}
+
+/// `sir_va(alternate, kind)`: a shadow entry's alternate index, the null of `kind` when the entry has none.
+pub fn alt_index(alt: &str, kind: NullKind) -> String {
+    format!("sir_va({alt}, {}u)", kind.slot())
+}
+
 /// The register space of immediate samplers (static samplers in the host root signature).
 pub const IMMEDIATE_SAMPLER_SPACE: u32 = 100;
 
@@ -127,6 +196,11 @@ float3 sir_cube_dir(float s, float t, float f) {
 int sir_f2i(float x) { return isnan(x) ? 0 : (x >= 2147483647.0f ? 2147483647 : (x <= -2147483648.0f ? (int)0x80000000 : (int)x)); }
 uint sir_f2u(float x) { return isnan(x) ? 0 : (x >= 4294967295.0f ? 0xffffffff : (x <= 0.0f ? 0 : (uint)x)); }
 struct SirCb { uint4 d[4096]; };
+// view heap indices (CONSOLE_VIEWS 750000, NULL_BANK 24): a console index past the mirrored range reads the null
+// view of its type; an alternate in the null bank (an entry with none, or the entry past the range) too
+uint sir_vi(uint i, uint k) { return i < 750000u ? i : 750000u + k; }
+uint sir_va(uint z, uint k) { return (z >= 750000u && z < 750024u) ? 750000u + k : z; }
+uint sir_sh(uint i) { return min(i, 750000u) * 16u; }
 uint sir_bfe_u(uint v, uint off, uint w) { off &= 31; w &= 31; return w == 0 ? 0 : (v >> off) & ((1u << w) - 1); }
 int sir_bfe_i(int v, uint off, uint w) { off &= 31; w &= 31; return w == 0 ? 0 : (v << (32 - off - w)) >> (32 - w); }
 // f32 to f16 bits, rounded to nearest even as the console's 16-bit ops round (a native conversion; HLSL's
@@ -303,9 +377,9 @@ impl Lifter<'_> {
                             self.out.uses_shadow = true;
                             self.out.sgprs.insert(b);
                             return Some(if k == 2 {
-                                format!("sir_shadow.Load(s{b} * 16u + 4u)")
+                                format!("sir_shadow.Load(sir_sh(s{b}) + 4u)")
                             } else {
-                                format!("(sir_shadow.Load(s{b} * 16u) << 16)")
+                                format!("(sir_shadow.Load(sir_sh(s{b})) << 16)")
                             });
                         }
                     }
