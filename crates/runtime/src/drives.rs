@@ -90,6 +90,11 @@ pub fn adopt_zero_scid(saves: &Path, title_id: u32) -> Vec<String> {
         }
         let to = user.path().join(&real);
         let name = user.file_name().to_string_lossy().into_owned();
+        // an empty zero folder holds no saves (a run with the title id unset opens it): removed, nothing to report
+        if std::fs::read_dir(&zero).map(|mut d| d.next().is_none()).unwrap_or(false) {
+            let _ = std::fs::remove_dir(&zero);
+            continue;
+        }
         if to.exists() {
             out.push(format!("user {name}: both {ZERO_SCID} and {real} hold saves; both kept, the title reads {real}"));
             continue;
@@ -206,6 +211,9 @@ mod tests {
         put(root.join("b").join(ZERO_SCID).join("%50layer.gsc"), b"b-zero");
         put(root.join("b").join(&real).join("%50layer.gsc"), b"b-real");
         put(root.join("c").join(&real).join("%50layer.gsc"), b"c-real");
+        // d: an empty zero folder beside real saves (a run with the title id unset made it)
+        put(root.join("d").join(&real).join("%50layer.gsc"), b"d-real");
+        std::fs::create_dir_all(root.join("d").join(ZERO_SCID)).unwrap();
         // title id unset: nothing moves
         assert!(adopt_zero_scid(&root, 0).is_empty());
         assert!(root.join("a").join(ZERO_SCID).is_dir());
@@ -218,6 +226,8 @@ mod tests {
         assert_eq!(std::fs::read(root.join("b").join(ZERO_SCID).join("%50layer.gsc")).unwrap(), b"b-zero", "kept");
         assert_eq!(std::fs::read(root.join("b").join(&real).join("%50layer.gsc")).unwrap(), b"b-real", "kept");
         assert_eq!(std::fs::read(root.join("c").join(&real).join("%50layer.gsc")).unwrap(), b"c-real");
+        assert!(!root.join("d").join(ZERO_SCID).exists(), "the empty zero folder is removed, not a conflict");
+        assert_eq!(std::fs::read(root.join("d").join(&real).join("%50layer.gsc")).unwrap(), b"d-real");
         // a second start: nothing left to move, the conflict reported again
         assert_eq!(adopt_zero_scid(&root, 0x7952_987a).len(), 1);
         // no saves folder at all
