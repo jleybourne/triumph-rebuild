@@ -215,6 +215,19 @@ through its first word, for each interface id.
 - **Saves** live in `overlay\GameSave\<xuid>\<scid>\<container>.gsc` (beside `S`, not on it), one file per
   container, replaced whole by rename on each update (all or nothing). Offline: always in sync, no conflicts,
   quota 256 MB, one update at most 16 MB. Asynchronous calls do their file work on the block's work port.
+- **In the title** (card runs `noinput1`, `setup1`-`setup4`, 2026-11-28): no `interface not implemented` line any more. The
+  title adds the user silently (`XUserAddAsync(1)`, ~5-10 s in), opens a save provider (`XGameSaveInitializeProviderAsync`,
+  sync on demand off), asks `XGameSaveGetContainerInfo` for `"Player"` (the gamertag) and `"SettingsProfileSettings"`,
+  and enumerates containers; it found none and had written none by the end of a 600 s run that reached the legal-terms
+  page of first-run setup (the scripted input never got past its checkboxes). So persistence across runs is proven by
+  the tests, not yet by the title: it needs a run that completes first-run setup (longer than the 120 s run limit).
+- **The engagement screen** ("ACCOUNT PICKER (Y) · SCREEN NARRATION (OFF) (X) · PLAYER (A)") is not a GDK sign-in failure:
+  every user call the title makes succeeds (traced: add, local id, id, gamertags, guest, age group, 15 privilege checks;
+  no state query, no token request), and no unserved interface is asked for. "PLAYER" is the gamertag. The title's pad
+  manager (`0x142211xxx`-`0x142212xxx`) pairs a gamepad with the signed-in user only when a pad arrives after the user is in
+  slot 0, or on an A press; a test that connected the pad only after the user was added did not change the screen (draws
+  stay at the screen's 21 a frame). The black stretches between the screen's frames are the Bink video (lead's notes).
+  Open: whether the screen is the first-boot gate that a saved profile (`SettingsProfileSettings`) skips.
 - **Speech** is silent: no voices; streams are a 44-byte WAVE file with no samples. Slots 0x18-0x38 and 0x88-0xa0
   (closed captions, high contrast, speech to text) are not called and stay discovery.
 
