@@ -3,7 +3,8 @@
 //! Load the title through the Windows loader (prepared images), bind its imports, and run its startup past
 //! `D3D12XboxCreateDevice` (the first render call) until the deadline (`--seconds N`; none from
 //! `rebuild.exe` unless asked), then print the discovery list: every unbuilt import the title called, in
-//! first-call order. The game folder is only read; prepared copies go to %LOCALAPPDATA%\triumph-rebuild\images.
+//! first-call order. The game folder is only read; prepared copies go to the game's per-build `images` cache
+//! (`rebuild_storage`, `docs/design/storage.md`), and files from before that layout are migrated first.
 //!
 //! With `--sample N` (opt-in: it suspends a thread), a sampler stops the title's main thread every N seconds and prints
 //! its stack as image+rva, so a title that waits shows where. At the end, every thread is sampled once.
@@ -402,7 +403,7 @@ pub fn fail(code: i32, why: &str) -> ! {
 
 /// The name of the mutex a title run holds for its whole life (the OS releases it when the process ends, crash
 /// included, so it is never stale).
-pub const RUN_MUTEX: &str = "Local\\triumph-rebuild-title-run";
+pub const RUN_MUTEX: &str = rebuild_storage::RUN_MUTEX;
 
 /// Hold [`RUN_MUTEX`] or exit 4: another title run is in progress.
 fn single_run() {
@@ -436,7 +437,27 @@ pub fn run(o: Options) -> ! {
     // debug: the offline online-mode sandbox. A loud line when it is on, so no run is mistaken for a real
     // online session; the runtime layer blocks every non-loopback connection while it is.
     rebuild_runtime::sandbox::announce();
-    let cache = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("triumph-rebuild").join("images");
+    // where this game's files live: its id and build from its manifest (or the launcher's), set for the whole
+    // process before anything opens a cache; files from before this layout are moved in first (saves copied)
+    let st = rebuild_storage::storage();
+    let store = rebuild_storage::game_for(&dir);
+    rebuild_storage::set_current(store.clone());
+    println!("storage   {} ({}): game {} build {}", st.user.display(), st.mode.label(), store.id, store.build);
+    for n in &st.notes {
+        println!("storage   {n}");
+    }
+    let legacy = rebuild_storage::migrate::Legacy::from_env(&rebuild_storage::Env::from_process());
+    let moved = rebuild_storage::migrate::game_data(st, &store, &legacy);
+    for l in &moved.lines {
+        println!("migrate   {l}");
+    }
+    for (from, to) in &moved.moved {
+        println!("migrate   {} -> {}", from.display(), to.display());
+    }
+    for (p, why) in &moved.kept {
+        println!("migrate   kept {}: {why}", p.display());
+    }
+    let cache = store.images_dir();
 
     let title = match load_title(&dir, &cache) {
         Ok(t) => t,
@@ -482,7 +503,7 @@ pub fn run(o: Options) -> ! {
         std::process::exit(2);
     }
 
-    let drives = rebuild_runtime::drives::Drives { bcpack_tables, ..rebuild_runtime::drives::Drives::new(&dir) };
+    let drives = rebuild_runtime::drives::Drives { bcpack_tables, ..rebuild_runtime::drives::Drives::in_store(dir.clone(), &store) };
     match rebuild_runtime::drives::install(&drives) {
         Ok(_) => println!("drives    G: the title's folder (read-only), T: emptied, S: storage; files and DirectStorage on them"),
         Err(e) => fail(1, &e),

@@ -9,4 +9,4 @@ version.workspace = true
 
 [dependencies]
 rebuild-gdk = { path = "../gdk" }
-rebuild-vfs = { path = "../vfs" }
+rebuild-storage = { path = "../storage" }

@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+rebuild-storage = { path = "../storage" }
 rebuild-shader = { path = "../shader" }
 rebuild-sir = { path = "../sir" }
 rebuild-cardlock = { path = "../cardlock" }

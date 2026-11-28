@@ -4,8 +4,8 @@
 //! (`rebuild_gdk::areas::xgamesave::file::write`) and reads the result back.
 //!
 //! ```text
-//! <overlay>/GameSave/<xuid>/<scid>/<container>.gsc            the runtime's containers
-//! <overlay>/GameSave.backups/<xuid>/<scid>/<file>.<stamp>.gsc  the editor's backups (never read by the title)
+//! <data>/games/<id>/saves/<xuid>/<scid>/<container>.gsc            the runtime's containers
+//! <data>/games/<id>/saves.backups/<xuid>/<scid>/<file>.<stamp>.gsc  the editor's backups (never read by the title)
 //! ```
 
 use crate::format::{Save, DATA_BLOB, HEADER_BLOB};
@@ -13,11 +13,10 @@ use crate::json::{Fields, Json};
 use rebuild_gdk::areas::xgamesave::{file, valid_container_name, Stored};
 use std::path::{Path, PathBuf};
 
-/// The folder holding every user's containers for `game`. Today the runtime keeps one overlay for all
-/// games (`rebuild_vfs::default_overlay_root`), so `game` is unused; the storage lane's
-/// `storage::saves_dir(game, user)` replaces this one function when it lands.
-pub fn saves_root(_game: &str) -> PathBuf {
-    rebuild_vfs::default_overlay_root().join("GameSave")
+/// The folder holding every user's containers for `game`: `<data>\games\<game>\saves` (the storage crate's
+/// layout; `<user as 16 hex>\<scid>\<container>.gsc` underneath, as the runtime writes them).
+pub fn saves_root(game: &str) -> PathBuf {
+    rebuild_storage::storage().game(game).saves_root()
 }
 
 /// Where the editor keeps backups for containers under `root`: beside it, never inside it.

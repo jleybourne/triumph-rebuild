@@ -13,3 +13,6 @@ path = "src/bin/gdkslots.rs"
 [[bin]]
 name = "gdkguids"
 path = "src/bin/gdkguids.rs"
+
+[dev-dependencies]
+rebuild-storage = { path = "../storage" }

@@ -4,7 +4,7 @@
 //! - The title's create call [`OnDemand::offer`]s the container (one hash lookup; the bytes are copied once per
 //!   program) and returns at once; a pool worker calls [`OnDemand::get`] when it creates the pipeline.
 //! - `get` translates through [`crate::translate`] (lift, HLSL, DXC) and writes the result to the disk cache,
-//!   `%LOCALAPPDATA%\triumph-rebuild\pipelines\ondemand\<hash>.od`. The next session reads it there:
+//!   `<the game's pipelines cache>\ondemand\<hash>.od`. The next session reads it there:
 //!   the program is lifted again (about a millisecond) and its HLSL compared with the one the cached DXIL was
 //!   compiled from, so a translator change can never serve stale DXIL, and DXC runs only when the HLSL changed.
 //! - The cache file carries the container too, so a pipeline prewarmed from the last session's record is
