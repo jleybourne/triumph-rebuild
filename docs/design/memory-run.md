@@ -81,6 +81,22 @@ opened heap; anything else → `titlemem` (physical pages, plain host memory). A
 `ListHost::cpu_memory(va)` answers labels and timestamp resolves from the CPU copy (`titlemem`), so the title's
 polls see them.
 
+## Measured (card, RTX 4070 Ti, 30 s runs, the same binary)
+
+| | `REBUILD_MEMORY=standin` | the model |
+|:--|:--|:--|
+| fps, 18-30 s | 12-13 | 17-18 |
+| frame line `gpu` | 1.1-1.5 ms | 1.5-1.7 ms |
+| draws recorded over the run | 958 | 5,449 |
+| card pages | none | 896 MiB in 12 sub-windows (14,086 pages, 12,839 placed on first write) |
+| upload | none | 886 MiB over the run (the first seconds: what the title wrote before the device), then ~0.03 MB a frame; 13.4 ms a pass on the ring's thread (write-watch 12.4, diff 0.5, gather 0.1, record 0.2); flush to signalled 15 ms |
+| nvlddmkm events | 448 → 448 | 448 → 448 |
+
+Pass cost is write-watch: GetWriteWatch walks every page of the 5.2 GiB watched (~2.4 ms a GiB). Splitting
+it across the 4 workers made it **slower** (32.7 ms a pass): concurrent calls on one address space contend in
+the kernel. Kept serial. To shrink it: watch less (memory the title never writes after load could leave the ring
+once it is quiet), not watch faster.
+
 ## Cost
 
 Submit thread: one channel send and one queue `Wait` per `ExecuteCommandLists`. Per draw: nothing new (views are
