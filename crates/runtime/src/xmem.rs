@@ -228,8 +228,16 @@ pub mod host {
     }
 
     pub fn virtual_free(x: &mut Xmem, base: u64, size: u64, kind: u32) -> bool {
+        // what the free touches, for the GPU's opened allocations (crate::titlemem): a release (and a decommit of
+        // size 0) takes the whole allocation from `base`, else `size` bytes rounded out to pages
+        let touched = match (kind & MEM_RELEASE.0 != 0 || size == 0).then(|| rebuild_d3d12x::vmem::allocation_of(base)).flatten() {
+            Some(a) => (base, a.base + a.size),
+            None if size == 0 => (base, u64::MAX),
+            None => (base & !0xfff, (base + size).next_multiple_of(0x1000)),
+        };
         // the memory model stops reading (and unmaps) what is freed first
         let r = crate::memory::freeing(base, size, kind, || unsafe { VirtualFree(base as *mut c_void, size as usize, VIRTUAL_FREE_TYPE(kind)) });
+        crate::titlemem::changed(touched.0, touched.1.max(base + size));
         if let Err(e) = &r {
             static FAILED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             if FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {

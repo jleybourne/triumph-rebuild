@@ -40,24 +40,176 @@ struct Opened {
 }
 
 /// Bumped whenever memory the title's allocations could live in is freed, decommitted or remapped
-/// ([`changed`]): an opened allocation confirmed in the current generation is still the same allocation.
+/// ([`changed`]), with the range it touched kept in [`CHANGES`]: an opened allocation confirmed in an earlier
+/// generation is still the same allocation when none of the changes since then touched it.
 static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// The title freed, decommitted or remapped memory (`VirtualFree`, physical pages mapped or unmapped): every
-/// opened allocation is confirmed again at its next lookup. A few relaxed adds a frame at most; a lookup between
-/// two changes skips the address-space query (`QueryVirtualMemoryInformation`, and `VirtualQuery` for mapped views,
-/// 112 µs a GPU-timestamp label on the card, `runs/build6-lists.md`).
-pub fn changed() {
-    GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+/// The latest changes, oldest first: (the generation it made, its range `lo..hi`). Bounded; an allocation
+/// confirmed before the oldest one kept queries the address space again.
+static CHANGES: Mutex<std::collections::VecDeque<(u64, u64, u64)>> = Mutex::new(std::collections::VecDeque::new());
+const CHANGES_KEPT: usize = 4096;
+
+/// The title freed, decommitted or remapped `lo..hi` (`VirtualFree`, physical pages mapped or unmapped). Called
+/// **after** the change: an opened allocation that overlaps the range is confirmed again at its next lookup; every
+/// other one keeps answering from the cache (a lock and a short scan once per allocation and change, against the
+/// address-space query: `QueryVirtualMemoryInformation`, and `VirtualQuery` for mapped views).
+pub fn changed(lo: u64, hi: u64) {
+    let mut c = CHANGES.lock().unwrap_or_else(|e| e.into_inner());
+    // the generation moves under the lock: a lookup that read generation g finds every change up to g logged
+    let g = GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+    if c.len() == CHANGES_KEPT {
+        c.pop_front();
+    }
+    c.push_back((g, lo, hi.max(lo.saturating_add(1))));
+    CHANGE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
+
+/// Everything may have changed: every opened allocation is confirmed again.
+pub fn changed_all() {
+    changed(0, u64::MAX);
+}
+
+/// No change since generation `since` touched `lo..hi` (known only while the log reaches back that far).
+fn untouched(lo: u64, hi: u64, since: u64) -> bool {
+    if !ranges_on() {
+        return false;
+    }
+    let c = CHANGES.lock().unwrap_or_else(|e| e.into_inner());
+    if c.front().is_none_or(|&(g, _, _)| g > since + 1) {
+        return false;
+    }
+    c.iter().rev().take_while(|e| e.0 > since).all(|&(_, a, b)| b <= lo || a >= hi)
+}
+
+/// `REBUILD_TITLEMEM_RANGES=1`: a change confirms again only the opened allocations it touched (off: every one, as
+/// before; tests turn it on with [`set_ranges`]). Off by default until a card run confirms it: the first card run
+/// with it (and the list pool) ended in a GPU reset that was not isolated (`agents/listcost.md`).
+pub fn ranges_on() -> bool {
+    let v = RANGES.load(std::sync::atomic::Ordering::Relaxed);
+    if v != 0 {
+        return v == 1;
+    }
+    let on = std::env::var("REBUILD_TITLEMEM_RANGES").is_ok_and(|v| v.trim() == "1");
+    RANGES.store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+    on
+}
+
+/// 0 unread, 1 on, 2 off.
+static RANGES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Turn range invalidation on or off ([`ranges_on`]).
+pub fn set_ranges(on: bool) {
+    RANGES.store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Changes reported ([`changed`]).
+pub static CHANGE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Lookups answered without a query of the address space, and those that queried it.
 pub static CACHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static QUERIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Of [`CACHED`]: an allocation confirmed in an earlier generation that no change since touched.
+pub static UNTOUCHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Why a lookup queried the address space ([`WHY`], [`why_report`]).
+pub mod why {
+    /// an opened allocation over the address, touched by a change since it was confirmed: the same one again
+    pub const CONFIRMED: usize = 0;
+    /// opened over the address, but gone or changed: opened again (or refused)
+    pub const REOPENED: usize = 1;
+    /// no opened allocation over the address: opened now
+    pub const NEW: usize = 2;
+    /// free memory, nothing committed, or not writable
+    pub const NONE: usize = 3;
+    /// the address lies past the committed part of an opened allocation
+    pub const PAST: usize = 4;
+    pub const NAMES: [&str; 5] = ["confirmed", "reopened", "new", "no memory", "past committed"];
+}
+/// Lookups that queried, by [`why`], and the TSC ticks they took there.
+pub static WHY: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+pub static WHY_TICKS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
+/// The lookups that queried, by reason, with their mean cost.
+pub fn why_report() -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    let mut out = format!(
+        "{} changes reported (ranges {}), {} cached lookups untouched by the changes since; sections {}: {} lookups through a section view, {} views opened; queried:",
+        CHANGE_CALLS.load(Relaxed),
+        if ranges_on() { "on" } else { "off" },
+        UNTOUCHED.load(Relaxed),
+        if sections_on() { "on" } else { "off" },
+        SECTION_HITS.load(Relaxed),
+        SECTIONS_OPENED.load(Relaxed)
+    );
+    for (i, n) in why::NAMES.iter().enumerate() {
+        let c = WHY[i].load(Relaxed);
+        if c > 0 {
+            let ms = rebuild_xlist::console::cost::ms(WHY_TICKS[i].load(Relaxed));
+            out += &format!(" {n} {c} ({:.1} µs each)", ms * 1000.0 / c as f64);
+        }
+    }
+    out
+}
+
+/// `REBUILD_TITLEMEM_SECTIONS=1`: a physical frame the title maps is reached through its section's one whole view
+/// (opened once as a heap), not opened at every address the title maps it at. Measured: the title's GPU-timestamp
+/// labels sit in 64 KiB frames it maps afresh every few frames (0xb40000, 0xb60000, ... each label at +0xff20), so
+/// nearly every lookup that queried was a new mapping opened as a heap of its own (0.4-2.5 ms each on the card).
+pub fn sections_on() -> bool {
+    static S: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *S.get_or_init(|| std::env::var("REBUILD_TITLEMEM_SECTIONS").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// Where a mapped frame's bytes are in its section's whole view.
+#[derive(Clone, Copy)]
+struct FrameAt {
+    id: u64,
+    view: u64,
+    bytes: u64,
+    off: u64,
+}
+
+const FRAME: u64 = 64 << 10;
+
+/// Mapped frames by console address ([`frame_mapped`]), and section views gone since the last lookup.
+static FRAMES: Mutex<BTreeMap<u64, FrameAt>> = Mutex::new(BTreeMap::new());
+static GONE: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+/// The title mapped a frame at `addr`: its bytes are at `off` in section view `id` (`bytes` long, at `view`).
+pub fn frame_mapped(addr: u64, id: u64, view: u64, bytes: u64, off: u64) {
+    FRAMES.lock().unwrap_or_else(|e| e.into_inner()).insert(addr, FrameAt { id, view, bytes, off });
+}
+
+/// The frame mapped at `addr` is unmapped.
+pub fn frame_unmapped(addr: u64) {
+    if sections_on() {
+        FRAMES.lock().unwrap_or_else(|e| e.into_inner()).remove(&addr);
+    }
+}
+
+/// Section view `id` is about to be unmapped: its heap is released at the next lookup (work recorded already holds
+/// its own references).
+pub fn section_gone(id: u64) {
+    if sections_on() && id != 0 {
+        GONE.lock().unwrap_or_else(|e| e.into_inner()).push(id);
+    }
+}
+
+/// Lookups answered through a section view, and section views opened.
+pub static SECTION_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static SECTIONS_OPENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `REBUILD_TITLEMEM_TRACE=1`: the first lookups that query, one line each (address, reason, µs, the allocation).
+fn trace_on() -> bool {
+    static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var("REBUILD_TITLEMEM_TRACE").is_ok_and(|v| v == "1"))
+}
 
 pub struct TitleMemory {
     device: ID3D12Device3,
     opened: Mutex<BTreeMap<u64, Opened>>,
+    /// section views opened as heaps, by view number ([`sections_on`]); `None`: refused
+    sections: Mutex<std::collections::HashMap<u64, Option<(ID3D12Heap, ID3D12Resource, u64)>>>,
 }
 
 // SAFETY: D3D12 objects are free-threaded; the map is locked.
@@ -105,7 +257,7 @@ fn writable(p: PAGE_PROTECTION_FLAGS) -> bool {
 
 impl TitleMemory {
     pub fn new(device: &ID3D12Device) -> Option<TitleMemory> {
-        Some(TitleMemory { device: device.cast().ok()?, opened: Mutex::new(BTreeMap::new()) })
+        Some(TitleMemory { device: device.cast().ok()?, opened: Mutex::new(BTreeMap::new()), sections: Mutex::new(std::collections::HashMap::new()) })
     }
 
     /// The title's allocation holding `va`, opened for the GPU.
@@ -131,39 +283,104 @@ impl TitleMemory {
         r
     }
 
+    /// A mapped physical frame through its section's whole view, opened once ([`sections_on`]).
+    fn through_section(&self, va: u64) -> Option<Option<MemoryRange>> {
+        let frame = va & !(FRAME - 1);
+        let f = *FRAMES.lock().unwrap_or_else(|e| e.into_inner()).get(&frame)?;
+        let mut sections = self.sections.lock().unwrap_or_else(|e| e.into_inner());
+        for id in std::mem::take(&mut *GONE.lock().unwrap_or_else(|e| e.into_inner())) {
+            sections.remove(&id);
+        }
+        let opened = sections.entry(f.id).or_insert_with(|| {
+            let gpu = self.open(f.view, f.bytes);
+            if gpu.is_some() {
+                SECTIONS_OPENED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            gpu
+        });
+        // a heap smaller than the view (never seen) leaves the frames past it to the per-mapping path
+        let (_, buffer, gpu_va) = opened.as_ref()?;
+        let size = unsafe { buffer.GetDesc() }.Width;
+        if f.off + FRAME > size {
+            return None;
+        }
+        SECTION_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(Some(MemoryRange { console: frame, bytes: FRAME, host_va: gpu_va + f.off, resource: buffer.as_raw(), resource_offset: f.off }))
+    }
+
     fn lookup(&self, va: u64) -> Option<MemoryRange> {
         use std::sync::atomic::Ordering::{Acquire, Relaxed};
-        // fastest: an allocation confirmed since the last free, decommit or remap that covers `va`
+        if sections_on() {
+            if let Some(r) = self.through_section(va) {
+                return r;
+            }
+        }
+        // fastest: an allocation over `va` confirmed since the last change that touched it
         let generation = GENERATION.load(Acquire);
+        let mut hint = why::NEW;
         {
-            let opened = self.opened.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((&base, o)) = opened.range(..=va).next_back() {
-                if o.checked == generation && va - base < o.bytes {
-                    CACHED.fetch_add(1, Relaxed);
-                    let (_, buffer, gpu_va) = o.gpu.as_ref()?;
-                    return Some(MemoryRange { console: base, bytes: o.bytes, host_va: *gpu_va, resource: buffer.as_raw(), resource_offset: 0 });
+            let mut opened = self.opened.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((&base, o)) = opened.range_mut(..=va).next_back() {
+                if va - base < o.bytes {
+                    if o.checked != generation && untouched(base, base + o.bytes.max(o.alloc), o.checked) {
+                        o.checked = generation;
+                        UNTOUCHED.fetch_add(1, Relaxed);
+                    }
+                    if o.checked == generation {
+                        CACHED.fetch_add(1, Relaxed);
+                        let (_, buffer, gpu_va) = o.gpu.as_ref()?;
+                        return Some(MemoryRange { console: base, bytes: o.bytes, host_va: *gpu_va, resource: buffer.as_raw(), resource_offset: 0 });
+                    }
+                    hint = why::CONFIRMED;
+                } else if va - base < o.alloc {
+                    hint = why::PAST;
                 }
             }
         }
         QUERIED.fetch_add(1, Relaxed);
-        // fast path: the allocation's descriptor (3 µs, never VirtualQuery: labels come here every frame) names it;
-        // an opened one of the same size that still covers `va` is used as is
-        let a = rebuild_d3d12x::vmem::allocation_of(va)?;
+        let t0 = rebuild_xlist::console::cost::now();
+        let (r, why) = self.query(va, generation, hint);
+        let t = rebuild_xlist::console::cost::now().wrapping_sub(t0);
+        WHY[why].fetch_add(1, Relaxed);
+        WHY_TICKS[why].fetch_add(t, Relaxed);
+        if trace_on() {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if N.fetch_add(1, Relaxed) < 64 {
+                eprintln!(
+                    "titlemem  query {va:#x}: {} in {:.1} µs; answered {:x?}; descriptor {:x?}",
+                    why::NAMES[why],
+                    rebuild_xlist::console::cost::ms(t) * 1000.0,
+                    r.as_ref().map(|m| (m.console, m.bytes)),
+                    rebuild_d3d12x::vmem::allocation_of(va)
+                );
+            }
+        }
+        r
+    }
+
+    /// The slow path: the address space asked (`hint`: what the cache saw), with the reason it ends with.
+    fn query(&self, va: u64, generation: u64, hint: usize) -> (Option<MemoryRange>, usize) {
+        // the allocation's descriptor (3 µs, never VirtualQuery: labels come here every frame) names it; an opened
+        // one of the same size that still covers `va` is used as is
+        let Some(a) = rebuild_d3d12x::vmem::allocation_of(va) else { return (None, why::NONE) };
         if a.uncommitted() {
-            return None;
+            return (None, why::NONE);
         }
         let alloc_base = a.base;
         {
             let mut opened = self.opened.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(o) = opened.get_mut(&alloc_base).filter(|o| o.alloc == a.size && va - alloc_base < o.bytes) {
                 o.checked = generation;
-                let (_, buffer, gpu_va) = o.gpu.as_ref()?;
-                return Some(MemoryRange { console: alloc_base, bytes: o.bytes, host_va: *gpu_va, resource: buffer.as_raw(), resource_offset: 0 });
+                let why = if hint == why::NEW { why::CONFIRMED } else { hint };
+                let Some((_, buffer, gpu_va)) = o.gpu.as_ref() else { return (None, why) };
+                return (Some(MemoryRange { console: alloc_base, bytes: o.bytes, host_va: *gpu_va, resource: buffer.as_raw(), resource_offset: 0 }), why);
             }
         }
-        let (base, bytes) = allocation(va)?;
+        let Some((base, bytes)) = allocation(va) else { return (None, if hint == why::PAST { why::PAST } else { why::NONE }) };
         let mut opened = self.opened.lock().unwrap_or_else(|e| e.into_inner());
+        let mut why = why::CONFIRMED;
         if opened.get(&base).is_none_or(|o| o.bytes != bytes || o.alloc != a.size) {
+            why = if opened.contains_key(&base) { why::REOPENED } else { why::NEW };
             let gpu = self.open(base, bytes);
             if gpu.is_none() {
                 OPEN_FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -174,10 +391,10 @@ impl TitleMemory {
             // already recorded holds its own references
             opened.insert(base, Opened { bytes, alloc: a.size, gpu, checked: generation });
         }
-        let o = opened.get_mut(&base)?;
+        let Some(o) = opened.get_mut(&base) else { return (None, why) };
         o.checked = generation;
-        let (_, buffer, gpu_va) = o.gpu.as_ref()?;
-        Some(MemoryRange { console: base, bytes: o.bytes, host_va: *gpu_va, resource: buffer.as_raw(), resource_offset: 0 })
+        let Some((_, buffer, gpu_va)) = o.gpu.as_ref() else { return (None, why) };
+        (Some(MemoryRange { console: base, bytes: o.bytes, host_va: *gpu_va, resource: buffer.as_raw(), resource_offset: 0 }), why)
     }
 
     fn open(&self, base: u64, bytes: u64) -> Option<(ID3D12Heap, ID3D12Resource, u64)> {
@@ -280,11 +497,25 @@ mod tests {
             CACHED.load(Relaxed) > c
         });
         assert!(cached, "answered from the opened allocation");
-        // a free anywhere: the next lookup queries again (and finds the same allocation, still there)
-        changed();
+        // a change elsewhere: still answered from the cache (other tests' frees may land meanwhile: retried)
+        set_ranges(true);
+        let kept = (0..20).any(|_| {
+            changed(p + bytes as u64, p + bytes as u64 + 65536);
+            changed(0x1000, p);
+            let u = UNTOUCHED.load(Relaxed);
+            assert_eq!(m.range(p + 8).map(|x| x.host_va), Some(r.host_va));
+            UNTOUCHED.load(Relaxed) > u
+        });
+        assert!(kept, "a change outside the allocation leaves it confirmed");
+        // a change over it: the next lookup queries again (and finds the same allocation, still there)
+        changed(p + 4096, p + 8192);
         let q1 = QUERIED.load(Relaxed);
         assert_eq!(m.range(p + 8).map(|x| x.host_va), Some(r.host_va));
-        assert!(QUERIED.load(Relaxed) > q1, "queried after a change");
+        assert!(QUERIED.load(Relaxed) > q1, "queried after a change over it");
+        changed_all();
+        let q2 = QUERIED.load(Relaxed);
+        assert_eq!(m.range(p + 8).map(|x| x.host_va), Some(r.host_va));
+        assert!(QUERIED.load(Relaxed) > q2, "queried after a change of everything");
         // outside every opened allocation: never answered from the cache
         assert!(m.range(p + bytes as u64 + 16).is_none_or(|x| x.console != p));
         assert!(m.range(0x10).is_none());

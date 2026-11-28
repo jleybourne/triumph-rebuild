@@ -357,8 +357,8 @@ pub extern "system" fn VirtualFree(base: *mut c_void, size: usize, kind: u32) ->
     if kind & 0x8000 != 0 {
         crate::overlap::free(base as u64); // MEM_RELEASE
     }
-    // released or decommitted: allocations the GPU opened in place are confirmed again
-    crate::titlemem::changed();
+    // released or decommitted: allocations the GPU opened in place over the range are confirmed again
+    // (host::virtual_free tells crate::titlemem)
     BOOL(with(|s| host::virtual_free(&mut s.xmem, base as u64, size as u64, kind)) as i32)
 }
 
