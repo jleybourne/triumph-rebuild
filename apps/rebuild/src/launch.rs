@@ -179,6 +179,7 @@ fn device_report() {
                 rebuild_runtime::titlemem::CACHED.load(Relaxed),
                 rebuild_runtime::titlemem::QUERIED.load(Relaxed)
             );
+            println!("titlemem  {}", rebuild_runtime::titlemem::why_report());
             println!("{}", rebuild_runtime::memory::report());
             println!("{}", rebuild_runtime::memory::vram_line());
             println!("cputex    {}", rebuild_runtime::cputex::report());
@@ -213,6 +214,7 @@ fn device_report() {
             if rebuild_xlist::console::mode::at_close() {
                 println!("xlate     {}", rebuild_xlist::console::mix::report());
             }
+            println!("xlate     {}", rebuild_xlist::console::pool::report());
             for l in rebuild_xlist::console::by_slot::report().unwrap_or_default() {
                 println!("xslot     {l}");
             }
@@ -456,6 +458,8 @@ pub fn run(o: Options) -> ! {
     // debug: the offline online-mode sandbox. A loud line when it is on, so no run is mistaken for a real
     // online session; the runtime layer blocks every non-loopback connection while it is.
     rebuild_runtime::sandbox::announce();
+    // host lists reset ahead of time, off the title's recording threads (REBUILD_LIST_POOL=1; off: reset as they record)
+    rebuild_runtime::submit::enable_list_pool();
     // where this game's files live: its id and build from its manifest (or the launcher's), set for the whole
     // process before anything opens a cache; files from before this layout are moved in first (saves copied)
     let st = rebuild_storage::storage();

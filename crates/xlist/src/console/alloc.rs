@@ -151,22 +151,34 @@ pub(crate) struct AllocatorState {
     /// several lists record into one allocator at once; a host allocator takes one recording list at a time
     /// (`Reset` fails with E_INVALIDARG otherwise, and the title asserts), so each open list gets its own.
     pub pool: Mutex<Vec<(ID3D12CommandAllocator, usize)>>,
+    /// per pool entry: host lists reset onto it since its own reset (diagnostic: [`AllocatorState::take_counted`])
+    pub uses: Mutex<Vec<u32>>,
 }
 
 impl AllocatorState {
     /// A host allocator for list `list` to record into: the one it already holds, a free one, or a new one.
     pub fn take(&self, list: usize) -> windows::core::Result<ID3D12CommandAllocator> {
+        self.take_counted(list).map(|(a, _)| a)
+    }
+
+    /// [`take`](Self::take), with how many host lists were reset onto that host allocator since its own reset
+    /// (this one not counted): 0 is a fresh allocator.
+    pub fn take_counted(&self, list: usize) -> windows::core::Result<(ID3D12CommandAllocator, u32)> {
         let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((a, _)) = pool.iter().find(|(_, h)| *h == list) {
-            return Ok(a.clone());
-        }
-        if let Some(slot) = pool.iter_mut().find(|(_, h)| *h == 0) {
-            slot.1 = list;
-            return Ok(slot.0.clone());
-        }
-        let a = self.backend.allocator(self.kind)?;
-        pool.push((a.clone(), list));
-        Ok(a)
+        let mut uses = self.uses.lock().unwrap_or_else(|e| e.into_inner());
+        uses.resize(pool.len(), 0);
+        let i = match pool.iter().position(|(_, h)| *h == list).or_else(|| pool.iter().position(|(_, h)| *h == 0)) {
+            Some(i) => i,
+            None => {
+                pool.push((self.backend.allocator(self.kind)?, 0));
+                uses.push(0);
+                pool.len() - 1
+            }
+        };
+        pool[i].1 = list;
+        let n = uses[i];
+        uses[i] += 1;
+        Ok((pool[i].0.clone(), n))
     }
 
     /// Hand what `from` holds to `to` (a list known only after it is made).
@@ -205,7 +217,7 @@ pub(crate) fn create_on(kind: u32, backend: Arc<dyn Backend>, host: Arc<dyn List
         header: Header { vtable: slots::allocator_table().funcs.as_ptr(), bits: 0, refs: AtomicU32::new(1) },
         kind,
         _pad: 0,
-        ours: AllocatorState { host, backend, pool: Mutex::new(vec![(allocator.clone(), 0)]), allocator, uploads: Mutex::new(Uploads::default()), kind },
+        ours: AllocatorState { host, backend, pool: Mutex::new(vec![(allocator.clone(), 0)]), uses: Mutex::new(vec![0]), allocator, uploads: Mutex::new(Uploads::default()), kind },
     });
     Ok(Box::into_raw(obj).cast())
 }
@@ -296,6 +308,8 @@ unsafe extern "system" fn reset(this: Raw) -> HRESULT {
             return e.code();
         }
     }
+    s.uses.lock().unwrap_or_else(|e| e.into_inner()).iter_mut().for_each(|u| *u = 0);
+    super::list::by_slot::add(super::list::by_slot::ALLOCATOR_RESET, 0);
     s.uploads.lock().unwrap_or_else(|e| e.into_inner()).reset();
     S_OK
 }

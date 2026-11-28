@@ -47,7 +47,12 @@ struct Section {
     /// The whole section mapped once, on first need, for writes that name frames rather than
     /// addresses (DirectStorage page destinations); 0 until then. Same bytes as every placed view.
     view: usize,
+    /// a number for this view, unique in the process ([`crate::titlemem`] opens the view once, by it)
+    view_id: u64,
 }
+
+/// Numbers for section views ([`Section::view_id`]).
+static VIEW_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Frames and where they are mapped.
 #[derive(Default)]
@@ -70,6 +75,7 @@ impl Drop for Physical {
         for s in &self.sections {
             unsafe {
                 if s.view != 0 {
+                    crate::titlemem::section_gone(s.view_id);
                     let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: s.view as *mut c_void });
                 }
                 if !s.handle.is_invalid() && s.live > 0 {
@@ -107,7 +113,7 @@ impl Physical {
             }
         };
         let si = self.sections.len();
-        self.sections.push(Section { handle, frames: n, live: n, view: 0 });
+        self.sections.push(Section { handle, frames: n, live: n, view: 0, view_id: 0 });
         let first = self.frames.len();
         self.frames.extend((0..n).map(|k| Some((si, k))));
         Some((first..first + n).map(number).collect())
@@ -115,7 +121,6 @@ impl Physical {
 
     /// Free frames (their mappings must be gone first).
     pub fn free(&mut self, frames: &[usize]) -> bool {
-        crate::titlemem::changed();
         if frames.iter().any(|f| self.mapped.values().any(|m| m == f)) {
             return false;
         }
@@ -131,7 +136,10 @@ impl Physical {
                 // the whole section is free: close it, so the host memory really goes back
                 unsafe {
                     if s.view != 0 {
+                        // the GPU's heap over the view goes first (crate::titlemem)
+                        crate::titlemem::section_gone(s.view_id);
                         let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: s.view as *mut c_void });
+                        crate::titlemem::changed(s.view as u64, (s.view + s.frames * FRAME) as u64);
                         s.view = 0;
                     }
                     let _ = CloseHandle(s.handle);
@@ -146,7 +154,6 @@ impl Physical {
     /// Map frame `frame` at `addr` (64 KiB aligned, inside a placeholder reservation). Whatever was
     /// mapped there is unmapped first.
     pub fn map(&mut self, addr: u64, frame: usize) -> bool {
-        crate::titlemem::changed();
         let Some(Some((si, k))) = index(frame).and_then(|i| self.frames.get(i)).copied() else { return false };
         if addr % FRAME as u64 != 0 || k >= self.sections[si].frames {
             return false;
@@ -168,29 +175,45 @@ impl Physical {
                 PAGE_READWRITE.0,
                 None,
             );
+            // a new allocation over the 64 KiB (crate::titlemem: nothing opened may cover it from before)
+            crate::titlemem::changed(addr, addr + FRAME as u64);
             if v.Value.is_null() {
                 return false;
             }
         }
         self.mapped.insert(addr, frame);
+        // the GPU reaches the frame through its section's one view, opened once (crate::titlemem), instead of
+        // opening every mapping of it
+        if crate::titlemem::sections_on() {
+            if let Some((view, id)) = self.section_view(si) {
+                crate::titlemem::frame_mapped(addr, id, view as u64, (self.sections[si].frames * FRAME) as u64, (k * FRAME) as u64);
+            }
+        }
         true
     }
 
     /// Unmap whatever frame is at `addr`, leaving a placeholder for the next map.
     pub fn unmap(&mut self, addr: u64) -> bool {
-        crate::titlemem::changed();
         if self.mapped.remove(&addr).is_none() {
             return false;
         }
-        unsafe {
-            UnmapViewOfFile2(GetCurrentProcess(), MEMORY_MAPPED_VIEW_ADDRESS { Value: addr as *mut c_void }, MEM_PRESERVE_PLACEHOLDER).is_ok()
-        }
+        crate::titlemem::frame_unmapped(addr);
+        let ok = unsafe { UnmapViewOfFile2(GetCurrentProcess(), MEMORY_MAPPED_VIEW_ADDRESS { Value: addr as *mut c_void }, MEM_PRESERVE_PLACEHOLDER).is_ok() };
+        // the GPU's allocation opened over this frame (crate::titlemem) is gone
+        crate::titlemem::changed(addr, addr + FRAME as u64);
+        ok
     }
 
     /// The 64 KiB of a live frame, wherever (or whether) it is mapped. The pointer stays valid while
     /// this `Physical` lives: sections are only closed when it drops.
     pub fn frame_ptr(&mut self, frame: usize) -> Option<*mut u8> {
         let (si, k) = (*self.frames.get(index(frame)?)?)?;
+        let (view, _) = self.section_view(si)?;
+        Some((view + k * FRAME) as *mut u8)
+    }
+
+    /// Section `si` mapped whole (once), and its view's number.
+    fn section_view(&mut self, si: usize) -> Option<(usize, u64)> {
         let s = &mut self.sections[si];
         if s.view == 0 {
             let v = unsafe { MapViewOfFile(s.handle, FILE_MAP_ALL_ACCESS, 0, 0, s.frames * FRAME) };
@@ -198,8 +221,9 @@ impl Physical {
                 return None;
             }
             s.view = v.Value as usize;
+            s.view_id = VIEW_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        Some((s.view + k * FRAME) as *mut u8)
+        Some((s.view, s.view_id))
     }
 
     /// Every address frame `frame` is mapped at now (a diagnostic scan).

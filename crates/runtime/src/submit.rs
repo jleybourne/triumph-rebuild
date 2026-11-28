@@ -208,6 +208,23 @@ fn trace_frame() -> bool {
     r.is_some_and(|(a, b)| (a..=b).contains(&crate::present::PRESENT_CALLS.load(Ordering::Relaxed)))
 }
 
+/// Host lists reset ahead of time and recycled after their last execution (`rebuild_xlist::console::pool`): this
+/// submission is what marks each host list's queue and progress value, so the title's run turns it on (tests that
+/// execute host lists themselves leave it off), with `REBUILD_LIST_POOL=1`.
+pub fn enable_list_pool() -> bool {
+    rebuild_xlist::console::pool::enable(executed)
+}
+
+/// The queue at `queue` (a [`Queue`], leaked: they live for the run) has finished its submission `value`.
+fn executed(queue: usize, value: u64) -> bool {
+    if queue == 0 {
+        return true;
+    }
+    // SAFETY: `executed_on` holds only addresses of queues from crate::queue, which are never freed
+    let q = unsafe { &*(queue as *const Queue) };
+    unsafe { q.progress.GetCompletedValue() >= value }
+}
+
 /// Re-executions of a host list that had to wait for its earlier run.
 pub static REEXECUTED: AtomicU64 = AtomicU64::new(0);
 /// Host lists not executed because their Close failed.
@@ -256,7 +273,9 @@ impl Batch {
         }
         if self.n > 0 {
             // SAFETY: closed host graphics lists (an ID3D12GraphicsCommandList is an ID3D12CommandList).
+            rebuild_xlist::console::SUBMITTING.fetch_add(1, Ordering::Relaxed);
             unsafe { (Interface::vtable(&self.q.host).ExecuteCommandLists)(Interface::as_raw(&self.q.host), self.n as u32, self.raw.as_ptr() as *const _) };
+            rebuild_xlist::console::SUBMITTING.fetch_sub(1, Ordering::Relaxed);
             self.n = 0;
         }
     }

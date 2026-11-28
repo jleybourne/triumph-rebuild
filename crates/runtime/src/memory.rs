@@ -943,9 +943,11 @@ fn arena_free(address: u64) {
         match kind {
             Kind::Readback => unsafe {
                 let _ = VirtualFree(address as *mut c_void, 0, MEM_RELEASE);
+                crate::titlemem::changed(address, address + bytes);
             },
             Kind::Cpu => {
                 let _ = m.ring.quiet(address, bytes, || unsafe { VirtualFree(address as *mut c_void, bytes as usize, MEM_DECOMMIT) });
+                crate::titlemem::changed(address, address + bytes);
                 m.retire(&mut lock(&m.tiles), address, address + bytes);
                 Model::arena_give(&mut maps, kind, address, bytes);
             }

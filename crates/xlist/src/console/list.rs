@@ -41,11 +41,28 @@ pub struct HostList {
     /// Its timing pair in the device's timestamp ring ([`super::stamps`]): the query at its first command, the one
     /// after its last at +1. [`super::stamps::NONE`] for a list that is not timed.
     pub stamp: std::sync::atomic::AtomicU32,
+    /// Its own host allocator, recording nothing else ([`super::pool`]); `None`: one of its console allocator's.
+    pub(crate) own: Option<ID3D12CommandAllocator>,
+    /// its list type (the pool's shelf)
+    pub(crate) kind: u32,
 }
 
 impl HostList {
+    /// A pool entry: `list`, open on `allocator`, which records nothing else ([`super::pool`]).
+    pub(crate) fn owning(list: ID3D12GraphicsCommandList, allocator: ID3D12CommandAllocator) -> HostList {
+        let kind = unsafe { list.GetType() }.0 as u32;
+        HostList { own: Some(allocator), kind, ..HostList::new(list) }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(list: ID3D12GraphicsCommandList) -> HostList {
+        HostList::new(list)
+    }
+
     fn new(list: ID3D12GraphicsCommandList) -> HostList {
         HostList {
+            own: None,
+            kind: 0,
             l1: list.cast().ok(),
             l2: list.cast().ok(),
             l6: list.cast().ok(),
@@ -390,7 +407,13 @@ pub mod by_slot {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::OnceLock;
 
-    pub const NAMES: [&str; 53] = ["get_private_data", "set_private_data", "get_device", "close", "reset", "draw_instanced", "draw_indexed", "dispatch", "dispatch_mesh", "execute_indirect", "copy_buffer_region", "copy_resource", "copy_memory", "discard", "topology", "viewports", "scissors", "blend_factor", "stencil_ref", "depth_bounds", "set_pipeline", "resource_barrier", "barrier_groups", "pipe_sync", "descriptor_heaps", "root_signature", "root_table", "root_view", "root_constant", "root_constants", "index_buffer", "vertex_buffers", "render_targets", "clear_dsv", "clear_rtv", "clear_uav_uint", "clear_uav_float", "label", "memory_wait", "allocate_upload", "reset: host Reset", "reset: Close before", "label: cpu_memory", "label: host label", "label: GPU stamp", "split: Close", "split: host Reset", "split: replay", "close: stamps", "close: host Close", "reset: set_pipeline", "stamp: cpu_memory", "stamp: EndQuery"];
+    pub const NAMES: [&str; 60] = ["get_private_data", "set_private_data", "get_device", "close", "reset", "draw_instanced", "draw_indexed", "dispatch", "dispatch_mesh", "execute_indirect", "copy_buffer_region", "copy_resource", "copy_memory", "discard", "topology", "viewports", "scissors", "blend_factor", "stencil_ref", "depth_bounds", "set_pipeline", "resource_barrier", "barrier_groups", "pipe_sync", "descriptor_heaps", "root_signature", "root_table", "root_view", "root_constant", "root_constants", "index_buffer", "vertex_buffers", "render_targets", "clear_dsv", "clear_rtv", "clear_uav_uint", "clear_uav_float", "label", "memory_wait", "allocate_upload", "reset: host Reset", "reset: Close before", "label: cpu_memory", "label: host label", "label: GPU stamp", "split: Close", "split: host Reset", "split: replay", "close: stamps", "close: host Close", "reset: set_pipeline", "stamp: cpu_memory", "stamp: EndQuery", "allocator Reset", "Reset: fresh allocator", "Reset: used allocator", "Reset: during submit", "split Reset: fresh", "split Reset: used", "split Reset: submit"];
+    /// the console allocator's Reset (counted only)
+    pub(crate) const ALLOCATOR_RESET: usize = 53;
+    /// a host list Reset (list Reset at 54, a cut at 57), by its host allocator: fresh (reset since it last took a
+    /// list), used (lists recorded into it since), or while another thread was in the host's ExecuteCommandLists
+    pub(crate) const RESET_FRESH: usize = 54;
+    pub(crate) const SPLIT_FRESH: usize = 57;
     static TICKS: [AtomicU64; NAMES.len()] = [const { AtomicU64::new(0) }; NAMES.len()];
     static CALLS: [AtomicU64; NAMES.len()] = [const { AtomicU64::new(0) }; NAMES.len()];
     static ON: AtomicBool = AtomicBool::new(false);
@@ -497,6 +520,20 @@ impl Drop for Tick {
             unsafe { *self.to = (*self.to).wrapping_add(t) };
             if by_slot::on() {
                 by_slot::add(usize::from(self.slot), t);
+            }
+        }
+    }
+}
+
+/// A released list's host lists go back to the pool ([`super::pool`]), reset there once the GPU is done with them.
+impl Drop for ListState {
+    fn drop(&mut self) {
+        if super::pool::on() {
+            for seg in self.segments.drain(..) {
+                super::pool::retire(seg.list);
+            }
+            for h in self.spare.drain(..) {
+                super::pool::retire(h);
             }
         }
     }
@@ -994,16 +1031,25 @@ impl ListState {
         let _ = self.close_current();
         drop(p);
         let me = self as *const Self as usize;
-        let Some(allocator) = self.allocator().and_then(|a| a.take(me).ok()) else {
-            { self.stats.refused += 1; trace::refused("split") };
-            return;
+        let next = if super::pool::on() {
+            let _p = by_slot::part(46);
+            super::pool::take(self.kind, &*self.backend)
+        } else {
+            let Some((allocator, uses)) = self.allocator().and_then(|a| a.take_counted(me).ok()) else {
+                { self.stats.refused += 1; trace::refused("split") };
+                return;
+            };
+            let p = by_slot::part(46);
+            let busy = SUBMITTING.load(Ordering::Relaxed) != 0;
+            let t0 = cost::now();
+            let next = match self.spare.pop() {
+                Some(h) => unsafe { h.list.Reset(&allocator, None) }.map(|_| h),
+                None => self.backend.list(self.kind, &allocator).map(HostList::new),
+            };
+            reset_kind(by_slot::SPLIT_FRESH, uses, busy || SUBMITTING.load(Ordering::Relaxed) != 0, cost::now().wrapping_sub(t0));
+            drop(p);
+            next
         };
-        let p = by_slot::part(46);
-        let next = match self.spare.pop() {
-            Some(h) => unsafe { h.list.Reset(&allocator, None) }.map(|_| h),
-            None => self.backend.list(self.kind, &allocator).map(HostList::new),
-        };
-        drop(p);
         match next {
             Ok(h) => {
                 self.segments.push(Segment { list: h, waits: vec![wait] });
@@ -1391,16 +1437,20 @@ pub fn create_list(kind: u32, allocator: Raw, pipeline: Raw) -> windows::core::R
     // a new list starts recording: it holds a host allocator of the pool (a temporary holder until it has an address)
     static TEMP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX / 2);
     let temp = TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let host_allocator = a.take(temp)?;
-    let host_list = match a.backend.list(kind, &host_allocator) {
-        Ok(l) => l,
-        Err(e) => {
-            a.release(temp);
-            return Err(e);
+    let first = if super::pool::on() {
+        // a ready list with an allocator of its own (super::pool)
+        super::pool::take(kind, &*a.backend)?
+    } else {
+        let host_allocator = a.take(temp)?;
+        match a.backend.list(kind, &host_allocator) {
+            Ok(l) => HostList::new(l),
+            Err(e) => {
+                a.release(temp);
+                return Err(e);
+            }
         }
     };
     let enhanced_barriers = a.backend.enhanced_barriers();
-    let first = HostList::new(host_list);
     let obj = Box::new(ListObject {
         header: Header { vtable: slots::list_table().funcs.as_ptr(), bits: 0, refs: AtomicU32::new(1) },
         kind,
@@ -1666,18 +1716,35 @@ unsafe extern "system" fn reset(this: Raw, allocator: Raw, pipeline: Raw) -> HRE
         let _ = s.close_current();
     }
     let me = &*s as *const _ as usize;
-    let host_allocator = match a.take(me) {
-        Ok(h) => h,
-        Err(e) => return e.code(),
+    let r = if super::pool::on() {
+        // a list reset ahead of time takes its place; the host lists of the last recording go back to the pool
+        // (reset there once the GPU is done with them)
+        let p = by_slot::part(40);
+        let r = super::pool::take(s.kind, &*s.backend).map(|fresh| {
+            for seg in std::mem::replace(&mut s.segments, vec![Segment { list: fresh, waits: Vec::new() }]) {
+                super::pool::retire(seg.list);
+            }
+        });
+        drop(p);
+        r
+    } else {
+        let (host_allocator, uses) = match a.take_counted(me) {
+            Ok(h) => h,
+            Err(e) => return e.code(),
+        };
+        while s.segments.len() > 1 {
+            let seg = s.segments.pop().expect("more than one");
+            s.spare.push(seg.list);
+        }
+        s.segments[0].waits.clear();
+        let p = by_slot::part(40);
+        let busy = SUBMITTING.load(Ordering::Relaxed) != 0;
+        let t0 = cost::now();
+        let r = unsafe { s.segments[0].list.list.Reset(&host_allocator, None) };
+        reset_kind(by_slot::RESET_FRESH, uses, busy || SUBMITTING.load(Ordering::Relaxed) != 0, cost::now().wrapping_sub(t0));
+        drop(p);
+        r
     };
-    while s.segments.len() > 1 {
-        let seg = s.segments.pop().expect("more than one");
-        s.spare.push(seg.list);
-    }
-    s.segments[0].waits.clear();
-    let p = by_slot::part(40);
-    let r = unsafe { s.segments[0].list.list.Reset(&host_allocator, None) };
-    drop(p);
     if let Err(e) = r {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 6 {
@@ -2055,6 +2122,17 @@ pub static TWIN_COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 
 /// GPU timestamp labels written into the title's memory (resolved at their host list's end).
 pub static STAMP_LABELS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Threads inside the host's `ExecuteCommandLists` now (the submission keeps it; [`by_slot`] sorts host list Resets
+/// by it, to see the driver's lock between recording and submitting threads).
+pub static SUBMITTING: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// A host Reset's ticks, by what its allocator had seen ([`by_slot::RESET_FRESH`]).
+fn reset_kind(base: usize, uses: u32, submitting: bool, ticks: u64) {
+    if by_slot::on() {
+        by_slot::add(base + if submitting { 2 } else if uses == 0 { 0 } else { 1 }, ticks);
+    }
+}
 
 /// Draws and dispatches dropped: a library pipeline with no shadow table bound.
 pub static NO_SHADOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
