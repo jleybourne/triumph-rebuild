@@ -5,6 +5,7 @@
 //! - `source`: `Source` (host or fake) and one polled `Frame`.
 //! - `menu`: `Input`, which splits each poll between the title and the in-game menu, with isolation.
 //! - `gameinput`: what the title's GameInput calls read from a `Frame`.
+//! - `script`: `REBUILD_INPUT_SCRIPT`, scripted pad presses for unattended runs.
 //! - `host` (Windows): XInput slots 0-3 and the focused keyboard.
 //!
 //! No GPU, no global state.
@@ -15,6 +16,7 @@ pub mod host;
 pub mod keyboard;
 pub mod menu;
 pub mod pad;
+pub mod script;
 pub mod source;
 
 pub use menu::{menu_key_named, Change, Input, Phase, Polled, MENU_KEY, MENU_KEYS, PAD_CHORD};

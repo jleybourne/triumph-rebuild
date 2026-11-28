@@ -48,6 +48,9 @@ fn report(started: Instant) {
             println!("          {l}");
         }
     }
+    if let Some(r) = rebuild_runtime::gameinput::report() {
+        println!("{r}");
+    }
     let m = misses();
     if !m.is_empty() {
         println!("lookups that found nothing (GetProcAddress / LoadLibrary): {}", m.len());
