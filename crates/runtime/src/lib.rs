@@ -50,6 +50,7 @@ pub mod overlap;
 pub mod pipeline;
 pub mod registry;
 pub mod overlay;
+pub mod fullscreen;
 pub mod present;
 pub mod resources;
 pub mod sandbox;
@@ -62,6 +63,8 @@ pub mod memory;
 pub mod kwrite;
 #[cfg(all(test, windows))]
 mod present_card;
+#[cfg(all(test, windows))]
+mod fullscreen_probe;
 #[cfg(windows)]
 pub mod title;
 pub mod tls;
