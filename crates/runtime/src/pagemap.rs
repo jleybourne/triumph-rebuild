@@ -27,6 +27,11 @@ pub static BATCHES: AtomicU64 = AtomicU64::new(0);
 pub static MAPPED: AtomicU64 = AtomicU64::new(0);
 pub static UNMAPPED: AtomicU64 = AtomicU64::new(0);
 pub static REFUSED: AtomicU64 = AtomicU64::new(0);
+/// The stream's shape: pages mapped onto the pool page they had already, pages unmapped that were not mapped, and
+/// ranges by kind (0 runs, 1 one page repeated, 2 unmapped, 3 left).
+pub static SAME_PAGE: AtomicU64 = AtomicU64::new(0);
+pub static UNMAPPED_AGAIN: AtomicU64 = AtomicU64::new(0);
+pub static RANGES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
 #[repr(C)]
 pub struct Range {
@@ -63,22 +68,31 @@ pub fn apply(pages: &mut BTreeMap<u64, u64>, batches: &[Batch], pool: u64, pool_
         for r in ranges {
             let inside = |n: u32| r.start.checked_add(n).is_some_and(|e| e <= pool_pages);
             let source = pool + u64::from(r.start) * PAGE;
+            if let Some(n) = RANGES.get(r.kind as usize) {
+                n.fetch_add(1, Relaxed);
+            }
             match r.kind {
                 0 if inside(r.count) => {
                     for k in 0..u64::from(r.count) {
-                        pages.insert(at + k * PAGE, source + k * PAGE);
+                        if pages.insert(at + k * PAGE, source + k * PAGE) == Some(source + k * PAGE) {
+                            SAME_PAGE.fetch_add(1, Relaxed);
+                        }
                     }
                     MAPPED.fetch_add(u64::from(r.count), Relaxed);
                 }
                 1 if inside(1) => {
                     for k in 0..u64::from(r.count) {
-                        pages.insert(at + k * PAGE, source);
+                        if pages.insert(at + k * PAGE, source) == Some(source) {
+                            SAME_PAGE.fetch_add(1, Relaxed);
+                        }
                     }
                     MAPPED.fetch_add(u64::from(r.count), Relaxed);
                 }
                 2 => {
                     for k in 0..u64::from(r.count) {
-                        pages.remove(&(at + k * PAGE));
+                        if pages.remove(&(at + k * PAGE)).is_none() {
+                            UNMAPPED_AGAIN.fetch_add(1, Relaxed);
+                        }
                     }
                     UNMAPPED.fetch_add(u64::from(r.count), Relaxed);
                 }
@@ -191,11 +205,17 @@ pub fn mapped_now() -> (usize, usize) {
 /// For the run report.
 pub fn report() -> String {
     format!(
-        "{} page mapping batches: {} pages mapped, {} unmapped, {} ranges refused; {} GPU pages mapped now",
+        "{} page mapping batches: {} pages mapped ({} onto the pool page they had), {} unmapped ({} not mapped before), {} ranges refused; ranges by kind: {} runs, {} repeated pages, {} unmapped, {} left; {} GPU pages mapped now",
         BATCHES.load(Relaxed),
         MAPPED.load(Relaxed),
+        SAME_PAGE.load(Relaxed),
         UNMAPPED.load(Relaxed),
+        UNMAPPED_AGAIN.load(Relaxed),
         REFUSED.load(Relaxed),
+        RANGES[0].load(Relaxed),
+        RANGES[1].load(Relaxed),
+        RANGES[2].load(Relaxed),
+        RANGES[3].load(Relaxed),
         PAGES.read().unwrap_or_else(|e| e.into_inner()).len()
     )
 }

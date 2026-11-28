@@ -422,6 +422,10 @@ fn vram_line_with(census: bool) -> String {
     s += &format!("host textures {}", rebuild_d3d12x::vram::report());
     s += &format!("
 vram      mapped textures: {}", crate::mapped::report());
+    if crate::mapped::enabled() {
+        s += &format!("
+vram      {}", crate::pagemap::report());
+    }
     if census {
         s += &census_line();
     }

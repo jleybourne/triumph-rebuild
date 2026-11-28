@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! driver thread   creations (C/s, ~80 % over mapped pages, aliases sharing them) and 0xf8-like batches (B/s of M
-//!                 pages: 70 % new pages, then pages moved to another pool page or mapped again onto the one they
+//!                 pages: new pages, then a share moved to another pool page or mapped again onto the one they
 //!                 have, a few unmapped; the oldest slots streamed out when the pool is full)
 //! frame thread    a direct queue at 60 Hz: Wait(mapping fence, latest) -> an empty list -> Signal
 //! paths           old   the vram lane's calls: per new key one call on a sub-window buffer, per freed key one,
@@ -18,7 +18,12 @@
 //!                       thread of their own
 //! ```
 //!
-//! `tilebench [--seconds 20] [--path old|new|both] [--creations 1600] [--batches 18] [--pages 111] [--live 20000]`
+//! `tilebench [--seconds 20] [--path old|new|both] [--creations 1600] [--batches 18] [--pages 111] [--live 20000]
+//! [--pool 32768] [--moved 0.1]`
+//!
+//! The defaults are the `fix4` run's shape: ~1,600 creations a second, 18 batches of 111 pages (39,191 pages mapped
+//! in 352 batches), a pool of ~2 GiB (2,267 MiB mapped at the end), so pages are seldom streamed out (2,919 of
+//! 39,191 were unmapped).
 //!
 //! Reports per path: `UpdateTileMappings` calls, tiles a call and a range, the driver thread's time in mapping
 //! calls, mapping latency (submit -> the GPU passing its fence) and frame latency (submit -> done), p50 / p99 /
@@ -61,11 +66,13 @@ mod imp {
         live: usize,
         pool: u32,
         heaps: u32,
+        /// of a batch's pages: the share moved to another pool page or mapped again onto theirs (the rest new)
+        moved: f64,
     }
 
     pub fn main() {
         let argv: Vec<String> = std::env::args().skip(1).collect();
-        let mut o = Opts { seconds: 20.0, creations: 1600.0, batches: 18.0, pages: 111, live: 20000, pool: 8192, heaps: 9 };
+        let mut o = Opts { seconds: 20.0, creations: 1600.0, batches: 18.0, pages: 111, live: 20000, pool: 32768, heaps: 33, moved: 0.1 };
         let mut path = "both".to_string();
         let mut i = 0;
         while i < argv.len() {
@@ -76,6 +83,11 @@ mod imp {
                 "--batches" => o.batches = v.parse().unwrap_or(o.batches),
                 "--pages" => o.pages = v.parse().unwrap_or(o.pages),
                 "--live" => o.live = v.parse().unwrap_or(o.live),
+                "--pool" => {
+                    o.pool = v.parse().unwrap_or(o.pool);
+                    o.heaps = o.pool.div_ceil(HEAP_TILES) + 1;
+                }
+                "--moved" => o.moved = v.parse().unwrap_or(o.moved),
                 "--path" => path = v.clone(),
                 other => {
                     println!("FAILED    unknown argument {other}");
@@ -85,11 +97,12 @@ mod imp {
             i += 2;
         }
         println!(
-            "tilebench on WARP: {:.0} s, {:.0} creations/s, {:.0} batches/s of {} pages, {} live textures at most, pool {} pages, {} heaps of {} tiles, tile queue {:?}",
+            "tilebench on WARP: {:.0} s, {:.0} creations/s, {:.0} batches/s of {} pages ({:.0} % moved or again), {} live textures at most, pool {} pages, {} heaps of {} tiles, tile queue {:?}",
             o.seconds,
             o.creations,
             o.batches,
             o.pages,
+            o.moved * 100.0,
             o.live,
             o.pool,
             o.heaps,
@@ -463,7 +476,7 @@ mod imp {
         /// mapped again onto theirs, and a few unmapped.
         fn batch(&mut self, rng: &mut Rng, o: &Opts, old_path: bool) -> Vec<Job> {
             let mut pages: Vec<u64> = Vec::new();
-            let fresh = o.pages * 7 / 10;
+            let fresh = o.pages - (o.pages as f64 * o.moved) as usize;
             while pages.len() < fresh {
                 let k = match self.unmapped_slots.front() {
                     Some(&k) => k,
