@@ -524,7 +524,7 @@ impl Presenter {
             // SAFETY: the mapped readback cells; the GPU wrote them before the fence passed.
             let (a, b) = unsafe { (self.stamp_cells.add(2 * i).read_volatile(), self.stamp_cells.add(2 * i + 1).read_volatile()) };
             if b > a {
-                crate::framelog::gpu((b - a) * 1_000_000 / self.frequency);
+                crate::framelog::gpu_span((b - a) * 1_000_000 / self.frequency);
             }
         }
         // work from another queue runs first

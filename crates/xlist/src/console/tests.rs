@@ -1566,3 +1566,138 @@ fn a_geometry_stage_pipeline_draws_rectangles_of_every_kind_with_the_titles_coun
     release(l);
     release(a);
 }
+
+// ---- GPU timestamps, on WARP (tests run beside the title never use the card) ----
+
+pub(crate) fn warp() -> Option<ID3D12Device> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory4};
+    let factory: IDXGIFactory4 = unsafe { CreateDXGIFactory1() }.ok()?;
+    let adapter: windows::core::IUnknown = unsafe { factory.EnumWarpAdapter() }.ok()?;
+    let mut d: Option<ID3D12Device> = None;
+    unsafe { D3D12CreateDevice(&adapter, windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0, &mut d) }.ok()?;
+    d
+}
+
+struct StampHost {
+    texture: usize,
+    rtv: usize,
+    memory: usize,
+    memory_va: u64,
+}
+unsafe impl Send for StampHost {}
+unsafe impl Sync for StampHost {}
+
+const STAMP_TEXTURE: Raw = 0x2000 as Raw;
+const STAMP_RTV: usize = 0x5000;
+const STAMP_MEM: u64 = 0x20_0000_0000;
+
+impl PipelineSource for StampHost {
+    fn pipeline(&self, _: Raw) -> Option<HostPipeline> {
+        None
+    }
+}
+
+impl ListHost for StampHost {
+    fn resource(&self, console: Raw) -> Option<Raw> {
+        (console == STAMP_TEXTURE).then_some(self.texture as Raw)
+    }
+    fn descriptor_heap(&self, _: Raw) -> Option<HeapBinding> {
+        None
+    }
+    fn cpu_descriptor(&self, console: usize) -> Option<usize> {
+        (console == STAMP_RTV).then_some(self.rtv)
+    }
+    fn memory(&self, va: u64) -> Option<MemoryRange> {
+        // the title's memory: a buffer the CPU reads back
+        let r = MemoryRange { console: STAMP_MEM, bytes: 64 << 10, host_va: self.memory_va, resource: self.memory as Raw, resource_offset: 0 };
+        r.map(va).map(|_| r)
+    }
+}
+
+/// Two GPU timestamp labels (0x240 flag 1) with clears between them: both land in the title's memory as 64-bit
+/// little-endian ticks of the queue's `GetTimestampFrequency`, in order, inside the host list's own timing pair, and
+/// their difference is a plausible time for the work between them. A value label beside them still writes its
+/// value; a timestamp at an address the resolve cannot reach (not 8-byte aligned) is refused and counted.
+#[test]
+fn timestamp_labels_land_in_title_memory_in_order_on_warp() {
+    let Some(device) = warp() else {
+        println!("no WARP device: skipped");
+        return;
+    };
+    unsafe {
+        let queue: ID3D12CommandQueue = device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC::default()).unwrap();
+        let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE).unwrap();
+        let tex_desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Width: 1024,
+            Height: 1024,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+            ..Default::default()
+        };
+        let mut texture: Option<ID3D12Resource> = None;
+        device
+            .CreateCommittedResource(&D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() }, D3D12_HEAP_FLAG_NONE, &tex_desc, D3D12_RESOURCE_STATE_RENDER_TARGET, None, &mut texture)
+            .unwrap();
+        let texture = texture.unwrap();
+        let rtv_heap: ID3D12DescriptorHeap = device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC { Type: D3D12_DESCRIPTOR_HEAP_TYPE_RTV, NumDescriptors: 1, ..Default::default() }).unwrap();
+        let rtv = rtv_heap.GetCPUDescriptorHandleForHeapStart();
+        device.CreateRenderTargetView(&texture, None, rtv);
+        let memory = buffer(&device, D3D12_HEAP_TYPE_READBACK, 64 << 10, D3D12_RESOURCE_STATE_COPY_DEST);
+        let host = Arc::new(StampHost { texture: texture.as_raw() as usize, rtv: rtv.ptr, memory: memory.as_raw() as usize, memory_va: memory.GetGPUVirtualAddress() });
+        let a = create_allocator(0, &device, host).unwrap();
+        let l = create_list(0, a, std::ptr::null_mut()).unwrap();
+
+        type Write64 = unsafe extern "system" fn(Raw, u64, u64, u32, u32);
+        type Clear = unsafe extern "system" fn(Raw, D3D12_CPU_DESCRIPTOR_HANDLE, *const f32, u32, *const RECT);
+        let written = STAMP_LABELS.load(std::sync::atomic::Ordering::Relaxed);
+        method::<Write64>(l, 0x240)(l, STAMP_MEM + 0x10, 0xdead, 0, 1);
+        for i in 0..24 {
+            let c = [i as f32 / 24.0, 0.5, 1.0 - i as f32 / 24.0, 1.0];
+            method::<Clear>(l, 0x1a0)(l, D3D12_CPU_DESCRIPTOR_HANDLE { ptr: STAMP_RTV }, c.as_ptr(), 0, std::ptr::null());
+        }
+        method::<Write64>(l, 0x240)(l, STAMP_MEM + 0x18, 0xdead, 0, 1);
+        method::<Write64>(l, 0x240)(l, STAMP_MEM + 0x20, 0x77, 0, 0);
+        method::<Write64>(l, 0x240)(l, STAMP_MEM + 0x2c, 0, 0, 1);
+        assert_eq!(method::<Hr0>(l, 0x48)(l), S_OK);
+        assert_eq!(STAMP_LABELS.load(std::sync::atomic::Ordering::Relaxed) - written, 2, "two labels resolved at the list's end");
+        assert_eq!(stats(l).unwrap().refused, 1, "the unaligned timestamp label alone is refused");
+
+        let segs = segments(l).unwrap();
+        assert_eq!(segs.len(), 1);
+        let pair = segs[0].list.stamp.load(std::sync::atomic::Ordering::Relaxed);
+        assert_ne!(pair, stamps::NONE, "a direct list is timed");
+        // the lead's side: the list's timing pair resolved after it, into the same memory at 0x100
+        let ring = stamps::for_device(&device).expect("the device's ring");
+        let ca: ID3D12CommandAllocator = device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT).unwrap();
+        let cl: ID3D12GraphicsCommandList = device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &ca, None).unwrap();
+        cl.ResolveQueryData(&ring.heap, D3D12_QUERY_TYPE_TIMESTAMP, pair, 2, &memory, 0x100);
+        cl.Close().unwrap();
+        let started = Instant::now();
+        queue.ExecuteCommandLists(&[Some(segs[0].list.list.cast::<ID3D12CommandList>().unwrap()), Some(cl.cast::<ID3D12CommandList>().unwrap())]);
+        queue.Signal(&fence, 1).unwrap();
+        fence.SetEventOnCompletion(1, windows::Win32::Foundation::HANDLE::default()).unwrap();
+        let wall = started.elapsed();
+        device.GetDeviceRemovedReason().expect("device alive");
+
+        let mut m: *mut std::ffi::c_void = std::ptr::null_mut();
+        memory.Map(0, Some(&D3D12_RANGE { Begin: 0, End: 0x200 }), Some(&mut m)).unwrap();
+        let cell = |off: usize| m.cast::<u8>().add(off).cast::<u64>().read_volatile();
+        let (t1, t2, value, unaligned) = (cell(0x10), cell(0x18), cell(0x20), m.cast::<u8>().add(0x2c).cast::<u32>().read_volatile());
+        let (begin, end) = (cell(0x100), cell(0x108));
+        memory.Unmap(0, None);
+        let hz = queue.GetTimestampFrequency().unwrap();
+        let between = stamps::ticks_ns(t2 - t1, hz);
+        println!("hz {hz}; list {begin}..{end}; labels {t1}, {t2}: {between} ns between, {:?} wall", wall);
+        assert_eq!(value, 0x77, "a value label beside them still writes its value");
+        assert_eq!(unaligned, 0, "nothing written for the refused label");
+        assert!(t1 != 0xdead && t2 != 0xdead && t1 != 0, "timestamps, not the title's value word");
+        assert!(begin <= t1 && t1 < t2 && t2 <= end, "in order inside the list's pair: {begin} {t1} {t2} {end}");
+        assert!(between > 0 && between <= wall.as_nanos() as u64, "24 clears of 4 MiB took {between} ns of a {wall:?} submission");
+        assert_eq!(release(l), 0);
+        assert_eq!(release(a), 0);
+    }
+}

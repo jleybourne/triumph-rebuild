@@ -120,8 +120,11 @@ cargo test -p rebuild-xlist --release -- --ignored --nocapture card_cost_per_dra
 2. **Resource states:** legacy barriers pass the title's states through unchanged. Host resources must start in the
    state the title believes (back buffers, render targets), or the debug layer will complain. Mixing the title's
    legacy (0xd0) and enhanced (0x490) barriers on the same resource is passed through as the title does it.
-3. **Timestamps:** 0x240 with flags 1/2 (GPU / system timestamp) is refused by the default `label`; override it
-   (query heap + resolve into the label address) when the frame line needs them.
+3. **Timestamps:** 0x240 flag 1 (GPU timestamp) is written by the list itself (`console/stamps.rs`): a query at
+   the label's point, resolved into the title's memory at the host list's end, in host ticks (queue 0x90 answers
+   the host's frequency). Flag 2 (system timestamp) still goes to `label` and is refused by default. Every direct
+   and compute host list also carries a timing pair (`HostList::stamp`) for the lead's GPU time
+   (`runtime/src/gputime.rs`).
 4. **Comparison codes** of memory waits are taken as D3D12's comparison functions (the fork's reading; the title's
    first wait is 7 = `>=`, reference 1). `MemoryWait::holds_for` implements it; unverified beyond that wait.
 5. **Single-range render targets** step by `CONSOLE_RTV_INCREMENT` = 128 (the RTV increment device 0x78 answers).

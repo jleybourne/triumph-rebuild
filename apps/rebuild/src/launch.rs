@@ -145,6 +145,12 @@ fn device_report() {
                 rebuild_runtime::titlemem::OPENED.load(Relaxed),
                 rebuild_runtime::titlemem::OPEN_FAILED.load(Relaxed)
             );
+            println!(
+                "gputime   {} GPU timestamp labels written into the title's memory; {} host-list timing pairs read, {} dropped",
+                rebuild_xlist::console::STAMP_LABELS.load(Relaxed),
+                rebuild_runtime::gputime::READ.load(Relaxed),
+                rebuild_runtime::gputime::DROPPED.load(Relaxed)
+            );
         }
         let ir = &rebuild_xlist::console::INDIRECT_REFUSED;
         println!("lists     {} indirect calls with no host signature on a graphics pipeline, {} on a compute one", ir[0].load(Relaxed), ir[1].load(Relaxed));

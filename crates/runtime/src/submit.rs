@@ -73,6 +73,12 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
     if let Some(begin) = crate::present::frame_begin(q) {
         batch.push(begin);
     }
+    // the GPU time: an earlier frame's timing pairs resolved ahead of this submission's lists ([`crate::gputime`])
+    let frame = crate::present::PRESENT_CALLS.load(Ordering::Relaxed);
+    if let Some(r) = q.timer.begin(q, frame, value) {
+        batch.push(r);
+    }
+    let mut pairs = Pairs { n: 0, at: [0; PAIRS] };
     let (mut draws, mut dispatches, mut skipped) = (0u64, 0u64, 0u64);
     for &list in lists {
         let Some(segs) = segments(list) else {
@@ -131,7 +137,21 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
             seg.list.executed_on.store(me, Ordering::Relaxed);
             seg.list.executed_at.store(value, Ordering::Release);
             batch.push(seg.list.list.as_raw());
+            let stamp = seg.list.stamp.load(Ordering::Relaxed);
+            if stamp != rebuild_xlist::console::stamps::NONE {
+                if pairs.n == PAIRS {
+                    if let Some(r) = q.timer.add(q, frame, &pairs.at, value) {
+                        batch.push(r);
+                    }
+                    pairs.n = 0;
+                }
+                pairs.at[pairs.n] = stamp;
+                pairs.n += 1;
+            }
         }
+    }
+    if let Some(r) = q.timer.add(q, frame, &pairs.at[..pairs.n], value) {
+        batch.push(r);
     }
     batch.flush();
     unsafe {
@@ -191,6 +211,13 @@ fn wait_done(q: &Queue, value: u64) {
         }
         let _ = windows::Win32::Foundation::CloseHandle(event);
     }
+}
+
+/// Timing pairs (the first query of each) of the host lists a submission executed, noted on the queue in groups.
+const PAIRS: usize = 128;
+struct Pairs {
+    n: usize,
+    at: [u32; PAIRS],
 }
 
 /// Host lists gathered for one `ExecuteCommandLists`.

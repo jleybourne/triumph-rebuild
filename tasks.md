@@ -18,7 +18,7 @@ Order and decisions are `plan.md`'s; overall progress is in [`progress.md`](prog
 |---|---|---|
 | done | (a) dirty-chunk upload benchmark: write-watch + 64 B diff (shadow and hash) + PCIe upload (copy-per-run and compute scatter) at 115 MB/frame | `uploadbench` — results in [`runs/build0a-upload.md`](runs/build0a-upload.md) |
 | done | (b) per-draw translation microbenchmark: synthetic frame in the title's shape (4,500 draws, 20,311 calls, 1,433 pipelines) through our translator (`crates/xlist`, 5 tests) into real D3D12 lists, plus 12,027 descriptor writes from a dirty list | `listbench`: 0.43 µs a draw on one thread, 1.9 ms a frame; descriptors 2.0 ms — [`runs/build0b-lists.md`](runs/build0b-lists.md) |
-| blocked | (c) the title's real GPU time from per-list timestamp pairs, RT on and off. Needs the title rendering on our code, so it closes in Build 5; until then the fork's 43-63 ms (RT off) stands | a measured replacement for the soft ~45 ms |
+| doing | (c) the title's real GPU time from per-list timestamp pairs, RT on and off. The measurement is built (Build 5 row below: every host list's pair, frame line `gpu`, summary `gpu_ms`); the card's number, RT on and off, waits for the title rendering its real frame; until then the fork's 43-63 ms (RT off) stands | a measured replacement for the soft ~45 ms |
 | done | owner: the minimum spec is the dev machine (`plan.md`): RTX 4070 Ti 12 GB, PCIe 3.0, ReBAR on, 3840x2160 output, DLSS Quality | filled 2026-11-27 |
 
 ## Build 1 — tiled VRAM at console addresses  ✅ closed — [`runs/build1-tiles.md`](runs/build1-tiles.md)
@@ -127,7 +127,7 @@ decision 4.
 | doing | console descriptor heaps (T#/V# slots shaders index), PC descriptors beside, dirty list (no scan): heap buffers are raw SRVs, never CBVs (#37); index ranges apart next | a shader samples a texture made by title code |
 | doing | present / vsync / window: present, capture and a clean 60 s card run done (2026-11-28); frame-rate setting in PR | a non-black frame, captured to PNG |
 | todo | frame line: fps · ms · draws · dropped · upload MB · upload ms · translation ms · output res · upscaler/mode · vendor | one parseable line a second |
-| todo | Build 0 (c), moved here: the title's GPU time from per-list timestamp pairs, RT on and off | measured; replaces the ~45 ms everywhere it is quoted |
+| doing | Build 0 (c), moved here: the title's GPU time from per-list timestamp pairs, RT on and off. Built: a query pair in every direct/compute host list, resolved per queue and frame in one run, read a few frames late (`runtime/src/gputime.rs`); frame line `gpu` and summary `gpu_ms` are the frames' busy time (union over queues), `gpu_sum_ms` the plain sum. The title's own GPU timestamp labels (flag 1) are written into its memory the same way. WARP, loading screen: 44 ms a frame (indicative only). Left: the card's number, RT on and off, once the real frame renders | measured; replaces the ~45 ms everywhere it is quoted |
 
 ## Build 6 — parallel list translation
 
