@@ -99,6 +99,16 @@ impl Store {
         self.extra_settings.keys().cloned().collect()
     }
 
+    /// A top-level string the launcher keeps for itself (outside the registry), e.g. the first-run
+    /// recommendation marker.
+    pub fn top_str(&self, key: &str) -> Option<String> {
+        self.extra_top.get(key).and_then(|v| v.as_str()).map(String::from)
+    }
+
+    pub fn set_top_str(&mut self, key: &str, value: &str) {
+        self.extra_top.insert(key.into(), toml::Value::String(value.into()));
+    }
+
     pub fn to_toml(&self) -> String {
         let mut doc: toml::Table = self.model.config.to_toml().parse().expect("Config::to_toml is TOML");
         let settings = doc.entry("settings").or_insert_with(|| toml::Value::Table(toml::Table::new()));
@@ -119,8 +129,9 @@ impl Store {
                 t.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }
+        // the same values Config kept from the file, unless the launcher set one since (`set_top_str`)
         for (k, v) in &self.extra_top {
-            doc.entry(k.clone()).or_insert_with(|| v.clone());
+            doc.insert(k.clone(), v.clone());
         }
         doc.insert("schema".into(), toml::Value::Integer(self.schema));
         toml::to_string_pretty(&doc).expect("serialise")

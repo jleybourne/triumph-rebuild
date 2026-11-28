@@ -15,6 +15,7 @@
 //! - [`runs`]: the test matrix run plan (L6)
 //! - [`verify`]: the game folder read-only check, metadata only (L6)
 //! - [`prefs`]: launcher-wide preferences (the theme) (L6)
+//! - [`recommend`]: this PC's specs (DXGI, RAM, cores, display) and the settings recommended for it
 
 pub mod frameline;
 pub mod gamemeta;
@@ -24,6 +25,7 @@ pub mod model;
 pub mod mods;
 pub mod play;
 pub mod prefs;
+pub mod recommend;
 pub mod runs;
 pub mod session;
 pub mod store;

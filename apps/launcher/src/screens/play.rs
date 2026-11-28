@@ -13,7 +13,7 @@ use rebuild_config::profiles::Active;
 use rebuild_config::BUILTIN_PROFILES;
 use rebuild_launcher::frameline::{self, Frame};
 use rebuild_launcher::model::Tab;
-use rebuild_launcher::{session, syscheck};
+use rebuild_launcher::{recommend, session, syscheck};
 
 impl App {
     pub fn play(&mut self, ui: &mut egui::Ui) {
@@ -65,13 +65,17 @@ impl App {
                     ui.add_space(9.0);
                     ui.horizontal(|ui| {
                         let current = Active::of(&self.store.model.config);
-                        let shown = match &current {
-                            Active::Builtin(b) => b.label.to_string(),
-                            Active::Edited(b) => format!("{} (edited)", b.label),
-                            Active::User(n) => n.clone(),
-                        };
+                        let shown = self.profile_label();
                         egui::ComboBox::from_id_salt("play-profile").width(260.0).selected_text(shown).show_ui(ui, |ui| {
-                            ui.label(egui::RichText::new("BUILT-IN").font(th::caption().0).color(c.muted));
+                            if let Some(r) = &self.rec {
+                                ui.label(egui::RichText::new("FOR THIS PC").font(th::caption().0).color(c.muted));
+                                let on = self.store.model.config.profile == recommend::PROFILE && r.matches(&self.store.model.config);
+                                if ui.selectable_label(on, format!("Recommended: {}", r.name())).on_hover_text(r.specs_line.as_str()).clicked() {
+                                    pick = Some("recommended".into());
+                                }
+                                ui.separator();
+                            }
+                            ui.label(egui::RichText::new("BUILT-IN TEST PROFILES").font(th::caption().0).color(c.muted));
                             for b in BUILTIN_PROFILES {
                                 let on = matches!(&current, Active::Builtin(a) if a.name == b.name);
                                 if ui.selectable_label(on, b.label).clicked() {
@@ -97,6 +101,9 @@ impl App {
             });
         });
         ui.add_space(th::S2);
+        if self.recommendation_strip(ui) {
+            pick = Some("recommended".into());
+        }
 
         // four cards
         let last = self.sessions.iter().find(|e| self.run.as_ref().is_none_or(|r| r.session != e.dir));
@@ -176,7 +183,9 @@ impl App {
             self.launch();
         }
         if let Some(p) = pick {
-            if let Some(name) = p.strip_prefix("builtin:") {
+            if p == "recommended" {
+                self.apply_recommendation();
+            } else if let Some(name) = p.strip_prefix("builtin:") {
                 if let Some(b) = rebuild_config::builtin(name) {
                     self.apply_builtin(b);
                 }
@@ -193,6 +202,59 @@ impl App {
         if open_diag {
             self.set_tab(Tab::Diagnostics);
         }
+    }
+
+    /// "Recommended for this PC: <name>", the detected specs as its reason (the why and any notes on
+    /// hover), and Apply, or "In use" when every value is in force. True when Apply was clicked.
+    fn recommendation_strip(&mut self, ui: &mut egui::Ui) -> bool {
+        let c = th::p();
+        let mut apply = false;
+        let Some(r) = self.rec.clone() else {
+            if self.specs_rx.is_some() {
+                w::card(ui, None, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(icon::SPARKLE).font(th::icon(18.0)).color(c.muted));
+                        ui.label(egui::RichText::new("Recommended for this PC: reading the specs…").font(th::medium(13.5)).color(c.muted));
+                    });
+                });
+                ui.add_space(th::S2);
+            }
+            return false;
+        };
+        let same = r.matches(&self.store.model.config);
+        let mut hover = r.why.clone();
+        for n in &r.notes {
+            hover += &format!("\n{n}");
+        }
+        w::card(ui, None, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(icon::SPARKLE).font(th::icon(18.0)).color(c.accent));
+                let text_w = (ui.available_width() - 140.0).max(200.0);
+                ui.vertical(|ui| {
+                    ui.set_max_width(text_w);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Recommended for this PC:").font(th::medium(14.0)).color(c.text_2));
+                        ui.label(egui::RichText::new(r.name()).font(th::semibold(14.0)).color(c.text));
+                        if !r.notes.is_empty() {
+                            w::chip(ui, &format!("{} note{}", r.notes.len(), if r.notes.len() == 1 { "" } else { "s" }), Tone::Warn).on_hover_text(r.notes.join("\n"));
+                        }
+                    });
+                    ui.add(egui::Label::new(egui::RichText::new(&r.specs_line).font(th::small()).color(c.muted)).truncate()).on_hover_text(hover.as_str());
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if same {
+                        w::chip(ui, "In use", Tone::Ok).on_hover_text("Every recommended value is in force");
+                    } else if w::button(ui, icon::CHECK, "Apply", self.running.is_none())
+                        .on_hover_text(format!("{}x{}, {} {}, no limits; every other setting kept. {}", r.width, r.height, r.backend.to_uppercase(), recommend::mode_name(r.backend, r.mode), r.why))
+                        .clicked()
+                    {
+                        apply = true;
+                    }
+                });
+            });
+        });
+        ui.add_space(th::S2);
+        apply
     }
 
     /// The Running view, while the title plays.
