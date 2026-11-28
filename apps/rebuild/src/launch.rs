@@ -540,6 +540,11 @@ pub fn run(o: Options) -> ! {
     set_command_line(&format!(r"G:\{}", exe.name));
     // the title's sound leaves through the host's WASAPI: watched from here on (counts; REBUILD_AUDIO_SINK taps it
     // into WAV files, REBUILD_AUDIO_VOLUME sets its session volume before it plays)
+    // the console's 1 ms timer granularity (the title's sound threads are written for it)
+    match rebuild_audio::hostout::fine_timer() {
+        Some(ms) => println!("timer     1 ms resolution asked for: Sleep(1) takes {ms:.2} ms"),
+        None => println!("timer     host default resolution (REBUILD_TIMER_RESOLUTION=default)"),
+    }
     match rebuild_audio::hostout::install() {
         Ok(()) => println!("audio     host WASAPI watched{}", match std::env::var("REBUILD_AUDIO_VOLUME") { Ok(v) => format!("; session volume {v}"), Err(_) => String::new() }),
         Err(e) => println!("audio     host WASAPI not watched: {e}"),

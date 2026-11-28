@@ -5,6 +5,12 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 /// `AcpHal` `SubmitCommand` calls by command number (0-31; the rest in the last).
 pub static ACP_COMMANDS: [AtomicU64; 32] = [const { AtomicU64::new(0) }; 32];
+/// The message kinds the title registered for (the coprocessor's mask), messages posted to it, taken by it, and
+/// its polls (`PopMessage` and `GetMessageCount` calls)
+pub static ACP_MASK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub static ACP_POSTED: AtomicU64 = AtomicU64::new(0);
+pub static ACP_POPPED: AtomicU64 = AtomicU64::new(0);
+pub static ACP_POLLS: AtomicU64 = AtomicU64::new(0);
 pub static XAPU_CONNECTS: AtomicU64 = AtomicU64::new(0);
 /// Opus streams activated
 pub static OPUS_STREAMS: AtomicU64 = AtomicU64::new(0);
@@ -36,8 +42,12 @@ pub fn report() -> String {
         format!("XMA {frames} frames decoded ({bad} refused), {blocks} output blocks")
     });
     format!(
-        "console audio: coprocessor commands {}; {xma}; Opus {} connections, {} streams, {} packets -> {} frames ({} refused); DSP {} streams, {} blocks (dry)",
+        "console audio: coprocessor commands {}, message mask {:#x}, {} messages posted, {} taken, {} polls; {xma}; Opus {} connections, {} streams, {} packets -> {} frames ({} refused); DSP {} streams, {} blocks (dry)",
         if cmds.is_empty() { "none".into() } else { cmds.join(" ") },
+        ACP_MASK.load(Relaxed),
+        ACP_POSTED.load(Relaxed),
+        ACP_POPPED.load(Relaxed),
+        ACP_POLLS.load(Relaxed),
         XAPU_CONNECTS.load(Relaxed),
         OPUS_STREAMS.load(Relaxed),
         OPUS_PACKETS.load(Relaxed),

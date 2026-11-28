@@ -248,6 +248,7 @@ impl State {
         };
         m.data[..data.len()].copy_from_slice(data);
         self.messages.push_back(m);
+        crate::stats::count(&crate::stats::ACP_POSTED);
     }
 }
 
@@ -316,7 +317,10 @@ unsafe extern "system" fn submit(
     crate::stats::acp_command(command);
     let mut s = lock(&acp.state);
     match command {
-        REGISTER_MESSAGES => s.mask |= word(0),
+        REGISTER_MESSAGES => {
+            s.mask |= word(0);
+            crate::stats::ACP_MASK.store(s.mask, std::sync::atomic::Ordering::Relaxed);
+        }
         UNREGISTER_MESSAGES => s.mask &= !word(0),
         LOAD_FLOWGRAPH => s.post(FLOWGRAPH_COMPLETED, &word(1).to_le_bytes()),
         ENABLE_XMA | DISABLE_XMA | ENABLE_XMAS | DISABLE_XMAS | ADVANCE_XMA_READ => {
@@ -351,9 +355,11 @@ unsafe extern "system" fn submit(
 
 /// Slot 3: `BOOL PopMessage(this, Message* out)`: false when there is none.
 unsafe extern "system" fn pop_message(this: *mut Acp, out: *mut Message) -> BOOL {
+    crate::stats::count(&crate::stats::ACP_POLLS);
     let Some(m) = lock(&(*this).state).messages.pop_front() else {
         return 0;
     };
+    crate::stats::count(&crate::stats::ACP_POPPED);
     if !out.is_null() {
         out.write_unaligned(m);
     }
@@ -362,6 +368,7 @@ unsafe extern "system" fn pop_message(this: *mut Acp, out: *mut Message) -> BOOL
 
 /// Slot 4: `UINT32 GetMessageCount(this)`.
 unsafe extern "system" fn message_count(this: *mut Acp) -> u32 {
+    crate::stats::count(&crate::stats::ACP_POLLS);
     lock(&(*this).state).messages.len() as u32
 }
 

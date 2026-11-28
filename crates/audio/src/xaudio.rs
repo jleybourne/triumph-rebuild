@@ -57,6 +57,15 @@ struct Voice {
     rate_changes: u64,
     /// the thread that fed it first: id, priority, affinity mask
     feeder: Option<(u32, i32, u64)>,
+    /// submits that found the voice's queue empty (after its first): it had run dry, XAudio2 played silence
+    starved: u64,
+    /// time between submits: the last, the longest, how many over 20 ms
+    last_submit: Option<Instant>,
+    max_gap: f64,
+    gaps_over_20ms: u64,
+    /// frames per buffer: fewest and most (PCM and float)
+    min_frames: u32,
+    max_frames: u32,
 }
 
 /// The calling thread's id, priority and group affinity mask.
@@ -184,6 +193,12 @@ unsafe extern "system" fn create_source(
         ratio_max: 1.0,
         rate_changes: 0,
         feeder: None,
+        starved: 0,
+        last_submit: None,
+        max_gap: 0.0,
+        gaps_over_20ms: 0,
+        min_frames: u32::MAX,
+        max_frames: 0,
     });
     hr
 }
@@ -202,11 +217,34 @@ unsafe extern "system" fn start(this: *mut c_void, flags: u32, set: u32) -> HRES
     real::<StartFn>(&REAL.start)(this, flags, set)
 }
 
+/// `IXAudio2SourceVoice::GetState` (slot 25)'s output.
+#[repr(C)]
+#[derive(Default)]
+struct VoiceState {
+    context: usize,
+    queued: u32,
+    played: u64,
+}
+
 unsafe extern "system" fn submit(this: *mut c_void, buffer: *const Buffer, wma: *const c_void) -> HRESULT {
     CALLS.fetch_add(1, Relaxed);
     if !buffer.is_null() {
         let b = &*buffer;
+        // the queue before this buffer joins it (XAUDIO2_VOICE_NOSAMPLESPLAYED: no position query)
+        let mut st = VoiceState::default();
+        let get_state: unsafe extern "system" fn(*mut c_void, *mut VoiceState, u32) = std::mem::transmute(*table_of(this).add(25));
+        get_state(this, &mut st, 0x100);
+        let now = Instant::now();
         with_voice(this as usize, |v| {
+            if v.buffers > 0 && st.queued == 0 && v.started.is_some() {
+                v.starved += 1;
+            }
+            if let Some(t) = v.last_submit {
+                let gap = now.duration_since(t).as_secs_f64();
+                v.max_gap = v.max_gap.max(gap);
+                v.gaps_over_20ms += u64::from(gap > 0.020);
+            }
+            v.last_submit = Some(now);
             if v.feeder.is_none() {
                 v.feeder = Some(this_thread());
             }
@@ -215,7 +253,10 @@ unsafe extern "system" fn submit(this: *mut c_void, buffer: *const Buffer, wma: 
             // PCM (1), float (3), extensible (0xfffe): frames from bytes, or the play length when one is given
             if matches!(v.tag, 1 | 3 | 0xfffe) && v.block > 0 {
                 let whole = u64::from(b.audio_bytes / u32::from(v.block));
-                v.frames += if b.play_length > 0 { u64::from(b.play_length) } else { whole.saturating_sub(u64::from(b.play_begin)) };
+                let n = if b.play_length > 0 { u64::from(b.play_length) } else { whole.saturating_sub(u64::from(b.play_begin)) };
+                v.frames += n;
+                v.min_frames = v.min_frames.min(n as u32);
+                v.max_frames = v.max_frames.max(n as u32);
             }
         });
     }
@@ -251,8 +292,8 @@ pub fn report() -> Vec<String> {
         let playing = x.started.map_or(0.0, |t| t.elapsed().as_secs_f64());
         let fed = if x.frames > 0 && x.rate > 0 { format!("{:.1} s of audio", x.frames as f64 / f64::from(x.rate)) } else { "compressed".into() };
         out.push(format!(
-            "  voice: tag {:#x} {} Hz {} ch {}-bit, flags {:#x}, max ratio {}, create {:#x}; {:.1} s since start, {} buffers, {} bytes = {fed}; ratio {} (set {}x, max {}), rate set {}x; fed by thread {}",
-            x.tag, x.rate, x.channels, x.bits, x.flags, x.max_ratio, x.hr as u32, playing, x.buffers, x.bytes, x.ratio, x.ratio_calls, x.ratio_max, x.rate_changes,
+            "  voice: tag {:#x} {} Hz {} ch {}-bit, flags {:#x}, max ratio {}, create {:#x}; {:.1} s since start, {} buffers ({}-{} frames), {} bytes = {fed}; ran dry {}x; submits apart up to {:.1} ms, {} over 20 ms; ratio {} (set {}x, max {}), rate set {}x; fed by thread {}",
+            x.tag, x.rate, x.channels, x.bits, x.flags, x.max_ratio, x.hr as u32, playing, x.buffers, if x.min_frames == u32::MAX { 0 } else { x.min_frames }, x.max_frames, x.bytes, x.starved, x.max_gap * 1e3, x.gaps_over_20ms, x.ratio, x.ratio_calls, x.ratio_max, x.rate_changes,
             x.feeder.map_or("?".into(), |(id, pr, mask)| format!("{id} (priority {pr}, affinity {mask:#x})"))
         ));
     }

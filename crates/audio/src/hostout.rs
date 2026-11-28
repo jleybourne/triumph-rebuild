@@ -38,8 +38,8 @@ use crate::wav::{Format, Writer};
 
 // ------------------------------------------------------------------------------------------------ the counts
 
-/// Interfaces asked of `IMMDevice::Activate`, by name, with the calls and failures.
-static ACTIVATIONS: Mutex<Vec<(String, u64, u64)>> = Mutex::new(Vec::new());
+/// Interfaces asked of `IMMDevice::Activate`, by name, with the calls, failures and the first caller's chain.
+static ACTIVATIONS: Mutex<Vec<(String, u64, u64, String)>> = Mutex::new(Vec::new());
 static STREAMS: Mutex<Vec<Stream>> = Mutex::new(Vec::new());
 /// Calls into the hooked tables, all kinds.
 pub static CALLS: AtomicU64 = AtomicU64::new(0);
@@ -306,7 +306,7 @@ unsafe extern "system" fn activate(this: *mut c_void, iid: *const GUID, ctx: u32
                 x.1 += 1;
                 x.2 += u64::from(hr.is_err());
             }
-            None => a.push((name, 1, u64::from(hr.is_err()))),
+            None => a.push((name, 1, u64::from(hr.is_err()), caller_chain())),
         }
     }
     hr
@@ -439,6 +439,73 @@ unsafe extern "system" fn service(this: *mut c_void, iid: *const GUID, out: *mut
 
 static HOOKING: Mutex<()> = Mutex::new(());
 
+// ------------------------------------------------------------------- the client's other methods, counted
+
+/// `IAudioClient` slots watched for calls only (what a caller does before or instead of `Initialize`), by slot:
+/// IsFormatSupported 7, GetMixFormat 8, GetDevicePeriod 9, IAudioClient2's IsOffloadCapable 15, SetClientProperties 16,
+/// GetBufferSizeLimits 17, IAudioClient3's GetSharedModeEnginePeriod 18, GetCurrentSharedModeEnginePeriod 19.
+const COUNTED: [(usize, &str); 8] = [
+    (7, "IsFormatSupported"),
+    (8, "GetMixFormat"),
+    (9, "GetDevicePeriod"),
+    (15, "IsOffloadCapable"),
+    (16, "SetClientProperties"),
+    (17, "GetBufferSizeLimits"),
+    (18, "GetSharedModeEnginePeriod"),
+    (19, "GetCurrentSharedModeEnginePeriod"),
+];
+static COUNTED_REAL: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
+/// per counted slot: calls, failures, the first failure's HRESULT, and (IsFormatSupported) the formats asked
+static COUNTED_CALLS: Mutex<[(u64, u64, i32); 8]> = Mutex::new([(0, 0, 0); 8]);
+static FORMATS_ASKED: Mutex<Vec<(String, i32)>> = Mutex::new(Vec::new());
+
+fn format_text(f: Option<Format>) -> String {
+    f.map_or("format not read".to_string(), |f| {
+        format!("{} Hz {} ch {}-bit {}{}", f.rate, f.channels, f.bits, if f.float { "float" } else { "PCM" }, if f.mask != 0 { format!(" mask {:#x}", f.mask) } else { String::new() })
+    })
+}
+
+/// Six integer arguments forwarded (the slots take at most six; unused ones are the caller's stack, ignored).
+unsafe fn counted_call<const I: usize>(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> HRESULT {
+    CALLS.fetch_add(1, Relaxed);
+    let real: unsafe extern "system" fn(u64, u64, u64, u64, u64, u64) -> HRESULT = std::mem::transmute(COUNTED_REAL[I].load(Relaxed));
+    let hr = real(a, b, c, d, e, f);
+    {
+        let mut k = lock(&COUNTED_CALLS);
+        k[I].0 += 1;
+        if hr.is_err() {
+            if k[I].1 == 0 {
+                k[I].2 = hr.0;
+            }
+            k[I].1 += 1;
+        }
+    }
+    // IsFormatSupported(this, share, format, closest): the format asked, with the answer (S_FALSE 1: a closest one)
+    if COUNTED[I].0 == 7 && c != 0 {
+        let asked = format!("{} {}", if b == 1 { "exclusive" } else { "shared" }, format_text(Format::from_waveformatex(c as *const u8)));
+        let mut v = lock(&FORMATS_ASKED);
+        if v.len() < 8 && !v.iter().any(|x| x.0 == asked && x.1 == hr.0) {
+            v.push((asked, hr.0));
+        }
+    }
+    hr
+}
+
+macro_rules! counted {
+    ($($i:literal)*) => {
+        [$({
+            unsafe extern "system" fn hook(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> HRESULT {
+                counted_call::<$i>(a, b, c, d, e, f)
+            }
+            hook as usize
+        }),*]
+    };
+}
+
+fn counted_hooks() -> [usize; 8] {
+    counted!(0 1 2 3 4 5 6 7)
+}
+
 unsafe extern "system" fn get_buffer(this: *mut c_void, frames: u32, out: *mut *mut u8) -> HRESULT {
     CALLS.fetch_add(1, Relaxed);
     let hr = real::<GetBufferFn>(&REAL.get_buffer)(this, frames, out);
@@ -493,6 +560,40 @@ unsafe extern "system" fn release_buffer(this: *mut c_void, frames: u32, flags: 
     real::<ReleaseBufferFn>(&REAL.release_buffer)(this, frames, flags)
 }
 
+/// Who called: up to six return addresses as `module+offset`, after the frames of the host's audio and COM DLLs.
+pub(crate) fn caller_chain() -> String {
+    use windows::Win32::System::Diagnostics::Debug::RtlCaptureStackBackTrace;
+    let mut frames = [std::ptr::null_mut::<c_void>(); 24];
+    // SAFETY: room for 24 frames
+    // from 2: past this function and the hook that called it
+    let n = unsafe { RtlCaptureStackBackTrace(2, &mut frames, None) } as usize;
+    let skip = ["mmdevapi.dll", "audioses.dll", "combase.dll"];
+    frames[..n]
+        .iter()
+        .map(|&f| module_offset(f as usize))
+        .skip_while(|s| skip.iter().any(|m| s.to_ascii_lowercase().starts_with(m)))
+        .take(6)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `module+offset` for a code address (the title's images are loaded by the Windows loader, so they are modules).
+fn module_offset(addr: usize) -> String {
+    use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT};
+    let mut m = windows::Win32::Foundation::HMODULE::default();
+    let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    // SAFETY: lookups by address; the name buffer is ours
+    unsafe {
+        if GetModuleHandleExW(flags, windows::core::PCWSTR(addr as *const u16), &mut m).is_err() {
+            return format!("{addr:#x}");
+        }
+        let mut path = [0u16; 260];
+        let n = GetModuleFileNameW(m, &mut path) as usize;
+        let name = String::from_utf16_lossy(&path[..n]);
+        format!("{}+{:#x}", name.rsplit(['\\', '/']).next().unwrap_or("?"), addr - m.0 as usize)
+    }
+}
+
 // ---------------------------------------------------------------------------------------------- installing
 
 /// Hooks the host's device and audio client classes. Done once, before the title runs, on a thread of its own
@@ -533,7 +634,80 @@ pub fn install() -> Result<(), String> {
     if let Err(e) = crate::xaudio::install() {
         eprintln!("audio     XAudio2 voices not watched: {e}");
     }
+    // REBUILD_AUDIO_REPORT=<s>: the report every s seconds too (a run that ends in a crash still leaves one)
+    if let Some(every) = std::env::var("REBUILD_AUDIO_REPORT").ok().and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| *v >= 1.0) {
+        let _ = std::thread::Builder::new().name("rebuild audio report".into()).spawn(move || {
+            let t = Instant::now();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs_f64(every));
+                let at = t.elapsed().as_secs_f64();
+                println!("audio @{at:.0}s {}", crate::stats::report());
+                for l in report() {
+                    println!("audio @{at:.0}s {l}");
+                }
+            }
+        });
+    }
     Ok(())
+}
+
+/// The console's timer granularity for this process: 1 ms timer resolution (`timeBeginPeriod(1)`, kept for the life of
+/// the process), honoured even while no window of the process is visible (Windows 11 otherwise ignores the request
+/// then). Without it `Sleep(1)` takes ~15.6 ms here, and threads written for the console's 1 ms sleeps run late: Bink's
+/// and XAudio2's feeders let their voices run dry between wake-ups (10-30 ms holes in the title's sound, 26 a second).
+/// `REBUILD_TIMER_RESOLUTION=default` leaves the host's default. Returns `Sleep(1)`'s time afterwards (ms).
+pub fn fine_timer() -> Option<f64> {
+    if std::env::var("REBUILD_TIMER_RESOLUTION").is_ok_and(|v| v.trim() == "default") {
+        return None;
+    }
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, ProcessPowerThrottling, SetProcessInformation, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
+    };
+    // SAFETY: this process's own settings; the structure lives across the call
+    unsafe {
+        let state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION,
+            StateMask: 0,
+        };
+        let _ = SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            (&state as *const PROCESS_POWER_THROTTLING_STATE).cast(),
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        );
+        windows::Win32::Media::timeBeginPeriod(1);
+    }
+    Some(sleep_one_ms())
+}
+
+/// How long `Sleep(1)` takes in this process (ms, median of 5): the timer resolution this process's waits get (on
+/// Windows 11 a process's own request counts, not another process's).
+pub fn sleep_one_ms() -> f64 {
+    let mut t: Vec<f64> = (0..5)
+        .map(|_| {
+            let s = Instant::now();
+            // SAFETY: a plain sleep
+            unsafe { windows::Win32::System::Threading::Sleep(1) };
+            s.elapsed().as_secs_f64() * 1e3
+        })
+        .collect();
+    t.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    t[2]
+}
+
+/// The host's timer resolution now (ms): what `Sleep` and timed waits round up to.
+pub fn timer_resolution_ms() -> Option<f64> {
+    use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    type QueryFn = unsafe extern "system" fn(*mut u32, *mut u32, *mut u32) -> i32;
+    // SAFETY: ntdll's export, three out values in 100 ns units
+    unsafe {
+        let nt = GetModuleHandleW(windows::core::w!("ntdll.dll")).ok()?;
+        let f: QueryFn = std::mem::transmute(GetProcAddress(nt, windows::core::s!("NtQueryTimerResolution"))?);
+        let (mut coarsest, mut finest, mut now) = (0u32, 0u32, 0u32);
+        (f(&mut coarsest, &mut finest, &mut now) >= 0).then(|| f64::from(now) / 1e4)
+    }
 }
 
 unsafe fn hook() -> Result<(), String> {
@@ -549,6 +723,13 @@ unsafe fn hook() -> Result<(), String> {
     REAL.start.store(patch(ct, 10, start as *const () as usize)?, Relaxed);
     REAL.stop.store(patch(ct, 11, stop as *const () as usize)?, Relaxed);
     REAL.service.store(patch(ct, 14, service as *const () as usize)?, Relaxed);
+    // slots 15-19 exist only when the object is an IAudioClient3 on the same table (checked below with slot 20)
+    let three = client.cast::<IAudioClient3>().is_ok_and(|c3| table_of(c3.as_raw()) == ct);
+    for (i, (&(slot, _), hook)) in COUNTED.iter().zip(counted_hooks()).enumerate() {
+        if slot < 15 || three {
+            COUNTED_REAL[i].store(patch(ct, slot, hook)?, Relaxed);
+        }
+    }
     // IAudioClient3 continues the same table when the object hands back the same pointer for it
     if let Ok(c3) = client.cast::<IAudioClient3>() {
         if table_of(c3.as_raw()) == ct {
@@ -634,8 +815,19 @@ pub fn report() -> Vec<String> {
     let a = lock(&ACTIVATIONS).clone();
     out.push(format!(
         "device activations: {}",
-        if a.is_empty() { "none".into() } else { a.iter().map(|(n, c, f)| format!("{n} {c}{}", if *f > 0 { format!(" ({f} failed)") } else { String::new() })).collect::<Vec<_>>().join(", ") }
+        if a.is_empty() { "none".into() } else { a.iter().map(|(n, c, f, w)| format!("{n} {c}{} [first from {w}]", if *f > 0 { format!(" ({f} failed)") } else { String::new() })).collect::<Vec<_>>().join(", ") }
     ));
+    let k = *lock(&COUNTED_CALLS);
+    let called: Vec<String> = COUNTED
+        .iter()
+        .zip(k.iter())
+        .filter(|(_, c)| c.0 > 0)
+        .map(|(&(_, n), c)| format!("{n} {}{}", c.0, if c.1 > 0 { format!(" ({} failed, first {:#x})", c.1, c.2 as u32) } else { String::new() }))
+        .collect();
+    out.push(format!("other client calls: {}", if called.is_empty() { "none".into() } else { called.join(", ") }));
+    for (f, hr) in lock(&FORMATS_ASKED).iter() {
+        out.push(format!("  IsFormatSupported {f} -> {:#x}", *hr as u32));
+    }
     let s = streams();
     out.push(format!("{} audio clients initialized", s.len()));
     for (i, r) in s.iter().enumerate() {
@@ -663,6 +855,43 @@ pub fn report() -> Vec<String> {
     }
     out.extend(crate::spatial::report());
     out.extend(crate::xaudio::report());
-    out.push(format!("host audio DLLs loaded: {}", loaded_dlls().join(", ")));
+    out.push(format!(
+        "host audio DLLs loaded: {}; host timer resolution {}, Sleep(1) here takes {:.2} ms (median of 5)",
+        loaded_dlls().join(", "),
+        timer_resolution_ms().map_or("?".into(), |v| format!("{v:.3} ms")),
+        sleep_one_ms()
+    ));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_fine_timer_makes_a_one_ms_sleep_take_about_one_ms() {
+        let ms = super::fine_timer().expect("not switched off in tests");
+        assert!(ms < 4.0, "Sleep(1) took {ms:.2} ms after timeBeginPeriod(1)");
+    }
+
+    /// A client's calls before `Initialize` are counted through the hooked table (needs a render device: skipped
+    /// without one).
+    #[test]
+    fn a_clients_mix_format_and_format_questions_are_counted() {
+        use windows::Win32::Media::Audio::{eConsole, eRender, IAudioClient, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED};
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED};
+        if super::install().is_err() {
+            return;
+        }
+        // SAFETY: COM on this thread; the mix format is freed as documented
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let e: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
+            let c: IAudioClient = e.GetDefaultAudioEndpoint(eRender, eConsole).unwrap().Activate(CLSCTX_ALL, None).unwrap();
+            let f = c.GetMixFormat().unwrap();
+            let _ = c.IsFormatSupported(AUDCLNT_SHAREMODE_SHARED, f, None);
+            CoTaskMemFree(Some(f.cast()));
+        }
+        let k = *super::lock(&super::COUNTED_CALLS);
+        assert!(k[0].0 >= 1 && k[1].0 >= 1, "IsFormatSupported and GetMixFormat counted: {k:?}");
+        assert!(super::report().iter().any(|l| l.contains("IsFormatSupported shared")), "{:?}", super::report());
+    }
 }
