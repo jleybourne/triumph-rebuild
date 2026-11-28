@@ -56,6 +56,9 @@ pub struct Resource {
     /// console bytes it covers (its footprint)
     pub bytes: u64,
     pub host: Option<ID3D12Resource>,
+    /// a depth texture the title also writes as a UAV: the colour texture its UAVs name
+    /// (`docs/design/depth-uav.md`; the list keeps the two in step at the title's barriers)
+    pub twin: Option<ID3D12Resource>,
     /// the typed format views default to (the host texture is typeless)
     pub view_format: u32,
     /// memory we allocated (freed with the resource)
@@ -86,7 +89,43 @@ impl Resource {
     pub fn host_uav(&self) -> bool {
         self.host.as_ref().is_some_and(|h| unsafe { h.GetDesc() }.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 != 0)
     }
+    /// The console gave it unordered access and the host took it away (a depth texture).
+    pub fn uav_stripped(&self) -> bool {
+        self.desc.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 != 0 && format::host_desc(&self.desc).0.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0
+    }
+    /// What the title's UAVs of it write: its twin, else the host resource.
+    pub fn uav_raw(&self) -> Raw {
+        self.twin.as_ref().map_or_else(|| self.host_raw(), |t| t.as_raw())
+    }
 }
+
+/// A UAV of `r` (description `desc`, null = the default) is a view of its twin: `r` has one and the view is of
+/// the depth plane (the twin has no stencil plane; a stencil UAV stays a null view).
+pub(crate) fn twin_takes(r: &Resource, desc: Option<&D3D12_UNORDERED_ACCESS_VIEW_DESC>) -> bool {
+    if r.twin.is_none() {
+        return false;
+    }
+    let Some(v) = desc else { return true };
+    // SAFETY: the member the dimension selects.
+    let plane = unsafe {
+        match v.ViewDimension {
+            D3D12_UAV_DIMENSION_TEXTURE2D => v.Anonymous.Texture2D.PlaneSlice,
+            D3D12_UAV_DIMENSION_TEXTURE2DARRAY => v.Anonymous.Texture2DArray.PlaneSlice,
+            _ => 0,
+        }
+    };
+    plane == 0
+}
+
+/// `REBUILD_DEPTH_TWINS=0` makes no twins (their UAVs are null views again, their UAV layouts only parked): for
+/// comparing runs. Read once.
+fn twins_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("REBUILD_DEPTH_TWINS").map_or(true, |v| v.trim() != "0"))
+}
+
+/// Twins made for depth textures the title also writes as UAVs, over the run.
+pub static TWINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One of our resources, if `p` is one.
 pub(crate) fn resource<'a>(p: Raw) -> Option<&'a Resource> {
@@ -250,6 +289,11 @@ pub(crate) fn initial_layout(initial: Initial, hd: &D3D12_RESOURCE_DESC) -> D3D1
         9 | 10 => false,
         _ => true,
     };
+    // a depth texture the title starts in unordered access: parked in copy source, where the list keeps its depth
+    // while the title's UAVs write its twin (`rebuild_xlist::console::twin`)
+    if l == 3 && !ok && has(D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) {
+        return D3D12_BARRIER_LAYOUT_COPY_SOURCE;
+    }
     D3D12_BARRIER_LAYOUT(if ok { l } else { 0 })
 }
 
@@ -326,6 +370,22 @@ impl Resources {
                 }
             }
         };
+        // a depth texture the title also writes as a UAV: its twin, resting in unordered access
+        let twin = match (host.is_some() && twins_on(), format::twin_desc(desc)) {
+            (true, Some(td)) => match ctx.host.resource_in(&td, None, D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS) {
+                Ok(t) => {
+                    if t.is_some() && TWINS.fetch_add(1, Ordering::Relaxed) == 0 {
+                        ctx.events.note("depth texture with UAVs: a twin takes them (counted)", desc.Format.0 as u64);
+                    }
+                    t
+                }
+                Err(hr) => {
+                    ctx.events.note("depth twin refused (its UAVs stay null views)", hr.0 as u32 as u64);
+                    None
+                }
+            },
+            _ => None,
+        };
         if !parent.is_null() {
             object::add_ref(parent);
         }
@@ -337,6 +397,7 @@ impl Resources {
             address,
             bytes: info.size,
             host,
+            twin,
             view_format,
             owned,
             parent,
@@ -545,6 +606,26 @@ impl Resources {
     pub fn host_resource(&self, p: Raw) -> Option<Raw> {
         resource(p).and_then(|r| r.host.as_ref().map(|h| h.as_raw()))
     }
+
+    /// `ListHost::uav_twin`: a texture whose host resource lost the unordered access the console gave it, with its
+    /// twin (null when its format has none). Answered only for those, so every other barrier costs one check.
+    pub fn uav_twin(&self, p: Raw) -> Option<rebuild_xlist::console::UavTwin> {
+        let r = resource(p)?;
+        if r.is_buffer() || r.desc.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 || !r.uav_stripped() {
+            return None;
+        }
+        let host = r.host.as_ref()?;
+        // SAFETY: a live host resource.
+        let d = unsafe { host.GetDesc() };
+        let planes = if d.Format.0 == 19 || d.Format.0 == 44 { 2 } else { 1 };
+        Some(rebuild_xlist::console::UavTwin {
+            depth: host.as_raw(),
+            twin: r.twin.as_ref().map_or(std::ptr::null_mut(), |t| t.as_raw()),
+            mips: u32::from(d.MipLevels.max(1)),
+            arrays: u32::from(d.DepthOrArraySize.max(1)),
+            planes,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -565,7 +646,9 @@ mod initial_tests {
         assert_eq!(l(Initial::Layout(6), &plain), 6);
         assert_eq!(l(Initial::Layout(3), &uav), 3);
         assert_eq!(l(Initial::Layout(31), &plain), 1, "the console's read layout");
-        assert_eq!(l(Initial::Layout(3), &plain), 0, "UAV stripped (depth with unordered access)");
+        assert_eq!(l(Initial::Layout(3), &plain), 0, "no unordered access");
+        assert_eq!(l(Initial::Layout(3), &depth), 7, "UAV stripped from depth: parked in copy source (its twin takes the UAVs)");
+        assert_eq!(l(Initial::State(0x8), &depth), 7);
         assert_eq!(l(Initial::Layout(2), &plain), 0, "no render target flag");
         assert_eq!(l(Initial::Layout(4), &depth), 4);
         assert_eq!(l(Initial::Layout(0xffff_ffff), &plain), 0, "undefined");

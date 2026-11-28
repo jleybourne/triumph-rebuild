@@ -7,6 +7,12 @@
 //! T:   temporary files: overlay only, emptied at every start (the console's behaviour)
 //! S:   persistent local storage: overlay only, kept between runs (the GDK reports this root)
 //! ```
+//!
+//! **D: is not mounted, on purpose.** On the console it is the devkit's developer scratch partition ("for use
+//! during development only", the GDK's "Local storage on XBOX console" page); a retail console has none. The title
+//! only probes `D:\decorations\presets`, `\presetgroups` and `/compressed_textures` for optional designer files
+//! (decoration manager, exe 0x145bb7090: each find that fails skips to cleanup, nothing is ever written there) and
+//! goes on with the package's own content, as on retail. A refused find is that behaviour.
 
 #![cfg(windows)]
 

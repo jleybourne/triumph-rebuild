@@ -192,6 +192,7 @@ fn device_report() {
         }
         println!("lists     {} draws and dispatches dropped: a library pipeline with no shadow table bound", rebuild_xlist::console::NO_SHADOW.load(Relaxed));
         println!("views     {} UAVs of resources without unordered access written as null views", rebuild_d3d12x::heap::NO_UAV.load(Relaxed));
+        println!("views     {} depth textures with UAVs given a twin, {} depth/twin copies (docs/design/depth-uav.md)", rebuild_d3d12x::resource::TWINS.load(Relaxed), rebuild_xlist::console::TWIN_COPIES.load(Relaxed));
     }
     let t =rebuild_runtime::device::traps();
     println!("device    {} slots called that are not written yet (first call, ms after the device):", t.len());

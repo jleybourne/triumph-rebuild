@@ -54,6 +54,8 @@ pub mod views;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod twin_tests;
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};

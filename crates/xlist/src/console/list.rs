@@ -19,6 +19,7 @@ use windows::Win32::Graphics::Direct3D12::*;
 use super::alloc::{self, AllocatorState};
 use super::indirect;
 use super::slots::{self, Fp};
+use super::twin;
 use super::{Backend, HeapBinding, Header, LabelValue, LabelWrite, ListHost, MemoryRange, MemoryWait, Raw, UserMap, UserSource, WaitAction, CONSOLE_RTV_INCREMENT, TITLE_BYTES, USER_DWORDS};
 
 const DXGI_ERROR_NOT_FOUND: HRESULT = HRESULT(0x887A_0002_u32 as i32);
@@ -297,6 +298,12 @@ pub(crate) struct ListState {
     stamps: Option<Arc<super::stamps::Stamps>>,
     /// timestamp labels of the current host list, resolved at its end: (query, title buffer, its offset)
     stamp_labels: Vec<(u32, Raw, u64)>,
+    /// work recorded since the reset (draws, dispatches, copies, clears)
+    work_count: u64,
+    /// textures with a UAV twin: the last UAV phase edge this list recorded for each (true: an enter), and
+    /// `work_count` then ([`twin`])
+    twin_edges: Vec<(Raw, bool, u64)>,
+    twin_plan: twin::Plan,
 }
 
 // SAFETY: a list is recorded by one thread at a time (D3D12's rule, and the title's).
@@ -343,6 +350,7 @@ impl ListState {
     fn work(&mut self) {
         self.seg_work = true;
         self.work_since_barrier = true;
+        self.work_count += 1;
     }
 
     fn current(&self) -> &HostList {
@@ -945,6 +953,9 @@ pub fn create_list(kind: u32, allocator: Raw, pipeline: Raw) -> windows::core::R
             spans: [Span::default(); SPANS],
             stamps: a.backend.stamps().cloned(),
             stamp_labels: Vec::new(),
+            work_count: 0,
+            twin_edges: Vec::new(),
+            twin_plan: twin::Plan::default(),
         },
     });
     let p: Raw = Box::into_raw(obj).cast();
@@ -1164,6 +1175,7 @@ unsafe extern "system" fn reset(this: Raw, allocator: Raw, pipeline: Raw) -> HRE
     s.heaps = [None; 2];
     s.stats = ListStats::default();
     s.spans = [Span::default(); SPANS];
+    s.twin_edges.clear();
     if !pipeline.is_null() {
         s.set_pipeline(pipeline);
     }
@@ -1465,6 +1477,9 @@ pub static INDIRECT_REFUSED: [std::sync::atomic::AtomicU64; 2] = [std::sync::ato
 pub static RECTS_EXPANDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static RECTS_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Copies between depth textures and their UAV twins ([`twin`]), over the run.
+pub static TWIN_COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// GPU timestamp labels written into the title's memory (resolved at their host list's end).
 pub static STAMP_LABELS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -1660,9 +1675,17 @@ unsafe extern "system" fn barrier_groups(this: Raw, count: u32, groups: *const C
                     0 => globals.push(g.items.add(i * 16).cast::<[u8; 16]>().read_unaligned()),
                     1 => {
                         let mut t = g.items.add(i * 64).cast::<[u8; 64]>().read_unaligned();
-                        match s.resource(t.as_ptr().add(24).cast::<Raw>().read_unaligned()) {
+                        let console = t.as_ptr().add(24).cast::<Raw>().read_unaligned();
+                        match s.resource(console) {
                             Some(r) => {
                                 t.as_mut_ptr().add(24).cast::<Raw>().write_unaligned(r);
+                                let b = twin::TextureBarrier::from_bytes(&t);
+                                if twin::touches_uav(&b) {
+                                    if let Some(tw) = s.host.uav_twin(console) {
+                                        twin_barrier(s, console, &b, &tw, &mut textures);
+                                        continue;
+                                    }
+                                }
                                 host_layouts(&mut t);
                                 textures.push(t);
                             }
@@ -1702,7 +1725,56 @@ unsafe extern "system" fn barrier_groups(this: Raw, count: u32, groups: *const C
         s.work_since_barrier = false;
         s.seg_work = true;
     }
+    if !s.twin_plan.copies.is_empty() || !s.twin_plan.post.is_empty() {
+        twin_copies(s, &l7);
+    }
     (s.globals, s.textures, s.buffers) = (globals, textures, buffers);
+}
+
+/// A title barrier into, out of or within unordered access on a texture with a twin: its host barriers go in
+/// the group (`textures`), its copies and the barriers after them wait in `s.twin_plan` ([`twin::plan`]).
+fn twin_barrier(s: &mut ListState, console: Raw, b: &twin::TextureBarrier, tw: &twin::UavTwin, textures: &mut Vec<[u8; 64]>) {
+    let at = s.twin_edges.iter().position(|e| e.0 == console);
+    // the other edge of this phase, in this list, with no work since
+    let entering = !twin::is_uav_layout(b.layout_before);
+    let quiet = at.is_some_and(|i| s.twin_edges[i].1 != entering && s.twin_edges[i].2 == s.work_count);
+    let mut plan = std::mem::take(&mut s.twin_plan);
+    let from = plan.pre.len();
+    if let Some(edge @ (twin::Phase::Enter | twin::Phase::Exit)) = twin::plan(b, tw, quiet, &mut plan) {
+        let e = (console, edge == twin::Phase::Enter, s.work_count);
+        match at {
+            Some(i) => s.twin_edges[i] = e,
+            None => s.twin_edges.push(e),
+        }
+    }
+    textures.extend(plan.pre.drain(from..).map(|x| x.to_bytes()));
+    s.twin_plan = plan;
+}
+
+/// The copies of the twin barriers just recorded, then the barriers that follow them.
+fn twin_copies(s: &mut ListState, l7: &ID3D12GraphicsCommandList7) {
+    let mut plan = std::mem::take(&mut s.twin_plan);
+    for &(dst, ds, src, ss) in &plan.copies {
+        if ds == u32::MAX {
+            call!(s.CopyResource(dst, src));
+        } else {
+            let loc = |r: Raw, i: u32| D3D12_TEXTURE_COPY_LOCATION {
+                // SAFETY: a borrowed COM pointer in the field's layout; never released through it.
+                pResource: unsafe { std::mem::transmute_copy(&r) },
+                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: i },
+            };
+            let (d, r) = (loc(dst, ds), loc(src, ss));
+            call!(s.CopyTextureRegion(&d, 0, 0, 0, &r, std::ptr::null()));
+        }
+    }
+    TWIN_COPIES.fetch_add(plan.copies.len() as u64, Ordering::Relaxed);
+    if !plan.post.is_empty() {
+        let g = ConsoleGroup { kind: 1, count: plan.post.len() as u32, items: plan.post.as_ptr().cast() };
+        unsafe { (l7.vtable().Barrier)(l7.as_raw(), 1, (&g as *const ConsoleGroup).cast()) };
+    }
+    plan.clear();
+    s.twin_plan = plan;
 }
 
 /// A buffer barrier over its whole buffer (`Offset` at +24 = 0, `Size` at +32 = `UINT64_MAX`). The
@@ -2057,7 +2129,11 @@ fn uav_clear(s: &mut ListState, gpu: u64, cpu: usize, resource: Raw) -> Option<(
     s.work();
     let g = s.table(gpu);
     let c = s.host.cpu_descriptor(cpu);
-    let r = s.resource(resource);
+    // a depth texture's UAVs are views of its twin, and the clear must name the resource its view does
+    let r = match s.host.uav_twin(resource) {
+        Some(t) if !t.twin.is_null() => Some(t.twin),
+        _ => s.resource(resource),
+    };
     match (g, c, r) {
         (Some(g), Some(c), Some(r)) => Some((D3D12_GPU_DESCRIPTOR_HANDLE { ptr: g }, D3D12_CPU_DESCRIPTOR_HANDLE { ptr: c }, r)),
         _ => {
