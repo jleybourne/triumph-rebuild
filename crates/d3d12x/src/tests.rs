@@ -425,6 +425,31 @@ fn buffer_views_round_trip_with_a_raw_mirror_and_a_shadow_entry() {
     release(h);
 }
 
+/// WARP run with the debug layer: a title view of 1,048,576 R32_UINT over 64 KiB the model knows was an invalid
+/// CreateShaderResourceView (#31) and removed the device. A typed view keeps only the elements the memory
+/// holds from its start; the shadow table's records follow.
+#[test]
+fn a_typed_view_longer_than_its_memory_is_cut_to_fit() {
+    let rig = rig();
+    let b = buffer(&rig.r, KIB_64);
+    let base = rig.r.console_resource(b).unwrap().address;
+    let room = rig.mem.base() + (64 << 20) - base; // the plain model's one range ends at 64 MiB
+    let (h, start) = heap(&rig, 0, 4, true, true);
+    let st = rig.r.heap_state(h).unwrap();
+    unsafe {
+        rig.r.create_srv(b, &srv_buffer(0, 1 << 25, 0, false, DXGI_FORMAT_R32_UINT), start);
+        rig.r.create_uav(b, std::ptr::null_mut(), &uav_buffer(0, 1 << 25, 0, false, DXGI_FORMAT_R32_UINT), start + 32);
+    }
+    let fit = (room / 4) as u32;
+    let alt = |i: u32| rig.fake.at(st.host.cpu_at(st.shadow.as_ref().unwrap().read(i)[2])).unwrap().describe();
+    assert!(alt(0).ends_with(&format!(" n {fit}")), "{}", alt(0));
+    assert!(alt(1).ends_with(&format!(" n {fit}")), "{}", alt(1));
+    assert_eq!(st.shadow.as_ref().unwrap().read(0)[1], fit, "records");
+    assert_eq!(st.stats.clamped.load(Ordering::Relaxed), 2);
+    release(b);
+    release(h);
+}
+
 #[test]
 fn a_constant_buffer_off_256_keeps_its_raw_view() {
     let rig = rig();
