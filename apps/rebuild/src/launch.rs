@@ -354,9 +354,34 @@ pub fn fail(code: i32, why: &str) -> ! {
     std::process::exit(code);
 }
 
+/// The name of the mutex a title run holds for its whole life (the OS releases it when the process ends, crash
+/// included, so it is never stale).
+pub const RUN_MUTEX: &str = "Local\\triumph-rebuild-title-run";
+
+/// Hold [`RUN_MUTEX`] or exit 4: another title run is in progress.
+fn single_run() {
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows::Win32::System::Threading::CreateMutexW;
+    let name = HSTRING::from(RUN_MUTEX);
+    match unsafe { CreateMutexW(None, true, &name) } {
+        Ok(h) => {
+            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                fail(4, "another title run is in progress on this machine (one at a time): not starting");
+            }
+            // a HANDLE has no destructor: never closed, so held until the process ends
+            let _ = h;
+        }
+        Err(e) => eprintln!("run lock: could not create {RUN_MUTEX} ({e}); starting without it"),
+    }
+}
+
 /// Load the title and run it. Never returns: the process ends with the run.
 pub fn run(o: Options) -> ! {
     let Options { game: dir, run, seconds, sample, bcpack_tables } = o;
+    // one title run at a time on this machine, enforced here rather than by scripts: a second run would empty the
+    // shared T: overlay under the first and share the GPU with it
+    single_run();
     // the sampler suspends the title's thread: opt-in only (`--sample N`), never by default
     let every = sample.unwrap_or(2);
     if !dir.is_dir() {

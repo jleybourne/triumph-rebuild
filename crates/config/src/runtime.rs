@@ -12,7 +12,9 @@
 //! Every registry key is in [`RUNTIME_KEYS`] (it reaches the runtime), or in [`NOT_RUNTIME`] with the
 //! reason; a test keeps that true for every new key.
 
-use crate::{find, Config};
+use crate::Config;
+#[cfg(test)]
+use crate::find;
 
 /// What a variable becomes.
 #[derive(Debug, Clone, PartialEq, Eq)]
