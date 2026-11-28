@@ -129,6 +129,12 @@ decision 4.
 | todo | frame line: fps · ms · draws · dropped · upload MB · upload ms · translation ms · output res · upscaler/mode · vendor | one parseable line a second |
 | doing | Build 0 (c), moved here: the title's GPU time from per-list timestamp pairs, RT on and off. Built: a query pair in every direct/compute host list, resolved per queue and frame in one run, read a few frames late (`runtime/src/gputime.rs`); frame line `gpu` and summary `gpu_ms` are the frames' busy time (union over queues), `gpu_sum_ms` the plain sum. The title's own GPU timestamp labels (flag 1) are written into its memory the same way. WARP, loading screen: 44 ms a frame (indicative only). Left: the card's number, RT on and off, once the real frame renders | measured; replaces the ~45 ms everywhere it is quoted |
 
+| doing | readable UI text: console view indices past 750,000 remapped into the host heap (lane `descremap`) | the legal screens' text complete in a capture |
+| doing | saves: the two GDK interfaces the title asks for (lane `saves`) | a second run skips first-run setup |
+| doing | depth buffers written as UAVs: a design (lane `depthuav`) | 0 null UAVs, depth compute results visible |
+| todo | portable shader library: the launcher builds it on first run from the user's own game into `%LOCALAPPDATA%` (owner decision 2026-11-28); no `D:\victory-data` defaults | a clean machine reaches the start screen |
+| todo | through the menus to gameplay (scripted input) | the first in-game frame captured |
+
 ## Build 6 — parallel list translation
 
 | state | work | closes when |

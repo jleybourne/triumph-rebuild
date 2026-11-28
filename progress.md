@@ -1,8 +1,8 @@
 # Progress
 
 ```
-overall   ██████████████░░░░░░  68 %   work toward 30 fps, weighted by build step
-fps       card: 60 s, 18.9 fps avg, 21 fps after the loading screen (GPU 1.5 ms a frame) · target 30 · baseline 7.6
+overall   ██████████████░░░░░░  70 %   work toward 30 fps, weighted by build step
+fps       card: ~21 fps in menus (47 ms a frame, GPU ~2 ms: our CPU overhead) · target 30 · baseline 7.6
 updated   2026-11-28
 ```
 
@@ -13,7 +13,7 @@ and becomes the number that counts.
 
 | track | progress | | note |
 |---|---|--:|---|
-| **Build 5 · first frame** | `██████████████████░░` | 90 % | **first real frame captured on the card**: the title's start screen (Account picker / Player); next: input past it |
+| **Build 5 · first frame** | `███████████████████░` | 95 % | the title's menus on the card: start screen, first-run setup, legal terms, Finish Setup; text missing letters (descriptor remap running) |
 | shaders compiled (every class) | `██████████░░░░░░░░░░` | 12,981 / 25,694 | pixel 9,965 · vertex 1,672 · compute 1,344 · of them wave-wide 4,182 ([wave64](runs/build4-wave64.md)) · agnostic 8,799 / 9,128 ([v1](runs/build4-v1.md)) |
 | shaders counted | `████░░░░░░░░░░░░░░░░` | 5,195 / 25,694 | bit-exact vs the oracle on WARP ([exec](runs/build4-exec.md)) |
 | runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
@@ -58,8 +58,11 @@ and becomes the number that counts.
 
 | lane | build | working on |
 |---|---|---|
-| `pipelines` | 5 | host pipelines built on first use, not all 54k at creation (the out-of-memory abort); then the black frame |
-| `timestamps` | 0 (c) | the title's GPU timestamp labels, and its measured GPU time per frame |
+| `descremap` | 5 | console view indices past 750,000 (the UI's tables) remapped into the 1,000,000-descriptor host heap: readable text |
+| `saves` | 5 | the two missing GDK interfaces (likely XGameSave): setup persists between runs |
+| `titlemem-fast2` | 8 | the address lookup without VirtualQuery, correctly (30 fps in menus; #64 rendered black) |
+| `polish` | L | the title's window never shown; the scaled present path; launcher display settings reach the game |
+| `depthuav` | 5 | depth buffers written as UAVs (316 null views a run); research: the title's D: drive |
 
 The weights reflect size and risk: the loader, the runtime and the shader recompiler are the largest pieces
 of work. A step counts as 100 % only when its closing number from `tasks.md` is measured.
@@ -115,6 +118,23 @@ Older entries are never edited.
 
 > The three entries below (58, 59, 61 %) were missing; they are filled in afterwards from the commits that moved
 > the header (`6292f20`, `bafec7c`, `71c075d`). The points behind each step were not recorded.
+
+### 2026-11-28 — Through the menus: setup, legal terms, Finish Setup
+
+```
+[██████████████░░░░░░]  70 %   (Build 5 90 % → 95 %)
+title       start screen → (A) first-run setup → legal notices → legal terms & policies → Finish Setup? on the card
+```
+
+- **Fixed:** AMD SSE4a `insertq`/`extrq` emulated (the Intel host has neither); texture views fitted to their
+  resource (a 15-mip view of a 1-mip texture removed the device); our own GameInput, so scripted input
+  (`REBUILD_INPUT_SCRIPT`) and the menu's isolation both work; the title's window hidden (one window); #65 window
+  addressing with its regenerated library.
+- **New:** a resource monitor drawn on the game window, on by default (fps, frame and GPU time, draws; process CPU,
+  RAM, VRAM; upload); the 720p window is the default; the memory budget scales with installed RAM.
+- **Text** is missing letters: the UI's descriptor tables sit at console index ~868,000, above what the host heap
+  mirrors. **#64** (30 fps) was reverted: it rendered black.
+- Tests: 669 green.
 
 ### 2026-11-28 — First real frame: the title's start screen on the card
 
