@@ -169,12 +169,15 @@ impl Lifter<'_> {
             }
             self.out.code = self.code.clone();
             let last = self.code.len() - 1;
-            let at = format!("(uint)((int)s{base} + {byte_off}) >> 2");
+            // the address first: the destination may overlap the base (`s_load_dwordx4 s[24:27], s[24:25]`), and the
+            // console reads every dword from the address as it was
+            let _ = writeln!(self.out.body, "    {{ uint sir_at = (uint)((int)s{base} + {byte_off}) >> 2;");
             for k in 0..n {
                 self.out.sgprs.insert(dst + k);
                 self.wrote(dst + k);
-                let _ = writeln!(self.out.body, "    s{} = sir_code[min(({at}) + {k}u, {last}u)];", dst + k);
+                let _ = writeln!(self.out.body, "    s{} = sir_code[min(sir_at + {k}u, {last}u)];", dst + k);
             }
+            let _ = writeln!(self.out.body, "    }}");
             return Some(());
         }
         let dwords: u8 = match name {
