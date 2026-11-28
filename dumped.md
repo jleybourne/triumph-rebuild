@@ -81,6 +81,7 @@ live runs through our layer, 2026-11-27 to 2026-11-28.
 | Console pipeline calls | device slot `0x1c8` called ~25,000× and `0x218` (FSR) ~2,700× during the main shader load; refusing both with `*out = null` is tolerated | high, live |
 | Frame pacing | `SetFrameIntervalX(33,333 µs)` = 30 fps; the loop is an origin poll plus a flip wait (`WaitFrameEventX`) | high, live |
 | GPU-hang handler | `exe+0x2474606`: on device removal or hang, calls device slot `+0x190`, then `int3` | high, live |
+| Transient-resource assert | `exe+0x131a2ad`: `0x14131A270` places a render-graph resource (type `0x980` = texture through `0x14193DE10`, else buffer `0x14006DC20`) and asserts when it returns false, i.e. when device slot `0x428` (resource at an address) fails. Called from the page allocator `0x142473E20` (64 KiB pages, mapped through `0x142474660`). At the loading screen's end the title makes a 2560x1440 **B4G4R4A4** render target there; the RTX 4070 Ti refuses that format as a target (`E_INVALIDARG`), WARP takes it. RGBA8 stands in (`format::stand_in`) | high, live |
 | Other asserts | `exe+0x2474ce1` (an `E_INVALIDARG` from a list call); `exe+0x14a6390` (unresolved) | medium |
 
 ### 5.2 Effects and programs

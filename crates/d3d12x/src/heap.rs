@@ -714,7 +714,10 @@ fn view_format(f: i32, r: &Resource, depth: bool) -> DXGI_FORMAT {
         return DXGI_FORMAT(format::default_view_format(r.view_format, depth) as i32);
     }
     let f = format::host_format(f as u32);
-    let f = if f == format::STAND_IN.0 && r.view_format == format::STAND_IN.1 { format::STAND_IN.1 } else { f };
+    let f = match format::stand_in(f) {
+        Some(s) if r.view_format == s => s,
+        _ => f,
+    };
     DXGI_FORMAT(f as i32)
 }
 
@@ -1046,7 +1049,14 @@ impl Resources {
                     Some(t) => {
                         let raw = t.as_raw();
                         let (_, vf) = format::host_desc(&rd);
-                        let fmt = |f: u32| DXGI_FORMAT(if f == 0 { format::default_view_format(vf, false) } else { format::host_format(f) } as i32);
+                        let fmt = |f: u32| {
+                            DXGI_FORMAT(if f == 0 {
+                                format::default_view_format(vf, false)
+                            } else {
+                                let h = format::host_format(f);
+                                if format::stand_in(h) == Some(vf) { vf } else { h }
+                            } as i32)
+                        };
                         let view = if uav {
                             // SAFETY: 10 words are a D3D12_UNORDERED_ACCESS_VIEW_DESC.
                             let mut d: D3D12_UNORDERED_ACCESS_VIEW_DESC = unsafe { std::mem::transmute_copy(&pc) };
