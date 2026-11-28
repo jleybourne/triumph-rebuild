@@ -6,8 +6,10 @@
 //!                         title's own memory when size == count x increment (the fork's test);
 //!                         else ours. Handles are addresses, CPU and GPU alike.
 //! shader-visible views    one host heap of Limits::views descriptors:
-//!   [0, mirrored)           console index i at host index i. Buffers: a raw SRV of the
-//!                           descriptor's bytes; textures: the title's view
+//!   [0, mirrored)           console index i at the host index its page map gives
+//!                           (`rebuild_xlist::console::pages`: pages of 256, most at their own
+//!                           index; the title's heap is 1,245,184 and mirrored 749,568). Buffers:
+//!                           a raw SRV of the descriptor's bytes; textures: the title's view
 //!   [P, P + NULL_BANK)      null views, one per view type translated shaders declare
 //!                           (`rebuild_sir::lift::NullKind`): a console index at or past P reads
 //!                           the null of its type there (`sir_vi`), and so does an alternate that
@@ -21,8 +23,10 @@
 //!   [W, 1,000,000)          window views (W = `rebuild_sir::lift::WINDOW_HEAP_BASE`): sub-window k
 //!                           (console addresses k << 29, 512 MiB) as a raw SRV at W + k; never an
 //!                           alternate
-//! shadow table            per console index 16 bytes (stride, records, alternate, lead), t0 space101;
-//!                         entry P (what a shader past the range reads) is (0, 0, P, 0)
+//! shadow table            per host index 16 bytes (stride, records, alternate, lead), t0 space101;
+//!                         entry P (what a shader past the range reads) is (0, 0, P, 0); after it the
+//!                         page table (`rebuild_sir::lift::PAGE_TABLE_BYTE`): per console page the
+//!                         host index of its first descriptor, P when it has none
 //! shader-visible samplers host heap of min(count, Limits::samplers), index for index
 //! CPU-only views, RTV, DSV host heap of count, index for index (the natural view)
 //! ```
@@ -52,6 +56,17 @@ pub static NO_UAV: AtomicU64 = AtomicU64::new(0);
 use crate::slots::{Fp, Object};
 use crate::views::{HostHeap, HostView, Shadow, DSV, RTV, SAMPLERS, VIEWS};
 use crate::{HeapBinding, Inner, MemoryRange, Raw, Resources};
+use rebuild_xlist::console::pages::PageMap;
+
+/// Descriptors a view page holds, as a shift: `rebuild_sir::lift::VIEW_PAGE_SHIFT`, which translated programs
+/// read the page table with. `REBUILD_VIEW_PAGE_SHIFT` (4-16) overrides it to measure how the title uses its
+/// heap at another grain; only programs that never index a dynamic-resource heap read right then.
+pub fn view_page_shift() -> u32 {
+    static S: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *S.get_or_init(|| {
+        std::env::var("REBUILD_VIEW_PAGE_SHIFT").ok().and_then(|v| v.trim().parse().ok()).filter(|s| (4..=16).contains(s)).unwrap_or(rebuild_sir::lift::VIEW_PAGE_SHIFT)
+    })
+}
 
 /// The stride a constant buffer view's descriptor carries: one 16-byte row (a float4 of constants).
 pub const CBV_STRIDE: u32 = 16;
@@ -166,12 +181,17 @@ pub struct HeapState {
     /// console bytes per descriptor
     pub stride: u32,
     pub host: HostHeap,
-    /// console indices mirrored to the host (count, or less when the host heap is smaller)
+    /// host indices console indices may reach, `[0, mirrored)`: count (whole pages of it in a shader-visible
+    /// view heap), or less when the host heap is smaller
     pub mirrored: u32,
+    /// console view indices to host ones (shader-visible view heaps; the others are index for index)
+    pub pages: Option<&'static PageMap>,
     /// the null slot (shader-visible view heaps)
     pub null_index: u32,
     pub shadow: Option<Shadow>,
     alt: Alt,
+    /// what zero bytes fingerprint as (a slot no record was written to)
+    zero_fp: u64,
     seen: Box<[AtomicU64]>,
     alts: Box<[AtomicU32]>,
     pub stats: HeapStats,
@@ -198,6 +218,10 @@ pub struct DescriptorHeap {
 
 impl Drop for DescriptorHeap {
     fn drop(&mut self) {
+        // the shader copy of the page map is in the shadow buffer, which goes with the state
+        if let Some(p) = self.state.pages {
+            p.drop_gpu_table();
+        }
         let mut heaps = self.head.common.ctx.heaps.write().unwrap_or_else(|e| e.into_inner());
         heaps.retain(|r| !Arc::ptr_eq(&r.state, &self.state));
     }
@@ -451,12 +475,23 @@ impl Inner {
             (w, records::fingerprint(&w))
         };
         // a statistic: a racy max is enough, and costs no locked instruction
-        if i > heap.stats.highest.load(Ordering::Relaxed) {
+        if i > heap.stats.highest.load(Ordering::Relaxed) && fp != heap.zero_fp {
             heap.stats.highest.store(i, Ordering::Relaxed);
         }
+        // the host index, through the page map: a page gets a host page when a record is first written into it
+        // (zero bytes in a page with none are what the page reads already, the null bank)
+        let console = i;
+        let i = match heap.pages {
+            Some(p) => match p.host(i) {
+                Some(h) => h,
+                None if fp == heap.zero_fp => return,
+                None => p.host_or_map(i).unwrap_or(u32::MAX),
+            },
+            None => i,
+        };
         if i >= heap.mirrored {
             if heap.stats.beyond.fetch_add(1, Ordering::Relaxed) == 0 {
-                self.events.note("descriptor index past the host heap", u64::from(i));
+                self.events.note("descriptor index past the host heap", u64::from(console));
             }
             return;
         }
@@ -919,13 +954,16 @@ impl Resources {
         let (host_count, mirrored, alt, null_index) = match kind {
             VIEWS if visible => {
                 let p = limits.null_index();
+                // whole pages: the console heap's (rounded up), at most the pages below the null bank
+                let shift = view_page_shift();
+                let mirrored = count.next_multiple_of(1 << shift).min(p >> shift << shift);
                 let [low, high] = limits.alternate_ranges();
-                let alt = if count.min(p) <= low.end - low.start {
+                let alt = if mirrored <= low.end - low.start {
                     Alt::Fixed(low.start)
                 } else {
                     Alt::Pool(Mutex::new(high.rev().chain(low.rev()).collect()))
                 };
-                (limits.views, count.min(p), alt, p)
+                (limits.views, mirrored, alt, p)
             }
             SAMPLERS if visible => (count.min(limits.samplers), count.min(limits.samplers), Alt::None, 0),
             _ => (count, count, Alt::None, 0),
@@ -939,13 +977,22 @@ impl Resources {
             }
         };
         let shadow = if kind == VIEWS && visible {
-            match ctx.host.shadow(null_index + 1) {
+            // the entries, then the page table translated programs read (`rebuild_sir::lift::PAGE_TABLE_BYTE`)
+            match ctx.host.shadow(null_index + 1 + rebuild_sir::lift::PAGE_TABLE_PAGES / 4) {
                 Ok(s) => Some(s),
                 Err(hr) => return hr,
             }
         } else {
             None
         };
+        // a shader-visible view heap reaches its host heap through a page map (it lives for the run: a few KiB
+        // a heap, and bindings copied into lists name it)
+        let pages: Option<&'static PageMap> = shadow.as_ref().map(|s| {
+            let m: &'static PageMap = Box::leak(Box::new(PageMap::new(view_page_shift(), count, mirrored, null_index)));
+            // SAFETY: the table's room was asked for above; the map stops writing it when the heap goes
+            unsafe { m.set_gpu_table(s.ptr.add(null_index as usize + 1).cast::<u32>(), rebuild_sir::lift::PAGE_TABLE_PAGES) };
+            m
+        });
         if mirrored < count {
             ctx.events.note("console heap larger than the host mirrors", u64::from(count));
         }
@@ -959,9 +1006,11 @@ impl Resources {
             stride,
             host,
             mirrored,
+            pages,
             null_index,
             shadow,
             alt,
+            zero_fp,
             // every host slot starts as what zero bytes mirror to (null): zeroed slots need no work
             seen: (0..mirrored).map(|_| AtomicU64::new(zero_fp)).collect(),
             alts: (0..if pool { mirrored } else { 0 }).map(|_| AtomicU32::new(NO_ALT)).collect(),
@@ -987,7 +1036,8 @@ impl Resources {
         }
         // what the title's memory already holds (a heap placed over records)
         if placed {
-            for i in 0..mirrored {
+            // console indices (a paged heap maps the ones with records)
+            for i in 0..if state.pages.is_some() { count } else { mirrored } {
                 ctx.mirror(&state, i, false);
             }
         }
@@ -1413,12 +1463,52 @@ impl Resources {
         h.visible.then(|| HeapBinding {
             heap: h.host.raw(),
             console_base: h.start,
-            console_bytes: u64::from(h.mirrored) * u64::from(h.stride),
+            // every console index of a paged heap reaches the host heap (through its page map)
+            console_bytes: u64::from(if h.pages.is_some() { h.count } else { h.mirrored }) * u64::from(h.stride),
             console_stride: h.stride,
             host_base: h.host.gpu,
             host_stride: h.host.step,
             shadow_va: h.shadow.as_ref().map_or(0, |s| s.va),
+            pages: h.pages,
         })
+    }
+
+    /// How the shader-visible view heaps use their page maps (the run report): one line a heap, then its
+    /// console ranges with host pages (`console first..end -> host first`, a run consecutive on both sides).
+    pub fn view_page_report(&self) -> Vec<String> {
+        let heaps: Vec<Arc<HeapState>> = self.inner.heaps.read().unwrap_or_else(|e| e.into_inner()).iter().map(|r| r.state.clone()).collect();
+        let mut out = Vec::new();
+        for h in heaps {
+            let Some(p) = h.pages else { continue };
+            let r = |a: &AtomicU64| a.load(Ordering::Relaxed);
+            out.push(format!(
+                "heap of {} views at {:#x}: {} of {} host pages of {} taken ({} at their own index, {} moved), {} wanted with none left, {} tables split across pages, {} tables bound past index {}, {} records past the host heap, highest index written {}, alternates wanted with none left {}",
+                h.count,
+                h.start,
+                p.taken(),
+                p.host_pages,
+                1u32 << p.shift,
+                p.identity.load(Ordering::Relaxed),
+                p.moved.load(Ordering::Relaxed),
+                r(&p.full),
+                r(&p.split_tables),
+                r(&p.high_tables),
+                p.unmapped,
+                r(&h.stats.beyond),
+                h.stats.highest.load(Ordering::Relaxed),
+                r(&h.stats.pool_empty),
+            ));
+            let runs = p.runs();
+            let mut line = String::new();
+            for (k, (c, n, host)) in runs.iter().enumerate() {
+                if k > 0 {
+                    line.push_str(", ");
+                }
+                line.push_str(&format!("{}..{}->{}", c << p.shift, (c + n) << p.shift, host << p.shift));
+            }
+            out.push(format!("  {} runs: {line}", runs.len()));
+        }
+        out
     }
 
     /// The shadow table's GPU address for a shader-visible view heap (bind at t0 space101).
@@ -1431,7 +1521,8 @@ impl Resources {
     /// to date with the slot's bytes first.
     pub fn cpu_descriptor(&self, handle: usize) -> Option<usize> {
         let (h, i) = self.inner.heap_at(handle as u64)?;
-        if i >= h.mirrored {
+        // a shader-visible view is made from the slot's bytes, at any index
+        if i >= h.mirrored && !(h.kind == VIEWS && h.visible) {
             return None;
         }
         if h.kind == VIEWS && h.visible {
@@ -1453,7 +1544,14 @@ impl Resources {
     /// alternate of a buffer, the view itself for a texture): the GPU half of a UAV clear.
     pub fn own_kind_gpu(&self, handle: u64) -> Option<u64> {
         let (h, i) = self.inner.heap_at(handle)?;
-        if !(h.kind == VIEWS && h.visible) || i >= h.mirrored {
+        if !(h.kind == VIEWS && h.visible) {
+            return None;
+        }
+        let i = match h.pages {
+            Some(p) => p.host(i)?,
+            None => i,
+        };
+        if i >= h.mirrored {
             return None;
         }
         let alt = h.shadow.as_ref().map_or(h.null_index, |s| s.read(i)[2]);
