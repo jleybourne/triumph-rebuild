@@ -53,6 +53,9 @@ use crate::slots::{Fp, Object};
 use crate::views::{HostHeap, HostView, Shadow, DSV, RTV, SAMPLERS, VIEWS};
 use crate::{HeapBinding, Inner, MemoryRange, Raw, Resources};
 
+/// The stride a constant buffer view's descriptor carries: one 16-byte row (a float4 of constants).
+pub const CBV_STRIDE: u32 = 16;
+
 /// Sub-window k's raw UAV is at `WINDOW_UAV_BASE + k`, its raw SRV at `WINDOW_HEAP_BASE + k`.
 pub const WINDOW_UAV_BASE: u32 = rebuild_sir::lift::WINDOW_HEAP_BASE - rebuild_sir::lift::WINDOW_COUNT;
 /// R32 elements a window view covers: 512 MiB, the most a raw view can (2^27 elements).
@@ -371,7 +374,12 @@ impl Inner {
                     heap.stats.misaligned.fetch_add(1, Ordering::Relaxed);
                     HostView::NullCbv
                 };
-                return Plan { primary, alt: None, shadow: [1, len as u32, 0, lead], natural: cbv };
+                // the console's constant buffer descriptor is a buffer of 16-byte rows: a shader that indexes it
+                // (`buffer_load ... idxen`) steps 16 bytes a row. With stride 1 the title's UI vertex shader
+                // (d166c341988178de) read rows 2 and 4 of its CBV as bytes 2 and 4, the same 16 bytes: every vertex
+                // had x == y (the loading screen's UI on the diagonal). The record count stays in bytes: translated
+                // raw reads check byte offsets against it, and an index bound in bytes is never tighter than the rows'
+                return Plan { primary, alt: None, shadow: [CBV_STRIDE, len as u32, 0, lead], natural: cbv };
             }
             Some((BufferKind::Raw { uav }, _)) => ([1, len as u32, 0, lead], uav.then(|| self.raw_uav(&r, start, dwords))),
             // records past the memory the model knows are out of range (as the raw view's length is)

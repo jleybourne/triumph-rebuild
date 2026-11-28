@@ -402,7 +402,7 @@ fn buffer_views_round_trip_with_a_raw_mirror_and_a_shadow_entry() {
         assert_eq!(u64::from(shadow(i as u32)[3]), lead, "slot {i}: the lead is in the shadow table");
     }
     // the shadow table: (stride, records, alternate, lead)
-    assert_eq!(&shadow(0)[..2], &[1, 300]);
+    assert_eq!(&shadow(0)[..2], &[16, 300], "a CBV is 16-byte rows (records stay in bytes)");
     assert_eq!(&shadow(1)[..2], &[1, 256]);
     assert_eq!(&shadow(2)[..2], &[24, 10]);
     assert_eq!(&shadow(3)[..2], &[16, 5]);
@@ -492,7 +492,7 @@ fn a_cbv_into_a_view_heap_slot_is_a_raw_srv() {
     assert_ne!(buf.Flags.0 & D3D12_BUFFER_SRV_FLAG_RAW.0, 0);
     assert_eq!((buf.FirstElement, buf.NumElements), ((off + 256) / 4, 512 / 4), "offset / 4, size / 4");
     let sh = st.shadow.as_ref().unwrap().read(0);
-    assert_eq!(sh, [1, 512, st.null_index, 0]);
+    assert_eq!(sh, [16, 512, st.null_index, 0], "16-byte rows; records in bytes");
     for i in [1, 2] {
         assert_eq!(rig.fake.at(st.host.cpu_at(i)).unwrap().describe(), "null buffer", "slot {i}: a null raw SRV");
         assert_eq!(st.shadow.as_ref().unwrap().read(i)[2], st.null_index);
