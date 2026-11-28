@@ -51,7 +51,6 @@ pub mod sampler;
 pub mod slots;
 pub mod thunks;
 pub mod views;
-pub mod vmem;
 
 #[cfg(test)]
 mod tests;

@@ -411,12 +411,17 @@ impl Presenter {
         let device = crate::device::get().ok_or("no device")?.host.clone();
         let e = |what: &'static str| move |e: windows::core::Error| format!("{what}: {e}");
         let mode = crate::dxgi::host_mode();
-        let size = match window_mode() {
-            WindowMode::Borderless => (mode.width.max(1), mode.height.max(1)),
-            WindowMode::Windowed(w, h) => (w, h),
+        // the window's client size, and the swap chain's: a window keeps the title's own image size in its swap
+        // chain (the plain copy path) and DXGI stretches it into the window at present (`DXGI_SCALING_STRETCH`)
+        let (window_size, size) = match window_mode() {
+            WindowMode::Borderless => {
+                let s = (mode.width.max(1), mode.height.max(1));
+                (s, s)
+            }
+            WindowMode::Windowed(w, h) => ((w, h), ((source.Width as u32).max(1), source.Height.max(1))),
         };
         let format = family(source.Format.0 as u32).unwrap_or(DXGI_FORMAT_R8G8B8A8_UNORM);
-        let window = window(size, WINDOW_HIDDEN.load(Ordering::Relaxed))?;
+        let window = window(window_size, WINDOW_HIDDEN.load(Ordering::Relaxed))?;
         unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).map_err(e("DXGI factory"))?;
             let tearing = factory.cast::<IDXGIFactory5>().is_ok_and(|f5| {
