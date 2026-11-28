@@ -145,6 +145,10 @@ pub struct Totals {
     /// title submissions that waited on the fence, and those that found it passed
     pub waits: AtomicU64,
     pub passed: AtomicU64,
+    /// the last value the tile thread signalled, and when its current pass of calls began (ns from the queue's
+    /// start; 0: not in a pass): a pass that does not end is a driver call that does not return
+    pub signalled: AtomicU64,
+    pub in_pass_since: AtomicU64,
 }
 
 enum Msg {
@@ -184,6 +188,7 @@ impl TileQueue {
         // SAFETY: plain creation
         let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }.map_err(|e| format!("tile fence: {e}"))?;
         let (tx, rx) = channel();
+        let _ = epoch();
         let totals = Arc::new(Totals::default());
         let (q2, f2, t2) = (queue.clone(), fence.clone(), totals.clone());
         let q2 = Wrap(q2);
@@ -298,6 +303,7 @@ fn run(queue: ID3D12CommandQueue, fence: ID3D12Fence, rx: Receiver<Msg>, heaps: 
             last = v;
         }
         let started = Instant::now();
+        t.in_pass_since.store(epoch().elapsed().as_nanos() as u64 + 1, Relaxed);
         for j in merged {
             for c in plan(&j.tiles) {
                 t.calls.fetch_add(1, Relaxed);
@@ -308,9 +314,11 @@ fn run(queue: ID3D12CommandQueue, fence: ID3D12Fence, rx: Receiver<Msg>, heaps: 
             alive.push_back((last, j.resource));
         }
         t.call_ns.fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+        t.in_pass_since.store(0, Relaxed);
         if last > 0 {
             // SAFETY: a queue and a fence of ours
             let _ = unsafe { queue.Signal(&fence, last) };
+            t.signalled.store(last, Relaxed);
             t.passes.fetch_add(1, Relaxed);
             if let Some(o) = oldest {
                 let ns = o.elapsed().as_nanos() as u64;
@@ -403,13 +411,22 @@ pub fn wait(queue: &ID3D12CommandQueue) {
     }
 }
 
+fn epoch() -> Instant {
+    static E: OnceLock<Instant> = OnceLock::new();
+    *E.get_or_init(Instant::now)
+}
+
 /// For the run report.
 pub fn report(q: &TileQueue) -> String {
     let t = &q.totals;
+    let since = t.in_pass_since.load(Relaxed);
+    let pass = if since == 0 { "idle".to_string() } else { format!("in a pass for {:.0} ms", (epoch().elapsed().as_nanos() as u64).saturating_sub(since - 1) as f64 / 1e6) };
+    // SAFETY: a fence of ours
+    let completed = unsafe { q.fence.GetCompletedValue() };
     let calls = t.calls.load(Relaxed).max(1);
     let passes = t.passes.load(Relaxed).max(1);
     format!(
-        "{} submits, {} jobs ({} merged into an earlier one), {} UpdateTileMappings ({} ranges, {} tiles; {:.1} tiles a call) in {} passes; {:.1} us of CPU a call on the tile thread (planning included); submit to signal {:.2} ms average, {:.1} ms worst; {} without a heap; title waits {} ({} found it passed)",
+        "{} submits, {} jobs ({} merged into an earlier one), {} UpdateTileMappings ({} ranges, {} tiles; {:.1} tiles a call) in {} passes; {:.1} us of CPU a call on the tile thread (planning included); submit to signal {:.2} ms average, {:.1} ms worst; {} without a heap; title waits {} ({} found it passed); now: issued {}, signalled {}, the GPU past {}, thread {}",
         t.submits.load(Relaxed),
         t.jobs.load(Relaxed),
         t.merged.load(Relaxed),
@@ -424,6 +441,10 @@ pub fn report(q: &TileQueue) -> String {
         t.no_heap.load(Relaxed),
         t.waits.load(Relaxed),
         t.passed.load(Relaxed),
+        q.issued(),
+        t.signalled.load(Relaxed),
+        completed,
+        pass,
     )
 }
 

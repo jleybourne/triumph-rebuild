@@ -424,7 +424,7 @@ fn vram_line_with(census: bool) -> String {
 vram      mapped textures: {}", crate::mapped::report());
     if crate::mapped::enabled() {
         s += &format!("
-vram      {}", crate::pagemap::report());
+vram      {}; {} presents", crate::pagemap::report(), crate::present::PRESENT_CALLS.load(Relaxed));
     }
     if census {
         s += &census_line();
