@@ -143,7 +143,8 @@ pub fn start(device: &windows::Win32::Graphics::Direct3D12::ID3D12Device) {
                 return None;
             }
         };
-        let cache = match PsoCache::open(device, &rebuild_pipelines::pso::default_cache_path()) {
+        // the cache file is the library's own: a new library starts a fresh one
+        let cache = match PsoCache::open(device, &rebuild_pipelines::pso::cache_path_for(&lib.identity())) {
             Ok(c) => Some(c),
             Err(e) => {
                 eprintln!("pipelines: no pipeline cache: {e}");
@@ -307,7 +308,7 @@ unsafe fn create_compute(desc: *const ComputeDesc, iid: *const GUID, out: *mut R
     let key = Key::of(&desc);
     // in the library, or offered for translation on a worker: either way the pool makes it, never this thread
     let handle = match pool() {
-        Some(p) if p.creator().programs().offer_compute(cs, bytes).is_some() => Some(p.request(key, desc)),
+        Some(p) if p.creator().programs().offer_compute(cs, bytes).is_some() => Some(p.request_capped(key, desc, eager())),
         _ => {
             *MISSING.lock().unwrap_or_else(|e| e.into_inner()).entry(cs).or_insert(0) += 1;
             None
@@ -418,7 +419,7 @@ fn request(parsed: Result<Parsed, Refusal>, mem: &Capture) -> Made {
         Desc::Compute { .. } => Box::new([]) as Box<[_]>,
     };
     let rect = matches!(&p.desc, Desc::Graphics { state, .. } if state.topology == rebuild_pipelines::rectgs::RECT_TOPOLOGY_TYPE);
-    Made { key, handle: pool.filter(|_| all).map(|pool| pool.request(key, p.desc)), user, topology, input, rect }
+    Made { key, handle: pool.filter(|_| all).map(|pool| pool.request_capped(key, p.desc, eager())), user, topology, input, rect }
 }
 
 /// The user-data map of a description's programs (`None`, counted, when a program's root layout is unreadable).
@@ -540,6 +541,15 @@ pub fn describe(console: Raw) -> String {
     )
 }
 
+/// Title pipelines whose host PSO the pool creates ahead (at console creation, on its workers): the first
+/// `REBUILD_PSO_EAGER` (default 2,048, the loading screens' and the first frames'). Past that a pipeline is
+/// created at the first draw or dispatch that binds it (`host`, one pool lookup when ready). The title creates
+/// about 57,000 pipelines and draws with a few thousand; creating every one ran the card run out of memory.
+fn eager() -> u64 {
+    static N: OnceLock<u64> = OnceLock::new();
+    *N.get_or_init(|| std::env::var("REBUILD_PSO_EAGER").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(2048))
+}
+
 /// One line for the run report (a second with the on-demand failures, when there are any).
 pub fn report() -> String {
     let missing = MISSING.lock().unwrap_or_else(|e| e.into_inner());
@@ -559,6 +569,20 @@ pub fn report() -> String {
         MAPS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |m| m.len()),
         if pool().is_some() { "loaded" } else { "absent" }
     );
+    if let Some(p) = pool() {
+        let s = p.stats();
+        line += &format!(
+            "; host PSOs {} made, {} failed (deduplicated {}; eager cap {}, parked {}, made at first use {}; inline {}, blocked {:.0} ms)",
+            s.created,
+            s.failed,
+            s.deduplicated,
+            eager(),
+            s.parked,
+            s.unparked,
+            s.inline,
+            s.wait_time.as_secs_f64() * 1e3
+        );
+    }
     if let Some(od) = pool().and_then(|p| p.creator().programs().ondemand()) {
         let s = od.stats();
         let ms = |d: std::time::Duration, n: u64| if n == 0 { 0.0 } else { d.as_secs_f64() * 1e3 / n as f64 };

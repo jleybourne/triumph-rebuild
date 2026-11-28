@@ -59,6 +59,8 @@ const SEGMENTS: usize = 256; // 1,048,576 pipelines
 struct Slot<O> {
     state: AtomicU8,
     requested: AtomicBool,
+    /// on no queue: created at its first wait
+    parked: AtomicBool,
     key: OnceLock<Key>,
     desc: Mutex<Option<Desc>>,
     out: OnceLock<Result<O, String>>,
@@ -66,7 +68,7 @@ struct Slot<O> {
 
 impl<O> Default for Slot<O> {
     fn default() -> Self {
-        Slot { state: AtomicU8::new(QUEUED), requested: AtomicBool::new(false), key: OnceLock::new(), desc: Mutex::new(None), out: OnceLock::new() }
+        Slot { state: AtomicU8::new(QUEUED), requested: AtomicBool::new(false), parked: AtomicBool::new(false), key: OnceLock::new(), desc: Mutex::new(None), out: OnceLock::new() }
     }
 }
 
@@ -94,6 +96,10 @@ pub struct Stats {
     /// Time workers spent creating.
     pub create_time: Duration,
     pub prewarm_queued: u64,
+    /// Title requests past the eager cap: registered, created at their first use ([`Pool::request_capped`]).
+    pub parked: u64,
+    /// Parked pipelines created since (at a first use, or by a title request that found room).
+    pub unparked: u64,
 }
 
 struct Inner<C: Creator> {
@@ -107,7 +113,7 @@ struct Inner<C: Creator> {
     done_cv: Condvar,
     waiters: AtomicU32,
     requested: Mutex<Vec<(Key, Desc)>>,
-    n: [AtomicU64; 7],
+    n: [AtomicU64; 10],
     wait_ns: AtomicU64,
     create_ns: AtomicU64,
 }
@@ -119,6 +125,19 @@ const FAILED_N: usize = 3;
 const INLINE: usize = 4;
 const BLOCKED: usize = 5;
 const PREWARM: usize = 6;
+const PARKED: usize = 7;
+const UNPARKED: usize = 8;
+/// Title requests queued for the workers (not parked).
+const TITLE_QUEUED: usize = 9;
+
+/// Where a new slot goes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Queue {
+    Title,
+    Prewarm,
+    /// on no queue: created when first waited for
+    Parked,
+}
 
 impl<C: Creator> Inner<C> {
     fn slot(&self, i: u32) -> &Slot<C::Out> {
@@ -233,13 +252,14 @@ impl<C: Creator> Pool<C> {
 
     /// Finds the key's slot or makes one (queued on `title` or prewarm). Returns the handle, whether it is
     /// new, and for a title request the description back (unused, or a copy) for the session record.
-    fn enqueue(&self, key: Key, desc: Desc, title: bool) -> (Handle, bool, Option<Desc>) {
+    fn enqueue(&self, key: Key, desc: Desc, queue: Queue) -> (Handle, bool, Option<Desc>) {
+        let title = queue != Queue::Prewarm;
         let inner = &*self.inner;
         let (i, copy) = {
             let mut keys = inner.keys.lock().unwrap();
             if let Some(&i) = keys.get(&key) {
                 drop(keys);
-                if title {
+                if queue == Queue::Title {
                     // a prewarm entry the title now wants: move it ahead if no worker has it yet
                     let s = inner.slot(i);
                     if s.state.load(Ordering::Relaxed) == QUEUED && !s.requested.load(Ordering::Relaxed) {
@@ -261,8 +281,14 @@ impl<C: Creator> Pool<C> {
             keys.insert(key, i);
             (i, copy)
         };
+        if queue == Queue::Parked {
+            inner.slot(i).parked.store(true, Ordering::Relaxed);
+            inner.bump(PARKED);
+            return (Handle(i), true, copy);
+        }
         let mut q = inner.queues.lock().unwrap();
         if title {
+            inner.bump(TITLE_QUEUED);
             q.title.push_back(i);
         } else {
             q.prewarm.push_back(i);
@@ -276,7 +302,27 @@ impl<C: Creator> Pool<C> {
     pub fn request(&self, key: Key, desc: Desc) -> Handle {
         let inner = &*self.inner;
         inner.bump(REQUESTS);
-        let (h, new, desc) = self.enqueue(key, desc, true);
+        let (h, new, desc) = self.enqueue(key, desc, Queue::Title);
+        if !new {
+            inner.bump(DEDUP);
+        }
+        if !inner.slot(h.0).requested.swap(true, Ordering::Relaxed) {
+            inner.requested.lock().unwrap().push((key, desc.expect("title requests return their description")));
+        }
+        h
+    }
+
+    /// [`Pool::request`] while fewer than `eager` title requests were queued for the workers; past that the
+    /// pipeline is only registered (a handle, its description kept) and created at its first [`Pool::wait`].
+    /// The title creates tens of thousands of pipelines and draws with a few thousand: creating every one
+    /// ran the process out of memory (57,353 host PSOs on the card).
+    pub fn request_capped(&self, key: Key, desc: Desc, eager: u64) -> Handle {
+        let inner = &*self.inner;
+        if inner.n[TITLE_QUEUED].load(Ordering::Relaxed) < eager {
+            return self.request(key, desc);
+        }
+        inner.bump(REQUESTS);
+        let (h, new, desc) = self.enqueue(key, desc, Queue::Parked);
         if !new {
             inner.bump(DEDUP);
         }
@@ -289,7 +335,7 @@ impl<C: Creator> Pool<C> {
     /// A pipeline the title may ask for (from the last session): created when workers are idle. Not recorded
     /// as requested unless the title asks for it.
     pub fn prewarm(&self, key: Key, desc: Desc) -> Handle {
-        let (h, new, _) = self.enqueue(key, desc, false);
+        let (h, new, _) = self.enqueue(key, desc, Queue::Prewarm);
         if new {
             self.inner.bump(PREWARM);
         }
@@ -326,6 +372,9 @@ impl<C: Creator> Pool<C> {
         inner.bump(BLOCKED);
         if inner.run(h.0) {
             inner.bump(INLINE);
+            if inner.slot(h.0).parked.load(Ordering::Relaxed) {
+                inner.bump(UNPARKED);
+            }
         } else {
             inner.waiters.fetch_add(1, Ordering::SeqCst);
             std::sync::atomic::fence(Ordering::SeqCst);
@@ -376,6 +425,8 @@ impl<C: Creator> Pool<C> {
             wait_time: Duration::from_nanos(self.inner.wait_ns.load(Ordering::Relaxed)),
             create_time: Duration::from_nanos(self.inner.create_ns.load(Ordering::Relaxed)),
             prewarm_queued: n(PREWARM),
+            parked: n(PARKED),
+            unparked: n(UNPARKED),
         }
     }
 }
@@ -446,6 +497,27 @@ mod tests {
     fn cs(h: u64) -> (Key, Desc) {
         let d = Desc::Compute { cs: h };
         (Key::of(&d), d)
+    }
+
+    /// Past the eager cap a request only registers: nothing is created until the first wait, which creates it
+    /// on the waiting thread; a second request of a parked key gives the same handle.
+    #[test]
+    fn requests_past_the_eager_cap_are_created_at_first_use() {
+        let f = Arc::new(Fake::new(0));
+        let pool = Pool::new(f.clone(), 2);
+        let hs: Vec<_> = (0..5u64).map(|k| pool.request_capped(cs(k).0, cs(k).1, 2)).collect();
+        assert_eq!(pool.request_capped(cs(4).0, cs(4).1, 2), hs[4]);
+        let _ = pool.wait(hs[0]);
+        let _ = pool.wait(hs[1]);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(f.total.load(Ordering::SeqCst), 2, "only the eager two are created");
+        assert_eq!(pool.status(hs[3]), Status::Queued);
+        assert_eq!(pool.get(hs[3]), None);
+        assert_eq!(pool.wait(hs[3]).unwrap(), &cs(3).0.name());
+        let st = pool.stats();
+        assert_eq!((st.parked, st.unparked, st.created, st.deduplicated), (3, 1, 3, 1));
+        assert_eq!(f.total.load(Ordering::SeqCst), 3);
+        assert_eq!(pool.requested().len(), 5, "every title request is recorded for the next session");
     }
 
     #[test]
