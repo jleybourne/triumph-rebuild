@@ -367,7 +367,12 @@ pub unsafe extern "system" fn PresentX(this: *mut c_void, planes: u32, plane: *c
             }
         }
     }
-    let Some(raw) = crate::device::list_host().and_then(|h| h.resource(console)) else {
+    // REBUILD_PRESENT_ENTRY=<view entry> (diagnostic): show that entry's texture instead of the title's plane (a
+    // render target's contents on screen and in captures, when it is the plane's size and format family)
+    static ENTRY: OnceLock<Option<u32>> = OnceLock::new();
+    let entry = ENTRY.get_or_init(|| std::env::var("REBUILD_PRESENT_ENTRY").ok().and_then(|v| v.trim().parse().ok()));
+    let shown = entry.and_then(|e| crate::device::resources()?.entry_resource(e));
+    let Some(raw) = shown.or_else(|| crate::device::list_host().and_then(|h| h.resource(console))) else {
         static ONCE: AtomicBool = AtomicBool::new(false);
         if !ONCE.swap(true, Ordering::Relaxed) {
             eprintln!("present   plane 0's resource {console:p} has no host texture: not shown");

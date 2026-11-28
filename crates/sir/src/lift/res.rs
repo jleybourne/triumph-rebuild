@@ -299,11 +299,10 @@ impl Lifter<'_> {
             Some(r) => format!("{lo} + {r} + {off}u"),
             None => format!("{lo} + {off}u"),
         };
+        // the sub-window of the scalar address, and the offset in it ([`super::WINDOW_HEAP_BASE`])
         let _ = writeln!(
             self.out.body,
-            "    {{ RWByteAddressBuffer w = ResourceDescriptorHeap[{}u + ({hi} & {}u)]; uint a = ({at}) & ~3u;",
-            super::WINDOW_HEAP_BASE,
-            super::WINDOW_COUNT - 1
+            "    {{ uint sir_b = {at}; ByteAddressBuffer w = ResourceDescriptorHeap[sir_wi(sir_b, {hi})]; uint a = sir_wo(sir_b) & ~3u;"
         );
         for k in 0..n {
             let s = dst + k;
@@ -444,13 +443,14 @@ impl Lifter<'_> {
         let mut b = String::new();
         let _ = write!(
             b,
-            "    {{ RWByteAddressBuffer w = ResourceDescriptorHeap[{}u + ({} & {}u)]; uint sir_st = ({} >> 16) & 0x3fffu, sir_nr = {}, sir_i = {idx}, sir_o = {voff}; uint a = ({} + {soff} + sir_i * sir_st + sir_o) & ~3u;",
-            super::WINDOW_HEAP_BASE,
+            "    {{ uint sir_b = {} + {soff}; {} w = ResourceDescriptorHeap[{}(sir_b, {})]; uint sir_st = ({} >> 16) & 0x3fffu, sir_nr = {}, sir_i = {idx}, sir_o = {voff}; uint a = (sir_wo(sir_b) + sir_i * sir_st + sir_o) & ~3u;",
+            w[0],
+            // loads read the window's raw SRV, stores its raw UAV ([`super::WINDOW_UAV_BASE`])
+            if store { "RWByteAddressBuffer" } else { "ByteAddressBuffer" },
+            if store { "sir_wu" } else { "sir_wi" },
             w[1],
-            super::WINDOW_COUNT - 1,
             w[1],
-            w[2],
-            w[0]
+            w[2]
         );
         // whether dword k of the access is in range
         let inside = |k: u16| -> String {
@@ -559,13 +559,11 @@ impl Lifter<'_> {
                 let ob = if w3.is_none() { format!(" uint sir_ob = ({} >> 28) & 3u;", w[3]) } else { String::new() };
                 (
                     format!(
-                        "RWByteAddressBuffer w = ResourceDescriptorHeap[{}u + ({} & {}u)]; uint sir_st = ({} >> 16) & 0x3fffu, sir_nr = {}, sir_i = {idx}, sir_o = {voff}; uint a = {} + {soff} + sir_i * sir_st + sir_o;{ob}",
-                        super::WINDOW_HEAP_BASE,
+                        "uint sir_b = {} + {soff}; RWByteAddressBuffer w = ResourceDescriptorHeap[sir_wu(sir_b, {})]; uint sir_st = ({} >> 16) & 0x3fffu, sir_nr = {}, sir_i = {idx}, sir_o = {voff}; uint a = sir_wo(sir_b) + sir_i * sir_st + sir_o;{ob}",
+                        w[0],
                         w[1],
-                        super::WINDOW_COUNT - 1,
                         w[1],
-                        w[2],
-                        w[0]
+                        w[2]
                     ),
                     inside,
                 )
@@ -1094,15 +1092,19 @@ impl Lifter<'_> {
         let a = d.get("addr")? as u16;
         let saddr = d.get("saddr")?;
         self.out.vgprs.insert(a);
-        let (lo, win) = if matches!(enc::src(saddr), Src::Null) || saddr == 0x7f {
+        // the sub-window: of each lane's address (a VGPR pair), or of the scalar base (saddr), the lanes' offsets added
+        // in it; loads read its raw SRV, stores its raw UAV
+        let wf = if store { "sir_wu" } else { "sir_wi" };
+        let (base, win, rest) = if matches!(enc::src(saddr), Src::Null) || saddr == 0x7f {
             self.out.vgprs.insert(a + 1);
-            (format!("v{a}"), format!("NonUniformResourceIndex({}u + (v{} & {}u))", super::WINDOW_HEAP_BASE, a + 1, super::WINDOW_COUNT - 1))
+            (format!("v{a} + (uint){off}"), format!("NonUniformResourceIndex({wf}(sir_b, v{}))", a + 1), String::new())
         } else {
             let (sl, sh) = (self.src(saddr, None)?, self.src(saddr + 1, None)?);
-            (format!("{sl} + v{a}"), format!("{}u + ({sh} & {}u)", super::WINDOW_HEAP_BASE, super::WINDOW_COUNT - 1))
+            (sl, format!("{wf}(sir_b, {sh})"), format!(" + v{a} + (uint){off}"))
         };
         self.out.notes.insert("global memory: window addressing");
-        let _ = writeln!(self.out.body, "    {{ RWByteAddressBuffer w = ResourceDescriptorHeap[{win}]; uint a = ({lo} + (uint){off}) & ~3u;");
+        let ty = if store { "RWByteAddressBuffer" } else { "ByteAddressBuffer" };
+        let _ = writeln!(self.out.body, "    {{ uint sir_b = {base}; {ty} w = ResourceDescriptorHeap[{win}]; uint a = (sir_wo(sir_b){rest}) & ~3u;");
         let data = if store { d.get("data")? } else { d.get("vdst")? } as u16;
         let guard = if self.f.narrowed { "if (ex) " } else { "" };
         for k in 0..n {

@@ -71,13 +71,30 @@ fn const_f32(e: &str) -> Option<f32> {
 /// console descriptor (stride, number of records, 0, 0), for what the host view does not carry.
 pub const SHADOW_SPACE: u32 = 101;
 
-/// Window addressing (`docs/design/shader-ir.md`, "Memory"): the console's 4 GiB window `k` (addresses
-/// `k << 32 ..`) is a raw buffer view at host view-heap index `WINDOW_HEAP_BASE + k`, for `k <
-/// WINDOW_COUNT` (47-bit addresses). The range is the top of a 1,000,000-view heap (the host limit on tiers
-/// 1-2); the runtime keeps it for window views (a null view where no window is mapped).
+/// Window addressing (`docs/design/shader-ir.md`, "Memory"), the contract with the memory model: console address
+/// `A` is read at byte `A & (SUB_WINDOW - 1)` of the raw SRV (`ByteAddressBuffer`) at host view-heap index
+/// `WINDOW_HEAP_BASE + k`, `k = (A >> 29) & (WINDOW_COUNT - 1)`, and written (stores, atomics) through the raw UAV
+/// (`RWByteAddressBuffer`) at [`WINDOW_UAV_BASE`]` + k`: one view per 512 MiB sub-window (a raw view holds at
+/// most 2^27 dwords), each onto its 512 MiB of the reserved buffer of the 4 GiB window holding it. The index
+/// comes from the access's scalar part (the base address), so it stays wave-uniform where the base is; lanes'
+/// offsets are added inside the sub-window (an access running past its sub-window's end reads 0). 32,768 views
+/// cover 16 TiB of addresses (44 bits). The range is the top of a 1,000,000-view heap (the host limit on tiers
+/// 1-2); a view the memory model has not placed is null (reads 0, drops writes). `sir_wi` / `sir_wo` in the
+/// prelude.
 pub const WINDOW_HEAP_BASE: u32 = 1_000_000 - WINDOW_COUNT;
-/// Windows the heap range holds: every 4 GiB window of a 47-bit address space.
+/// Sub-window views the heap range holds.
 pub const WINDOW_COUNT: u32 = 1 << 15;
+/// The raw UAVs of the same sub-windows: stores and atomics through window addressing use
+/// `WINDOW_UAV_BASE + k` (loads use the raw SRV at `WINDOW_HEAP_BASE + k`). The same as
+/// `rebuild_d3d12x::heap::WINDOW_UAV_BASE`; the alternates end here.
+pub const WINDOW_UAV_BASE: u32 = WINDOW_HEAP_BASE - WINDOW_COUNT;
+/// Bytes one window view covers.
+pub const SUB_WINDOW: u64 = 512 << 20;
+
+/// The view-heap index of console address `address`'s sub-window, and the offset in it (as `sir_wi` / `sir_wo`).
+pub fn window_slot(address: u64) -> (u32, u32) {
+    (WINDOW_HEAP_BASE + ((address >> 29) as u32 & (WINDOW_COUNT - 1)), (address & (SUB_WINDOW - 1)) as u32)
+}
 
 /// Console view indices a host shader-visible view heap mirrors at the same index: `[0, CONSOLE_VIEWS)`. The
 /// title's heap has 1,245,184 views and the host's at most 1,000,000 (tiers 1-2 and NVIDIA), so not every index
@@ -89,8 +106,9 @@ pub const WINDOW_COUNT: u32 = 1 << 15;
 /// ```text
 /// [0, CONSOLE_VIEWS)                         console index i at host index i
 /// [CONSOLE_VIEWS, + NULL_BANK)               null views, one per view type the translator declares ([`NullKind`])
-/// [CONSOLE_VIEWS + NULL_BANK, WINDOW_HEAP_BASE)   alternates (and, on a larger heap, from 1,000,000 up)
-/// [WINDOW_HEAP_BASE, 1,000,000)              window views
+/// [CONSOLE_VIEWS + NULL_BANK, WINDOW_UAV_BASE)   alternates (and, on a larger heap, from 1,000,000 up)
+/// [WINDOW_UAV_BASE, WINDOW_HEAP_BASE)       window raw UAVs (stores)
+/// [WINDOW_HEAP_BASE, 1,000,000)              window raw SRVs (loads)
 /// ```
 pub const CONSOLE_VIEWS: u32 = 750_000;
 /// Null views after [`CONSOLE_VIEWS`]: see [`NullKind::slot`].
@@ -201,6 +219,12 @@ struct SirCb { uint4 d[4096]; };
 uint sir_vi(uint i, uint k) { return i < 750000u ? i : 750000u + k; }
 uint sir_va(uint z, uint k) { return (z >= 750000u && z < 750024u) ? 750000u + k : z; }
 uint sir_sh(uint i) { return min(i, 750000u) * 16u; }
+// window addressing (WINDOW_HEAP_BASE 967232, 32768 views): the view of the 512 MiB sub-window holding address
+// (hi:lo), and the offset in it
+uint sir_wi(uint lo, uint hi) { return 967232u + (((hi << 3) | (lo >> 29)) & 32767u); }
+// stores (and atomics) go to the sub-window's raw UAV, WINDOW_UAV_BASE (934464) + the same k
+uint sir_wu(uint lo, uint hi) { return 934464u + (((hi << 3) | (lo >> 29)) & 32767u); }
+uint sir_wo(uint lo) { return lo & 0x1fffffffu; }
 uint sir_bfe_u(uint v, uint off, uint w) { off &= 31; w &= 31; return w == 0 ? 0 : (v >> off) & ((1u << w) - 1); }
 int sir_bfe_i(int v, uint off, uint w) { off &= 31; w &= 31; return w == 0 ? 0 : (v << (32 - off - w)) >> (32 - w); }
 // f32 to f16 bits, rounded to nearest even as the console's 16-bit ops round (a native conversion; HLSL's

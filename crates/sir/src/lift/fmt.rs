@@ -173,13 +173,11 @@ impl Lifter<'_> {
                 self.out.notes.insert("buffer access through a V# held as data: window addressing");
                 let _ = write!(
                     head,
-                    "    {{ RWByteAddressBuffer w = ResourceDescriptorHeap[{}u + ({} & {}u)]; uint sir_st = ({} >> 16) & 0x3fffu, sir_nr = {}, sir_i = {idx}, sir_o = {voff}; uint a = {} + {soff} + sir_i * sir_st + sir_o;",
-                    super::WINDOW_HEAP_BASE,
+                    "    {{ uint sir_b = {} + {soff}; ByteAddressBuffer w = ResourceDescriptorHeap[sir_wi(sir_b, {})]; uint sir_st = ({} >> 16) & 0x3fffu, sir_nr = {}, sir_i = {idx}, sir_o = {voff}; uint a = sir_wo(sir_b) + sir_i * sir_st + sir_o;",
+                    w[0],
                     w[1],
-                    super::WINDOW_COUNT - 1,
                     w[1],
-                    w[2],
-                    w[0]
+                    w[2]
                 );
                 w3 = Some(match known {
                     Some(k) => format!("{k}u"),

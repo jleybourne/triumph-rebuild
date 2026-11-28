@@ -57,7 +57,7 @@ use crate::{HeapBinding, Inner, MemoryRange, Raw, Resources};
 pub const CBV_STRIDE: u32 = 16;
 
 /// Sub-window k's raw UAV is at `WINDOW_UAV_BASE + k`, its raw SRV at `WINDOW_HEAP_BASE + k`.
-pub const WINDOW_UAV_BASE: u32 = rebuild_sir::lift::WINDOW_HEAP_BASE - rebuild_sir::lift::WINDOW_COUNT;
+pub const WINDOW_UAV_BASE: u32 = rebuild_sir::lift::WINDOW_UAV_BASE;
 /// R32 elements a window view covers: 512 MiB, the most a raw view can (2^27 elements).
 pub const WINDOW_ELEMENTS: u32 = 1 << 27;
 

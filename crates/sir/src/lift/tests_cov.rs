@@ -218,8 +218,10 @@ fn a_descriptor_built_from_an_address_is_read_through_its_window() {
     let l = lifted(&parts, &[], &[]);
     assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
     let b = &l.body;
-    let w = format!("ResourceDescriptorHeap[{WINDOW_HEAP_BASE}u + (s5 & 32767u)]");
-    assert!(b.contains(&format!("{{ RWByteAddressBuffer w = {w}; uint a = (s4 + 16u) & ~3u;")), "{b}");
+    let w = "ResourceDescriptorHeap[sir_wi(sir_b, s5)]";
+    assert!(b.contains(&format!("{{ uint sir_b = s4 + 16u; ByteAddressBuffer w = {w}; uint a = sir_wo(sir_b) & ~3u;")), "{b}");
+    // the store through the same V#: the sub-window's raw UAV
+    assert!(b.contains("RWByteAddressBuffer w = ResourceDescriptorHeap[sir_wu(sir_b, s5)]"), "{b}");
     assert!(b.contains("s20 = w.Load(a + 0u);") && b.contains("s21 = w.Load(a + 4u);"), "{b}");
     // word 3 is a known constant: OOB_SELECT 3 (no check) is folded
     assert!(b.contains("sir_i = v0, sir_o = 8u;") && b.contains("v4 = true ? w.Load(a + 0u) : 0u;"), "{b}");
@@ -421,7 +423,7 @@ fn buffer_and_lds_atomics() {
     assert!(b.contains("uint a = sh.w + sir_i * 0u + sir_o + 0u;") && b.contains("w.InterlockedAdd(a & ~3u, v4, o);"), "{b}");
     assert!(b.contains("int o = 0; if (true) w.InterlockedMax(a & ~3u, (int)v5, o);"), "{b}");
     assert!(b.contains("w.InterlockedCompareExchange(a & ~3u, v7, v6, o);") && b.contains("v6 = (uint)o;"), "{b}");
-    assert!(b.contains(&format!("ResourceDescriptorHeap[{WINDOW_HEAP_BASE}u + (s5 & 32767u)]")) && b.contains("w.InterlockedMin(a & ~3u, v8, o);"), "{b}");
+    assert!(b.contains("RWByteAddressBuffer w = ResourceDescriptorHeap[sir_wu(sir_b, s5)]") && b.contains("w.InterlockedMin(a & ~3u, v8, o);"), "{b}");
     compile(&l, "cov_buffer_atomics");
 
     let io = rebuild_shader::native::ComputeIo { rsrc2: 0, threads: [64, 1, 1] };
@@ -468,8 +470,8 @@ fn global_memory_small_lds_access_and_image_forms() {
     );
     assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
     let b = &l.body;
-    assert!(b.contains(&format!("RWByteAddressBuffer w = ResourceDescriptorHeap[{WINDOW_HEAP_BASE}u + (s3 & 32767u)]; uint a = (s2 + v0 + (uint)-4) & ~3u;")), "{b}");
-    assert!(b.contains(&format!("ResourceDescriptorHeap[NonUniformResourceIndex({WINDOW_HEAP_BASE}u + (v1 & 32767u))]")) && b.contains("w.Store(a + 0u, v6);"), "{b}");
+    assert!(b.contains("uint sir_b = s2; ByteAddressBuffer w = ResourceDescriptorHeap[sir_wi(sir_b, s3)]; uint a = (sir_wo(sir_b) + v0 + (uint)-4) & ~3u;"), "{b}");
+    assert!(b.contains("RWByteAddressBuffer w = ResourceDescriptorHeap[NonUniformResourceIndex(sir_wu(sir_b, v1))]") && b.contains("w.Store(a + 0u, v6);"), "{b}");
     assert!(b.contains("v10 = sir_f16(r.x) | (sir_f16(r.y) << 16);") && b.contains("v11 = sir_f16(r.z) | 0u;"), "{b}");
     assert!(b.contains("t.GatherRed(sir_imm0, float2(asfloat(v1), asfloat(v2)), int2(((int)v0 << 26) >> 26, ((int)v0 << 18) >> 26));"), "{b}");
     assert!(b.contains("t.Load(int3((int)v0, (int)v1, (int)v2))"), "{b}");
@@ -584,4 +586,22 @@ fn console_view_indices_never_reach_the_alternates() {
         assert!(rest.starts_with("sir_shadow.Load(sir_sh(") || rest.starts_with("sir_shadow.Load4(sir_sh("), "an unguarded shadow read: {}", &rest[..rest.len().min(60)]);
     }
     compile(&l, "cov_view_guard");
+}
+
+/// The window contract with the memory model: 512 MiB sub-windows, view index from address bits 29-43, offset
+/// from bits 0-28; the prelude computes the same as `window_slot`.
+#[test]
+fn window_views_are_512_mib_sub_windows() {
+    use crate::lift::{window_slot, SUB_WINDOW, WINDOW_COUNT, WINDOW_HEAP_BASE};
+    assert_eq!(SUB_WINDOW, 1 << 29);
+    assert_eq!(window_slot(0), (WINDOW_HEAP_BASE, 0));
+    assert_eq!(window_slot(0x1_5cd7_0000), (WINDOW_HEAP_BASE + 10, 0x1cd7_0000), "draw 1's vertex data");
+    assert_eq!(window_slot((1 << 44) + 4), (WINDOW_HEAP_BASE, 4), "44 bits of address");
+    assert_eq!(window_slot((1 << 44) - 1), (WINDOW_HEAP_BASE + WINDOW_COUNT - 1, (SUB_WINDOW - 1) as u32));
+    assert!(PRELUDE.contains(&format!("uint sir_wi(uint lo, uint hi) {{ return {WINDOW_HEAP_BASE}u + (((hi << 3) | (lo >> 29)) & {}u); }}", WINDOW_COUNT - 1)));
+    assert!(PRELUDE.contains(&format!("uint sir_wo(uint lo) {{ return lo & {:#x}u; }}", SUB_WINDOW - 1)));
+    // loads read the raw SRV at WINDOW_HEAP_BASE + k, stores the raw UAV at WINDOW_UAV_BASE + k (the memory model's
+    // layout: rebuild_d3d12x::heap::WINDOW_UAV_BASE)
+    assert_eq!(crate::lift::WINDOW_UAV_BASE, 934_464);
+    assert!(PRELUDE.contains(&format!("uint sir_wu(uint lo, uint hi) {{ return {}u + (((hi << 3) | (lo >> 29)) & {}u); }}", crate::lift::WINDOW_UAV_BASE, WINDOW_COUNT - 1)));
 }

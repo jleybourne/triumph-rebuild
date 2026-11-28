@@ -186,6 +186,19 @@ impl Resources {
         }
     }
 
+    /// The host resource behind view entry `index` (a texture view, RTV or DSV), for diagnostics
+    /// (`REBUILD_PRESENT_ENTRY`).
+    pub fn entry_resource(&self, index: u32) -> Option<Raw> {
+        let g = self.inner.entries.generation(index);
+        match self.inner.entries.get(index, g)? {
+            records::EntryView::Texture(v) | records::EntryView::Rtv(v) | records::EntryView::Dsv(v) => match v {
+                views::HostView::Srv { resource, .. } | views::HostView::Uav { resource, .. } | views::HostView::Rtv { resource, .. } | views::HostView::Dsv { resource, .. } => Some(resource),
+                _ => None,
+            },
+            records::EntryView::Sampler(_) => None,
+        }
+    }
+
     /// The title's device object: `GetDevice` (0x38) on our objects answers through it.
     pub fn set_device(&self, device: Raw) {
         self.inner.device.store(device, Ordering::Relaxed);
