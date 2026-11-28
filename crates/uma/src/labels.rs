@@ -29,7 +29,12 @@ impl LabelMemory {
             let d3: ID3D12Device3 = device.cast().map_err(|e| format!("ID3D12Device3: {e}"))?;
             let heap: ID3D12Heap = d3.OpenExistingHeapFromAddress(base as *const _).map_err(|e| format!("OpenExistingHeapFromAddress: {e}"))?;
             let mut desc = crate::tiles::buffer_desc(len as u64);
-            desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER;
+            // a resource in a cross-adapter heap must say so; one that is not takes none
+            if heap.GetDesc().Flags.0 & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER.0 != 0 {
+                desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER;
+            } else {
+                desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+            }
             let mut r: Option<ID3D12Resource> = None;
             device
                 .CreatePlacedResource(&heap, 0, &desc, D3D12_RESOURCE_STATE_COMMON, None, &mut r)

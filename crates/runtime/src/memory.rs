@@ -160,6 +160,9 @@ pub fn start(device: &ID3D12Device, warp: bool) -> Option<&'static Model> {
         }
     });
     m.ring.set_backer(backer);
+    // slices quiet for 30 passes (about a second) are read on one pass in REBUILD_COLD_EVERY (default 4; 1: all)
+    let every = std::env::var("REBUILD_COLD_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(4u32);
+    m.ring.set_cold(every, 30);
     // what the title made before the device: with no allocation or free running meanwhile
     crate::exports::with_watched(|regions| {
         for &(base, size) in regions {
@@ -326,7 +329,7 @@ pub fn report() -> String {
         "memory    tiles: {n} watched regions ({} MiB), {used} card pages in use ({} MiB of heaps), {} sub-windows, {} views placed; pages placed {} ({} on first write), retired {}, zeroed {}, refused {}, map failures {}; regions added {}, removed {}\n\
          arena     {} MiB of resources at console addresses, {} refused; {} buffers sharing card pages by address; {} allocations, {} frees\n\
          upload    {} passes for {} flushes, {} MiB sent, {:.2} ms a pass, flush -> signalled {:.2} ms; carried {} pages, {} chunks with no sub-window, {} failed passes\n\
-         upload    a pass, ms: region lock {:.2}, slot wait {:.2}, watch {:.2}, diff {:.2}, gather {:.2}, record {:.2}",
+         upload    a pass, ms: region lock {:.2}, slot wait {:.2}, watch {:.2}, diff {:.2}, gather {:.2}, record {:.2}; write-watch read {} MiB a pass, {} MiB of cold slices skipped",
         bytes >> 20,
         heaps >> 20,
         m.subs.iter().filter(|s| !s.load(Relaxed).is_null()).count(),
@@ -358,6 +361,8 @@ pub fn report() -> String {
         per(&t.diff_us),
         per(&t.gather_us),
         per(&t.record_us),
+        t.watched_read.load(Relaxed) / passes >> 20,
+        t.cold_skipped.load(Relaxed) / passes >> 20,
     )
 }
 
