@@ -153,12 +153,28 @@ pub const OVERRIDES: &[(&str, &str)] = &[
     // while it is on. Off, these bind to the host's own function (override with none built), unchanged.
     ("connect", "network"),
     ("WSAConnect", "network"),
+    ("WSAConnectByNameW", "network"),
+    ("WSAConnectByNameA", "network"),
+    ("WSAConnectByList", "network"),
+    ("WSAIoctl", "network"),
     ("sendto", "network"),
     ("WSASendTo", "network"),
+    ("WSASendMsg", "network"),
     ("getaddrinfo", "network"),
     ("GetAddrInfoW", "network"),
+    ("GetAddrInfoExW", "network"),
+    ("gethostbyname", "network"),
+    ("WSAAsyncGetHostByName", "network"),
     ("WinHttpConnect", "network"),
     ("WinHttpSendRequest", "network"),
+    ("InternetConnectW", "network"),
+    ("InternetConnectA", "network"),
+    ("InternetOpenUrlW", "network"),
+    ("InternetOpenUrlA", "network"),
+    ("HttpSendRequestW", "network"),
+    ("HttpSendRequestA", "network"),
+    ("HttpSendRequestExW", "network"),
+    ("HttpSendRequestExA", "network"),
 ];
 
 /// What the GDK runtime noted: interfaces, slots and exports the title asked for that we do not serve.
