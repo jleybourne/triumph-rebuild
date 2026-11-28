@@ -114,45 +114,7 @@ impl App {
                     self.pick_import(&store);
                 }
             });
-            if let Some((path, plan)) = self.import_plan.clone() {
-                ui.add_space(6.0);
-                w::rule(ui);
-                let m = &plan.manifest;
-                ui.label(egui::RichText::new(format!("Import {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())).font(th::medium(13.5)).color(c.text));
-                w::muted(ui, &format!("Exported {} · build {} · {} user(s) · {} file(s)", m.exported, m.build, m.users.len(), m.files.len()));
-                for (from, to) in &plan.users {
-                    if from != to {
-                        w::muted(ui, &format!("User {} is imported as this machine's user {}", rebuild_storage::user_dir_name(*from), rebuild_storage::user_dir_name(*to)));
-                    }
-                }
-                for (label, list, tone) in [("replaced", &plan.replaced, Tone::Warn), ("removed", &plan.removed, Tone::Danger), ("added", &plan.added, Tone::Ok)] {
-                    if list.is_empty() {
-                        continue;
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        w::chip(ui, &format!("{} {label}", list.len()), tone);
-                        let shown: Vec<&str> = list.iter().take(6).map(String::as_str).collect();
-                        w::muted(ui, &format!("{}{}", shown.join(", "), if list.len() > 6 { ", …" } else { "" }));
-                    });
-                }
-                if plan.changes() == 0 {
-                    w::muted(ui, "Nothing would change: these files are already here.");
-                }
-                let refused = self.import_refused();
-                if let Some(r) = refused {
-                    ui.label(egui::RichText::new(r).font(th::small()).color(c.danger));
-                }
-                ui.horizontal(|ui| {
-                    if w::button(ui, icon::CHECK, "Back up and import", plan.changes() > 0 && refused.is_none()).clicked() {
-                        let ctx = ui.ctx().clone();
-                        self.run_import(&ctx, &store, &path, &plan);
-                        refresh = true;
-                    }
-                    if w::button(ui, icon::X, "Cancel", true).clicked() {
-                        self.import_plan = None;
-                    }
-                });
-            }
+            refresh |= self.import_plan_view(ui, &store);
         });
         if refresh {
             self.storage_sizes = None;
@@ -160,6 +122,53 @@ impl App {
         if let Some(p) = open {
             open_folder(&p);
         }
+    }
+
+    /// The storage import's preview (what the export holds, what it replaces), with "Back up and import"
+    /// and Cancel; shared by Diagnostics → Storage and the Saves screen's Import. True if it imported.
+    pub(crate) fn import_plan_view(&mut self, ui: &mut egui::Ui, store: &GameStore) -> bool {
+        let c = th::p();
+        let mut refresh = false;
+        if let Some((path, plan)) = self.import_plan.clone() {
+            ui.add_space(6.0);
+            w::rule(ui);
+            let m = &plan.manifest;
+            ui.label(egui::RichText::new(format!("Import {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())).font(th::medium(13.5)).color(c.text));
+            w::muted(ui, &format!("Exported {} · build {} · {} user(s) · {} file(s)", m.exported, m.build, m.users.len(), m.files.len()));
+            for (from, to) in &plan.users {
+                if from != to {
+                    w::muted(ui, &format!("User {} is imported as this machine's user {}", rebuild_storage::user_dir_name(*from), rebuild_storage::user_dir_name(*to)));
+                }
+            }
+            for (label, list, tone) in [("replaced", &plan.replaced, Tone::Warn), ("removed", &plan.removed, Tone::Danger), ("added", &plan.added, Tone::Ok)] {
+                if list.is_empty() {
+                    continue;
+                }
+                ui.horizontal_wrapped(|ui| {
+                    w::chip(ui, &format!("{} {label}", list.len()), tone);
+                    let shown: Vec<&str> = list.iter().take(6).map(String::as_str).collect();
+                    w::muted(ui, &format!("{}{}", shown.join(", "), if list.len() > 6 { ", …" } else { "" }));
+                });
+            }
+            if plan.changes() == 0 {
+                w::muted(ui, "Nothing would change: these files are already here.");
+            }
+            let refused = self.import_refused();
+            if let Some(r) = refused {
+                ui.label(egui::RichText::new(r).font(th::small()).color(c.danger));
+            }
+            ui.horizontal(|ui| {
+                if w::button(ui, icon::CHECK, "Back up and import", plan.changes() > 0 && refused.is_none()).clicked() {
+                    let ctx = ui.ctx().clone();
+                    self.run_import(&ctx, store, &path, &plan);
+                    refresh = true;
+                }
+                if w::button(ui, icon::X, "Cancel", true).clicked() {
+                    self.import_plan = None;
+                }
+            });
+        }
+        refresh
     }
 
     fn clear_cache(&mut self, store: &GameStore, old_only: bool) {
