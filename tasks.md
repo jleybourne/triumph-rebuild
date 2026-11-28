@@ -129,18 +129,22 @@ decision 4.
 | todo | frame line: fps · ms · draws · dropped · upload MB · upload ms · translation ms · output res · upscaler/mode · vendor | one parseable line a second |
 | doing | Build 0 (c), moved here: the title's GPU time from per-list timestamp pairs, RT on and off. Built: a query pair in every direct/compute host list, resolved per queue and frame in one run, read a few frames late (`runtime/src/gputime.rs`); frame line `gpu` and summary `gpu_ms` are the frames' busy time (union over queues), `gpu_sum_ms` the plain sum. The title's own GPU timestamp labels (flag 1) are written into its memory the same way. WARP, loading screen: 44 ms a frame (indicative only). Left: the card's number, RT on and off, once the real frame renders | measured; replaces the ~45 ms everywhere it is quoted |
 
-| doing | readable UI text: console view indices past 750,000 remapped into the host heap (lane `descremap`) | the legal screens' text complete in a capture |
-| doing | saves: the two GDK interfaces the title asks for (lane `saves`) | a second run skips first-run setup |
-| doing | depth buffers written as UAVs: a design (lane `depthuav`) | 0 null UAVs, depth compute results visible |
-| todo | portable shader library: the launcher builds it on first run from the user's own game into `%LOCALAPPDATA%` (owner decision 2026-11-28); no `D:\victory-data` defaults | a clean machine reaches the start screen |
-| todo | through the menus to gameplay (scripted input) | the first in-game frame captured |
+| done | readable UI text: console view indices past 750,000 remapped into the host heap in 256-view pages (#70); the missing letters were CPU-written glyph atlases (lane `video`: `cputex.rs`) | the legal screens' text complete in a capture (2026-11-28) |
+| done | intro video: Bink planes are CPU-written linear textures kept current by `cputex.rs`; queue slot 0xf8 `CopyPageMappingsBatchX` as bookkeeping (`pagemap.rs`) | eagle art + Rockstar logo captured |
+| doing | swizzled CPU-written textures (606 refused: checkbox ticks, Brightness symbol, streamed textures): an xg detile path (lane `detile`) | refused -> 0, ticks drawn |
+| doing | GPU reset once (nvlddmkm 153, count 449) on LEGAL TERMS after the tick + Down to Confirm (lane `setup` collecting evidence) | cause found; no reset through setup |
+| doing | saves: XGameSave and speech synthesis done (#67); real saves from the old Triumph build (Player kind 3, SettingsProfileSettings kind 2) seeded to test the second run (lane `setup`) | a second run skips first-run setup |
+| done | depth buffers written as UAVs: a colour twin per plane kept in step at the title's barriers (#69, #72; D16S8 as D32S8) | 0 null UAVs (2026-11-28); compute results visible in gameplay |
+| doing | portable shader library: the launcher builds it on first run from the user's own game into the game's cache (`rebuild_storage`, owner decision 2026-11-28), resumable and incremental, on-demand fallback (lane `shaderlib`) | a clean machine reaches the start screen |
+| doing | audio: inventory, process-loopback capture, fixes (lane `audio`) | intro music and menu sounds captured, no underruns |
+| doing | through the menus to gameplay: a live input/capture pipe (`REBUILD_INPUT_PIPE`, lane `setup`) | the first in-game frame captured |
 
 ## Build 6 — parallel list translation
 
 | state | work | closes when |
 |---|---|---|
 | done | translator core: state elision, address and pipeline mapping, no locks (`crates/xlist`) | 0.43 µs a draw with the driver, synthetic frame (Build 0 (b)) |
-| todo | translate each list on the title's own recording thread at Close, no extra pool | per-draw CPU cost on the real stream ≤ 1 µs (Build 0 (b) floor ~0.4 µs), frame line |
+| doing | translate each list on the title's own recording thread at Close, no extra pool | per-draw CPU cost on the real stream ≤ 1 µs (Build 0 (b) floor ~0.4 µs), frame line |
 | dropped | list cache by content | Build 0 (b): translation is ~2 ms a frame; hashing could not pay |
 
 ## Build 7 — the upscaler: one interface, two backends
@@ -180,6 +184,11 @@ Design: [`docs/design/launcher.md`](docs/design/launcher.md). Its own bar in `pr
 
 | state | work | closes when |
 |---|---|---|
+| done | storage: one owner for every path (`crates/storage`); portable `data\` beside the launcher by default, per-user AppData otherwise, `REBUILD_DATA_DIR`, `storage.cache_dir`; per game `games\<id>\{settings.toml, saves, storage, overlay, cache\<build>}`; migration copies and verifies; Export/Import zip with manifest (#74, owner request 2026-11-28) | clear-cache never touches saves (test); round trip byte-identical |
+| done | save editor (Saves tab): ASAV format from the exe (Jenkins hashes; kinds 1/9 encrypted+signed, read-only), editable unsigned saves, typed SettingsProfileSettings and Player fields, import/export, Import from Triumph; backup before every write, refused while the title runs (#73, #75) | the old Triumph saves round-trip byte-identical |
+| done | display: Window mode (windowed / windowed fullscreen / fullscreen) and Window size 120p-2160p, 720p default; recommended profile from the PC's specs, applied once on first run (#71) | config + launcher tests |
+| doing | exclusive fullscreen (lane `fullscreen`) | the owner's manual check passes |
+| todo | story-progress saves (ASAV kinds 1 and 9: body encrypted, 32-byte signature): identify the cipher and signature from the title's own code (`0x1428d0d60`, `0x1428d2030` → `0x1428d4480`, docs/research/save-format.md), then decrypt, edit and re-sign in the save editor. Offline single-player only; keys are derived at run time from the user's own copy and never committed, shipped or logged; online-related data stays read-only. Needs a real story save first (gameplay) | a story save decrypts, round-trips byte-identical, and an edited value loads in the title |
 | done | C1 `crates/config`: the settings registry (18 options in 8 groups at the time; 30 now), `rebuild.toml` load/save, validation, refused values with reasons, stable-only profiles | 6 unit tests |
 | done | C2 the layer reads `rebuild.toml` at start; every switch lives in the registry (lane `launch`): `rebuild.exe --config` sets the runtime's variables (`rebuild_config::runtime`) and runs the title through `launch.rs`, shared with `runtitle` | benches and proofs take options from it |
 | done | L1 launcher shell (egui): tabs, Features generated from the registry, profiles (helper lane `launcher`) | writes a `rebuild.toml` that `config` validates with 0 problems |

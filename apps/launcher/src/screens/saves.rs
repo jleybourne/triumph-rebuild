@@ -1,7 +1,8 @@
 //! Saves: every user's save containers for the selected game, a container's blobs, the title's save
 //! header and ASAV header decoded with their checksums judged as the title's load path judges them, a
-//! hex view, the edits the format supports, backups (undo), and import / export of one container, one
-//! decoded save (JSON), or every save at once (`docs/design/save-editor.md`).
+//! hex view, the edits the format supports, backups (undo), export of one container, one decoded save
+//! (JSON) or every save, and one **Import** for anything that holds saves: it detects what a file or
+//! folder is, shows what will be replaced, then writes (`docs/design/save-editor.md`).
 //!
 //! Every write goes through `rebuild_saves::store::write_container`: refused while the title runs,
 //! the replaced file backed up first, written all or nothing the runtime's way.
@@ -15,6 +16,8 @@ use eframe::egui::{self, Align, Layout};
 use rebuild_gdk::areas::xgamesave::Stored;
 use rebuild_saves::format::{Editable, Save};
 use rebuild_saves::store::{self, Entry};
+use rebuild_saves::body::{self, Body, Kind};
+use rebuild_saves::import::{self as imp, Change};
 use rebuild_saves::{json, section};
 use std::path::{Path, PathBuf};
 
@@ -28,6 +31,8 @@ pub struct SavesUi {
     pub entries: Vec<Entry>,
     pub open: Option<Opened>,
     pub note: Option<(Tone, String)>,
+    /// The import being previewed (detected, checked, nothing written yet).
+    pub pending: Option<imp::Plan>,
 }
 
 /// One opened container.
@@ -45,6 +50,10 @@ pub struct Opened {
     pub blob: usize,
     pub page: usize,
     pub backups: Vec<PathBuf>,
+    /// The fields card: a filter, and one input per field (made from the body they show).
+    pub filter: String,
+    pub inputs: Vec<String>,
+    pub inputs_of: Vec<u8>,
 }
 
 enum Act {
@@ -57,11 +66,16 @@ enum Act {
     Discard,
     Restore(PathBuf),
     ExportContainer,
-    ImportContainer,
     ExportSection,
-    ImportSection,
     ExportAll,
-    ImportAll,
+    /// A decoded body field (its index) set from text.
+    SetField(usize, String),
+    /// Choose what to import: a file (false) or a folder (true).
+    PickImport(bool),
+    /// Detect and preview `path`.
+    Import(PathBuf),
+    ApplyImport,
+    CancelImport,
 }
 
 fn when(t: i64) -> String {
@@ -89,7 +103,7 @@ fn open(path: &Path, root: &Path) -> Result<Opened, String> {
         _ => String::new(),
     };
     let blob = stored.blobs.iter().position(|b| b.0 == rebuild_saves::format::DATA_BLOB).unwrap_or(0);
-    Ok(Opened { path: path.into(), backups: store::backups(root, path), stored, save, edited: None, name, patch_at: "0".into(), patch_hex: String::new(), blob, page: 0 })
+    Ok(Opened { path: path.into(), backups: store::backups(root, path), stored, save, edited: None, name, patch_at: "0".into(), patch_hex: String::new(), blob, page: 0, filter: String::new(), inputs: Vec::new(), inputs_of: Vec::new() })
 }
 
 impl App {
@@ -119,6 +133,24 @@ impl App {
         if let Some((tone, text)) = &self.saves.note {
             w::chip(ui, text, *tone);
             ui.add_space(th::S2);
+        }
+        // a file or folder dropped on the window is an Import
+        if let Some(p) = ui.ctx().input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone())) {
+            act = Some(Act::Import(p));
+        }
+        if let Some(p) = &self.saves.pending {
+            pending_view(ui, p, running, &mut act);
+            ui.add_space(th::S2);
+        }
+        if self.import_plan.is_some() {
+            if let Some(gs) = self.game_store() {
+                w::card(ui, Some("Import"), |ui| {
+                    if self.import_plan_view(ui, &gs) {
+                        act = Some(Act::Refresh);
+                    }
+                });
+                ui.add_space(th::S2);
+            }
         }
         let entries = &self.saves.entries;
         let open_path = self.saves.open.as_ref().map(|o| o.path.clone());
@@ -164,14 +196,23 @@ impl App {
                     }
                 });
                 ui.add_space(th::S2);
-                w::card(ui, Some("Every save at once"), |ui| {
-                    w::muted(ui, "A folder with every container and its manifest; importing checks all of them before writing any.");
+                w::card(ui, Some("Import and export"), |ui| {
+                    w::muted(ui, "Import takes any file or folder that holds saves (an export, a container, a decoded save, saves from an older build) and shows what it found before changing anything. You can also drop it on this window.");
                     ui.horizontal(|ui| {
-                        if w::button(ui, icon::EXPORT, "Export all", !entries.is_empty()).clicked() {
+                        ui.add_enabled_ui(!running, |ui| {
+                            ui.menu_button(format!("{}  Import", icon::DOWNLOAD_SIMPLE), |ui| {
+                                if ui.button("A file…").clicked() {
+                                    act = Some(Act::PickImport(false));
+                                    ui.close_menu();
+                                }
+                                if ui.button("A folder…").clicked() {
+                                    act = Some(Act::PickImport(true));
+                                    ui.close_menu();
+                                }
+                            });
+                        });
+                        if w::button(ui, icon::EXPORT, "Export all", !entries.is_empty()).on_hover_text("A folder with every container and its manifest").clicked() {
                             act = Some(Act::ExportAll);
-                        }
-                        if w::button(ui, icon::DOWNLOAD_SIMPLE, "Import all", !running).clicked() {
-                            act = Some(Act::ImportAll);
                         }
                     });
                 });
@@ -193,6 +234,35 @@ impl App {
     fn saves_act(&mut self, a: Act, root: &Path) {
         let running = self.is_running();
         let guard = move || running;
+        let a = match a {
+            Act::PickImport(folder) => {
+                let d = rfd::FileDialog::new().set_title("What to import: an export, a container, a decoded save or a saves folder");
+                match if folder { d.pick_folder() } else { d.pick_file() } {
+                    Some(p) => Act::Import(p),
+                    None => return,
+                }
+            }
+            a => a,
+        };
+        // an export of saves and settings (.zip) goes through the storage import and its own preview
+        if let Act::Import(p) = &a {
+            if imp::detect(p) == Ok(imp::Kind::StorageExport) {
+                self.saves.pending = None;
+                self.import_plan = None;
+                let Some(gs) = self.game_store() else { return self.saves.note = Some((Tone::Danger, "pick a game first".into())) };
+                let planned = rebuild_storage::transfer::read_export(p)
+                    .and_then(|(m, _)| rebuild_storage::inspect(&gs, p, &rebuild_storage::ImportOptions::for_this_machine(&m)));
+                self.saves.note = Some(match planned {
+                    Ok(plan) => {
+                        self.import_plan = Some((p.clone(), plan));
+                        (Tone::Ok, format!("Found {}: nothing is written until you confirm", imp::Kind::StorageExport.label()))
+                    }
+                    Err(e) => (Tone::Danger, e),
+                });
+                return;
+            }
+            self.import_plan = None;
+        }
         let st = &mut self.saves;
         match run(st, a, root, &guard) {
             Ok(Some(m)) => st.note = Some((Tone::Ok, m)),
@@ -267,14 +337,6 @@ fn run(st: &mut SavesUi, a: Act, root: &Path, guard: &dyn Fn() -> bool) -> Resul
                 let (gsc, _) = store::export_container(&o.path, &dest)?;
                 Ok(Some(format!("Exported {} and its manifest", gsc.display())))
             }
-            Act::ImportContainer => {
-                let o = st.open.as_ref().ok_or("open a container first: the import goes into its folder")?;
-                let Some(f) = rfd::FileDialog::new().add_filter("container", &["gsc"]).pick_file() else { return Ok(None) };
-                let dir = o.path.parent().ok_or("no folder")?.to_path_buf();
-                let w = store::import_container(root, &dir, &f, guard)?;
-                st.open = Some(open(&w.path, root)?);
-                Ok(Some(format!("Imported{}", if w.backup.is_some() { "; the container it replaced is backed up" } else { "" })))
-            }
             Act::ExportSection => {
                 let o = st.open.as_ref().ok_or("nothing open")?;
                 let s = o.edited.clone().or_else(|| o.save.clone()?.ok()).ok_or("this container holds no decoded save")?;
@@ -283,26 +345,46 @@ fn run(st: &mut SavesUi, a: Act, root: &Path, guard: &dyn Fn() -> bool) -> Resul
                 rebuild_launcher::write_atomic(&p, &section::export(&o.stored.name, &s)).map_err(|e| format!("{}: {e}", p.display()))?;
                 Ok(Some(format!("Exported {}", p.display())))
             }
-            Act::ImportSection => {
-                let o = st.open.as_mut().ok_or("nothing open")?;
-                let cur = o.save.clone().ok_or("this container holds no decoded save")??;
-                let Some(p) = rfd::FileDialog::new().add_filter("json", &["json"]).pick_file() else { return Ok(None) };
-                let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-                let s = section::import(&text, &o.stored.name, &cur)?;
-                o.name = s.header.name.clone();
-                o.edited = if s == cur { None } else { Some(s) };
-                Ok(Some(if o.edited.is_some() { "Imported into the editor; checksums recomputed; not written yet" } else { "Imported: nothing differs from the save" }.into()))
-            }
             Act::ExportAll => {
                 let Some(dest) = rfd::FileDialog::new().set_title("Folder for every save").pick_folder() else { return Ok(None) };
                 let dest = dest.join(format!("saves-{}", store::stamp(store::now())));
                 let n = store::export_all(root, &dest)?;
                 Ok(Some(format!("Exported {n} containers to {}", dest.display())))
             }
-            Act::ImportAll => {
-                let Some(src) = rfd::FileDialog::new().set_title("A folder made by Export all").pick_folder() else { return Ok(None) };
-                let w = store::import_all(root, &src, guard)?;
-                Ok(Some(format!("Imported {} containers; each one replaced is backed up", w.len())))
+            // the dialog is the App's (`saves_act`); nothing to do here
+            Act::PickImport(_) => Ok(None),
+            Act::Import(p) => {
+                st.pending = None;
+                let open_at = st.open.as_ref().map(|o| o.path.clone());
+                let plan = imp::plan(root, &p, open_at.as_deref())?;
+                let msg = format!("Found {}: nothing is written until you confirm", plan.kind.label());
+                st.pending = Some(plan);
+                Ok(Some(msg))
+            }
+            Act::CancelImport => {
+                st.pending = None;
+                Ok(Some("Import cancelled: nothing was changed".into()))
+            }
+            Act::ApplyImport => {
+                let plan = st.pending.clone().ok_or("nothing to import")?;
+                let open_at = st.open.as_ref().map(|o| o.path.clone());
+                let w = imp::apply(root, &plan, open_at.as_deref(), guard)?;
+                st.pending = None;
+                if let Some(o) = st.open.as_ref().map(|o| o.path.clone()) {
+                    if w.iter().any(|w| w.path == o) {
+                        st.open = Some(open(&o, root)?);
+                    }
+                }
+                let backed = w.iter().filter(|w| w.backup.is_some()).count();
+                Ok(Some(format!("Imported {} container(s); {backed} replaced, each backed up first", w.len())))
+            }
+            Act::SetField(i, text) => {
+                let o = st.open.as_mut().ok_or("nothing open")?;
+                let mut s = o.edited.clone().or_else(|| o.save.clone()?.ok()).ok_or("no save to edit")?;
+                let new = set_field(&s, i, &text)?;
+                s.patch_body(0, &new).map_err(|e| e.0)?;
+                o.edited = Some(s);
+                Ok(Some("Field set; checksums recomputed; not written yet".into()))
             }
         }
     }
@@ -329,15 +411,46 @@ fn check(ui: &mut egui::Ui, ok: bool, what: &str) {
     w::chip(ui, &format!("{} {what}", if ok { icon::CHECK } else { icon::X }), if ok { Tone::Ok } else { Tone::Danger });
 }
 
+/// The import preview: what the input was detected as and what each container will do.
+fn pending_view(ui: &mut egui::Ui, p: &imp::Plan, running: bool, act: &mut Option<Act>) {
+    let c = th::p();
+    w::card(ui, Some("Import"), |ui| {
+        let src = p.source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.source.display().to_string());
+        ui.label(egui::RichText::new(format!("{src}: {}", p.kind.label())).font(th::medium(13.5)).color(c.text));
+        for i in &p.items {
+            ui.horizontal_wrapped(|ui| {
+                let (t, tone) = match i.change {
+                    Change::Add => ("added", Tone::Ok),
+                    Change::Replace => ("replaced, backed up first", Tone::Warn),
+                    Change::Unchanged => ("unchanged", Tone::Muted),
+                };
+                w::chip(ui, t, tone);
+                w::muted(ui, &format!("{} · user {} · {}", i.stored.name, i.user, i.scid));
+            });
+        }
+        if p.changes() == 0 {
+            w::muted(ui, "Nothing would change: these saves are already here.");
+        }
+        if running {
+            ui.label(egui::RichText::new("The title is running: close it before importing saves").font(th::small()).color(c.danger));
+        }
+        ui.horizontal(|ui| {
+            if w::button(ui, icon::CHECK, "Back up and import", p.changes() > 0 && !running).clicked() {
+                *act = Some(Act::ApplyImport);
+            }
+            if w::button(ui, icon::X, "Cancel", true).clicked() {
+                *act = Some(Act::CancelImport);
+            }
+        });
+    });
+}
+
 fn container_view(ui: &mut egui::Ui, o: &mut Opened, running: bool, act: &mut Option<Act>) {
     let c = th::p();
     w::card(ui, None, |ui| {
         ui.horizontal(|ui| {
             w::text(ui, &o.stored.name, th::h2(), c.text);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if w::button(ui, icon::DOWNLOAD_SIMPLE, "Import", !running).on_hover_text("Replace it with an exported container (.gsc and its manifest)").clicked() {
-                    *act = Some(Act::ImportContainer);
-                }
                 if w::button(ui, icon::EXPORT, "Export", true).on_hover_text("The container file and a manifest").clicked() {
                     *act = Some(Act::ExportContainer);
                 }
@@ -451,13 +564,89 @@ fn save_view(ui: &mut egui::Ui, o: &mut Opened, s: Save, running: bool, act: &mu
                 *act = Some(Act::Discard);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if w::button(ui, icon::UPLOAD_SIMPLE, "Import JSON", !running).on_hover_text("Read an exported save back into the editor (checked; checksums recomputed)").clicked() {
-                    *act = Some(Act::ImportSection);
-                }
                 if w::button(ui, icon::EXPORT, "Export JSON", true).on_hover_text("The decoded save as readable JSON").clicked() {
                     *act = Some(Act::ExportSection);
                 }
             });
+        });
+    });
+    ui.add_space(th::S2);
+    fields_view(ui, o, &s, matches!(editable, Editable::Yes) && !running, act);
+}
+
+/// The new body after field `i` is set from `text`.
+fn set_field(s: &Save, i: usize, text: &str) -> Result<Vec<u8>, String> {
+    match body::decode(s.inner.kind, &s.body) {
+        Body::Settings(mut st) => {
+            st.set(i, text).map_err(|e| e.0)?;
+            Ok(st.to_body())
+        }
+        Body::Profile(mut p) => {
+            let id = p.entries.get(i).ok_or("no such field")?.0;
+            let t = text.trim();
+            let v = match t.strip_prefix("0x") {
+                Some(h) => u32::from_str_radix(h, 16).map_err(|_| format!("{t:?}: a number"))?,
+                None => t.parse::<u32>().or_else(|_| t.parse::<i32>().map(|v| v as u32)).map_err(|_| format!("{t:?}: a whole number"))?,
+            };
+            p.set(id, v).map_err(|e| e.0)?;
+            p.to_body().map_err(|e| e.0)
+        }
+        Body::Raw => Err("this save's body is not decoded".into()),
+    }
+}
+
+/// The decoded body as typed fields: the settings by name (unknown members as #hash), or the profile's
+/// entries by id; each editable one with its own control.
+fn fields_view(ui: &mut egui::Ui, o: &mut Opened, s: &Save, can: bool, act: &mut Option<Act>) {
+    let c = th::p();
+    let decoded = body::decode(s.inner.kind, &s.body);
+    let (title, rows): (&str, Vec<(String, String, Option<Kind>, bool)>) = match &decoded {
+        Body::Settings(st) => ("Settings", st.leaves.iter().enumerate().map(|(i, l)| (l.name(), st.value(i).to_string(), Some(l.kind), l.editable())).collect()),
+        Body::Profile(p) => ("Profile entries", p.entries.iter().map(|(id, v)| (format!("{id:#06x}"), v.to_string(), Some(Kind::Int), true)).collect()),
+        Body::Raw => return,
+    };
+    if o.inputs_of != s.body || o.inputs.len() != rows.len() {
+        o.inputs = rows.iter().map(|r| r.1.clone()).collect();
+        o.inputs_of = s.body.clone();
+    }
+    w::card(ui, Some(title), |ui| {
+        w::muted(ui, if matches!(decoded, Body::Settings(_)) {
+            "Named where the member's hash matches a name; #hash where it does not yet. Values keep their type; the body keeps its length."
+        } else {
+            "The profile's (id, value) entries; ids are not named yet. Its entry hash and every checksum are recomputed."
+        });
+        ui.horizontal(|ui| {
+            w::fixed(ui, 150.0, egui::RichText::new("filter").font(th::small()).color(c.muted));
+            ui.add(egui::TextEdit::singleline(&mut o.filter).hint_text("e.g. audio, hud, invert").desired_width(240.0));
+        });
+        let f = o.filter.to_lowercase();
+        egui::ScrollArea::vertical().id_salt("saves-fields").max_height(360.0).show(ui, |ui| {
+            for (i, (name, value, kind, editable)) in rows.iter().enumerate() {
+                if !f.is_empty() && !name.to_lowercase().contains(&f) {
+                    continue;
+                }
+                ui.horizontal(|ui| {
+                    w::fixed(ui, 300.0, egui::RichText::new(name).font(th::mono(11.5)).color(if name.contains('#') { c.muted } else { c.text }));
+                    let on = can && *editable;
+                    match kind {
+                        Some(Kind::Bool) => {
+                            let mut b = value == "true";
+                            if ui.add_enabled(on, egui::Checkbox::without_text(&mut b)).changed() {
+                                *act = Some(Act::SetField(i, b.to_string()));
+                            }
+                        }
+                        _ => {
+                            ui.add_enabled(on, egui::TextEdit::singleline(&mut o.inputs[i]).desired_width(110.0).font(th::mono(11.5)));
+                            if w::button(ui, icon::CHECK, "", on && o.inputs[i].trim() != value.trim()).on_hover_text("Set").clicked() {
+                                *act = Some(Act::SetField(i, o.inputs[i].clone()));
+                            }
+                        }
+                    }
+                    if !*editable {
+                        ui.label(egui::RichText::new("read-only").font(th::small()).color(c.muted));
+                    }
+                });
+            }
         });
     });
 }
@@ -549,6 +738,81 @@ mod tests {
         assert_eq!(backups.len(), 1);
         run(&mut st, Act::Restore(backups[0].clone()), &root, &idle).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A settings save in the real one's form (synthetic values): a typed field set through the screen,
+    /// written, and read back by the title's checks.
+    #[test]
+    fn a_settings_field_through_the_screen() {
+        let base = std::env::temp_dir().join(format!("rebuild-launcher-fields-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("GameSave");
+        let dir = root.join("0009000000000001").join("default");
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = "{\r\n\t\"$0x8c1c3948\": {\r\n\t\t\"$0xb80c6ae8\": {\r\n\t\t\t\"$v\": 2.0,\r\n\t\t\t\"$0x3300c23e\": 10,\r\n\t\t\t\"$0xc89952df\": false\r\n\t\t}\r\n\t}\r\n}";
+        let s = build(2, "Profile Settings", 0x6b07_786d, "SettingsProfileSettings", text.as_bytes()).unwrap();
+        let c = Stored {
+            name: "SettingsProfileSettings".into(),
+            display: "SettingsProfileSettings".into(),
+            modified: 1,
+            blobs: vec![(DATA_BLOB.into(), s.data()), (HEADER_BLOB.into(), s.header.to_bytes())],
+        };
+        let path = file::path(&dir, &c.name);
+        file::write(&path, &c).unwrap();
+        let idle = || false;
+        let mut st = SavesUi { root: Some(root.clone()), ..SavesUi::default() };
+        run(&mut st, Act::Select(path.clone()), &root, &idle).unwrap();
+        let cur = st.open.as_ref().unwrap().save.clone().unwrap().unwrap();
+        let Body::Settings(set) = body::decode(2, &cur.body) else { panic!("not decoded") };
+        let music = set.find("#8c1c3948.audio.musicLevel").unwrap();
+        let version = set.find("#8c1c3948.audio.$v").unwrap();
+        assert!(run(&mut st, Act::SetField(version, "3.0".into()), &root, &idle).is_err());
+        run(&mut st, Act::SetField(music, "4".into()), &root, &idle).unwrap();
+        run(&mut st, Act::Write, &root, &idle).unwrap();
+        let back = st.open.as_ref().unwrap().save.clone().unwrap().unwrap();
+        assert!(back.problems().is_empty());
+        assert_eq!(back.body.len(), cur.body.len());
+        let Body::Settings(set) = body::decode(2, &back.body) else { panic!("not decoded") };
+        assert_eq!(set.value(music), "4");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The one Import through the screen: an unrecognised file changes nothing; a decoded save is
+    /// detected and previewed, refused while the title runs, then written with a backup and reopened.
+    #[test]
+    fn import_previews_then_writes() {
+        let base = std::env::temp_dir().join(format!("rebuild-launcher-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("GameSave");
+        let dir = root.join("0009000000000001").join("default");
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = build(5, "Profile Settings", 7, "", &[0; 32]).unwrap();
+        let c = Stored { name: "SettingsProfileSettings".into(), display: "Profile Settings".into(), modified: 1, blobs: vec![(HEADER_BLOB.into(), s.header.to_bytes()), (DATA_BLOB.into(), s.data())] };
+        let path = file::path(&dir, &c.name);
+        file::write(&path, &c).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let idle = || false;
+        let busy = || true;
+        let mut st = SavesUi { root: Some(root.clone()), ..SavesUi::default() };
+        run(&mut st, Act::Select(path.clone()), &root, &idle).unwrap();
+        let junk = base.join("notes.txt");
+        std::fs::write(&junk, "hello").unwrap();
+        assert!(run(&mut st, Act::Import(junk), &root, &idle).unwrap_err().contains("not a save or export we recognise"));
+        assert!(st.pending.is_none());
+        let mut edited = s.clone();
+        edited.set_name("Imported").unwrap();
+        let j = base.join("s.save.json");
+        std::fs::write(&j, section::export(&c.name, &edited)).unwrap();
+        run(&mut st, Act::Import(j), &root, &idle).unwrap();
+        let p = st.pending.as_ref().unwrap();
+        assert_eq!((p.kind.clone(), p.items.len(), p.items[0].change), (imp::Kind::Section(c.name.clone()), 1, Change::Replace));
+        assert!(run(&mut st, Act::ApplyImport, &root, &busy).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        run(&mut st, Act::ApplyImport, &root, &idle).unwrap();
+        assert!(st.pending.is_none());
+        assert_eq!(st.open.as_ref().unwrap().save.clone().unwrap().unwrap().header.name, "Imported");
+        assert_eq!(store::backups(&root, &path).len(), 1);
         let _ = std::fs::remove_dir_all(&base);
     }
 }

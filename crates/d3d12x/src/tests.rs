@@ -520,12 +520,18 @@ fn texture_views_samplers_targets_and_nulls_round_trip() {
         rig.r.create_srv(d, std::ptr::null(), start + 64); // depth read as R32_FLOAT
         rig.r.create_srv(std::ptr::null_mut(), &D3D12_SHADER_RESOURCE_VIEW_DESC { ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D, ..Default::default() }, start + 96);
         rig.r.create_cbv(std::ptr::null(), start + 128);
+        // a ray-tracing acceleration structure view (dimension 11, no resource: the title's, loading past its intro)
+        let mut tlas = D3D12_SHADER_RESOURCE_VIEW_DESC { ViewDimension: D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE, ..Default::default() };
+        tlas.Anonymous.RaytracingAccelerationStructure.Location = 0x2_0000_0000;
+        rig.r.create_srv(std::ptr::null_mut(), &tlas, start + 192);
     }
     assert_eq!(prim(0), "srv texture 0x0 fmt 29 dim 5");
     assert_eq!(prim(1), "uav texture 0x0 fmt 29 dim 5");
     assert_eq!(prim(2), "srv texture 0x0 fmt 41 dim 5");
     assert_eq!(prim(3), "null texture dim 4");
     assert_eq!(prim(4), "null buffer");
+    // never a texture-shaped null with a format: the host removes the device for that
+    assert_eq!(prim(6), "null buffer");
     assert!(matches!(record_at(start), Some(Record::Entry { .. })));
     assert_eq!(st.shadow.as_ref().unwrap().read(0), [0, 0, st.null_index, 0]);
     // the same view twice: one entry

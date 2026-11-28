@@ -52,7 +52,7 @@ cannot test  AMD — FSR 4, AMD drivers, AMD memory/tiling behaviour, AMD device
 
 Everything that can be proven on NVIDIA is proven there first. AMD is closed by tester runs (Build 9), **deferred by the owner (2026-11-27)**: the work proceeds NVIDIA-first, and the FSR backend stays built and tested standalone.
 
-## The nine decisions
+## The decisions
 
 ### 1. GPU-owned memory lives in VRAM; CPU-written memory is uploaded as dirty chunks
 
@@ -175,6 +175,22 @@ index x stride + offset, and an index at or past the count reads 0). **The runti
 heap: 16 bytes per heap index (stride, records, 0, 0), written when it builds the host view from the console
 descriptor, read by shaders at `register(t0, space101)`.** One 8-byte load per indexed access, exact console
 semantics, no per-stride shader variants. Build 5 writes it.
+
+### 10. One data folder, portable by default (owner question, 2026-11-28)
+
+Every per-user path comes from `crates/storage`. Beside the launcher (`<exe>\data\`) when that folder is
+writable, so a user can move or delete everything as one folder; per-user AppData otherwise (Program Files), and
+always for dev builds under cargo's `target`. One folder per game keyed by its package identity: settings, saves,
+S: storage and overlay apart from `cache\<build>\` (shader library, pipelines, images), which is regenerable and can
+sit on another drive. Saves and caches never mix: clearing caches cannot reach saves. The game's own files are only
+ever read in place. Reason: one place to back up, move or wipe; big regenerable data kept apart from small
+irreplaceable data.
+
+### 11. Save editing is offline, single-player, and never in place (owner request, 2026-11-28)
+
+The launcher edits only unsigned save kinds, recomputes the title's own checksums, writes through the runtime's
+all-or-nothing container path after a timestamped backup, refuses while the title runs, and refuses anything the
+title's load checks would reject. Signed/encrypted kinds and anything online-related are read-only.
 
 ## Order of work — each step ends in a number
 

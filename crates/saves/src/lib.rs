@@ -7,15 +7,22 @@
 //! - [`store`]: containers on disk; every write backed up first, refused while the title runs, made
 //!   through the runtime's all-or-nothing path; container import and export with a manifest; every save
 //!   of a game at once
+//! - [`body`]: the bodies of the two kinds real saves use: the player profile (id, value pairs) and
+//!   `SettingsProfileSettings` (JSON with hashed member names), edited in place
+//! - [`triumph`]: import from the owner's older build's save folders (read only)
+//! - [`import`]: the one Import: detect what a file or folder is, plan (preview), apply (backup first)
 //! - [`json`]: the small strict JSON the exports use
 //!
 //! Offline single-player saves only: nothing here talks to a network, and nothing named like online
 //! state is ever written.
 
+pub mod body;
 pub mod format;
+pub mod import;
 pub mod json;
 pub mod section;
 pub mod store;
+pub mod triumph;
 
 /// Writes a new file (refusing to replace one), flushed.
 pub(crate) fn write_new(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {

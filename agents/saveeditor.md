@@ -40,10 +40,59 @@ tests   rebuild-saves 25 · launcher +1 (the screen's actions end to end: open, 
 - **No new dependencies.** A 300-line strict JSON reader/writer instead of serde.
 - **Backups beside the saves folder** (`GameSave.backups`), never inside it, so the runtime never sees them.
 
-## Next (needs a real save)
+## Second pass: real saves (branch `agent/saveeditor2`)
 
-- read one: `SettingsProfileSettings`' and `Player`'s kinds, the stamp's unit, the body layout; then typed
-  fields for the settings body.
+The owner's older build wrote `Player` (kind 3) and `SettingsProfileSettings` (kind 2). Copies are in the
+session scratchpad, never in git.
+
+- **The parser takes both real saves.** Every checksum and load check passes, and both blobs and both
+  bodies round-trip byte-identically (`savedump`).
+- **Resolved:**
+  - the stamp is Unix seconds UTC (it equals the old build's version-folder time to the second);
+  - the ASAV words +0x154..+0x164 are 0 for kinds 2 and 3;
+  - the header's copies match;
+  - the ASAV text is the container's name (the gamertag for `Player`).
+- **Player body:** count, a word 3, `joaat(entries)`, (id u32, value u32) × count, then zeros. The ids are
+  numeric and unnamed; values are editable.
+- **Settings body:** the engine's parser-tree JSON (`0x1440692c0`), with member keys
+  `"$0x<joaat(name)>"`.
+  - 53 of 219 key hashes are named (each checked by joaat); 166 stay `#hash`.
+  - All 260 values have typed editing that keeps the body's length; `$v`, versions and `$data` are
+    read-only.
+- **Import from Triumph** (`triumph.rs`): reads the fork's `<name>~<fnv>\v<N>\{0,1,manifest}`
+  (highest committed version), checks everything, then writes through `write_container`. The fork's
+  folder is never touched (a test snapshots it).
+
+## Third pass: one Import (branch `agent/saveeditor3`)
+
+The owner asked for one **Import**, not "Import from Triumph". `import.rs` has `detect` (what a file or
+folder is), `plan` (checked, nothing written) and `apply` (plans again, must match, then backup and
+write). It recognises:
+
+- a storage export zip (handed to `rebuild_storage`);
+- one `.gsc` with its `.gsc.json`;
+- a decoded-save JSON;
+- a folder of per-container exports;
+- older-build saves at any level (`triumph::find`).
+
+Anything else gives "not a save or export we recognise". A folder holding both exports and
+older-build saves is refused as ambiguous.
+
+The Saves screen now has one Import (a file or a folder, or drop either on the window). It shows a
+preview of each container (added, replaced or unchanged), then **Back up and import**. The old
+per-container Import, Import JSON, Import all and Import from Triumph buttons are gone. Export is
+unchanged.
+
+The storage export preview (`import_plan_view`) is shared with Diagnostics → Storage.
+
+```
+tests   rebuild-saves +8 (import: each kind, older build at 5 levels, unknown/ambiguous, stale plan) · launcher +1 (import_previews_then_writes)
+```
+
+## Next
+
+- names for the profile's ids and for the remaining settings members; a progress save (kinds 1/9,
+  read-only) when one exists.
 
 ## For the lead
 

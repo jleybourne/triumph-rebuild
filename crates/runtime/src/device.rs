@@ -675,6 +675,8 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
         // plan decision 1: the title's CPU-written graphics memory on card pages at its own addresses, kept current
         // by the upload ring (crate::memory); REBUILD_MEMORY=standin keeps the old path
         let model = crate::memory::start(&host, std::env::var_os("REBUILD_WARP").is_some()).is_some();
+        crate::memory::start_vram_log();
+        crate::memory::start_budget_watch();
         // resources, heaps and views behind the device: their memory on card pages at console addresses (the
         // arena), or under the stand-in one 1 GiB upload heap
         let memory: Box<dyn rebuild_d3d12x::Memory> = if model {
@@ -756,6 +758,14 @@ impl rebuild_d3d12x::Memory for Accounted {
         }
         Some(at)
     }
+    fn allocate_lazy(&self, bytes: u64, alignment: u64, heap: &rebuild_d3d12x::format::HeapProperties) -> Option<u64> {
+        let at = self.inner.allocate_lazy(bytes, alignment, heap)?;
+        let t = crate::exports::XMemAlloc(bytes as usize, D3D_ATTRIBUTES) as u64;
+        if t != 0 {
+            self.title.lock().unwrap_or_else(|e| e.into_inner()).insert(at, t);
+        }
+        Some(at)
+    }
     fn free(&self, address: u64, bytes: u64) {
         if let Some(t) = self.title.lock().unwrap_or_else(|e| e.into_inner()).remove(&address) {
             crate::exports::XMemFree(t as *mut c_void, D3D_ATTRIBUTES);
@@ -778,8 +788,15 @@ impl rebuild_d3d12x::Memory for Accounted {
         // a resource the title placed in its own watched memory shares those card pages too
         self.inner.buffer(address, bytes).or_else(|| crate::memory::buffer(address, bytes))
     }
-    fn texture(&self, address: u64, desc: &windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_DESC) -> Option<windows::Win32::Graphics::Direct3D12::ID3D12Resource> {
-        self.inner.texture(address, desc)
+    fn texture(
+        &self,
+        address: u64,
+        console: &windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_DESC,
+        host: &windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_DESC,
+        layout: windows::Win32::Graphics::Direct3D12::D3D12_BARRIER_LAYOUT,
+    ) -> Option<windows::Win32::Graphics::Direct3D12::ID3D12Resource> {
+        // textures over page-mapped GPU memory: reserved, on card pages keyed by the pool pages under them
+        crate::mapped::texture(address, console, host, layout).or_else(|| self.inner.texture(address, console, host, layout))
     }
     fn texture_made(
         &self,
@@ -792,6 +809,7 @@ impl rebuild_d3d12x::Memory for Accounted {
     }
     fn texture_gone(&self, address: u64, host: &windows::Win32::Graphics::Direct3D12::ID3D12Resource) {
         crate::cputex::texture_gone(address, host);
+        crate::mapped::gone(host);
     }
 }
 

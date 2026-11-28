@@ -2081,6 +2081,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 name = "rebuild"
 version = "0.1.0"
 dependencies = [
+ "png 0.17.16",
  "rebuild-cardlock",
  "rebuild-config",
  "rebuild-d3d12x",
@@ -2181,6 +2182,8 @@ dependencies = [
  "embed-resource",
  "png 0.17.16",
  "rebuild-config",
+ "rebuild-gdk",
+ "rebuild-saves",
  "rebuild-storage",
  "rebuild-vfs",
  "rfd",
@@ -2242,6 +2245,14 @@ dependencies = [
  "rebuild-xg",
  "rebuild-xlist",
  "windows",
+]
+
+[[package]]
+name = "rebuild-saves"
+version = "0.1.0"
+dependencies = [
+ "rebuild-gdk",
+ "rebuild-storage",
 ]
 
 [[package]]

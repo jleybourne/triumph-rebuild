@@ -98,10 +98,14 @@ pub struct ListStats {
     /// OMSetRenderTargets calls, and render targets in them the host had no view for (bound as nothing)
     pub rt_sets: u32,
     pub rt_unmapped: u32,
+    /// TSC ticks spent inside the list's slot functions (ours plus the host runtime's and driver's) since the
+    /// reset: what translation costs the recording thread ([`cost`])
+    pub ticks: u64,
 }
 
-/// The list as the title sees it: [`TITLE_BYTES`] of console layout, then ours.
-#[repr(C, align(16))]
+/// The list as the title sees it: [`TITLE_BYTES`] of console layout, then ours (from the next 64-byte line, so the
+/// part every call touches, [`Rec`], is one cache line).
+#[repr(C, align(64))]
 pub(crate) struct ListObject {
     pub header: Header,
     /// list type: 0 direct, 2 compute, 3 copy
@@ -120,7 +124,7 @@ const _: () = {
     assert!(offset_of!(ListObject, kind) == 0x10);
     assert!(offset_of!(ListObject, put) == 0x18);
     assert!(offset_of!(ListObject, title) == 0x40);
-    assert!(offset_of!(ListObject, ours) == TITLE_BYTES);
+    assert!(offset_of!(ListObject, ours) >= TITLE_BYTES && offset_of!(ListObject, ours) < TITLE_BYTES + 64);
 };
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -257,15 +261,12 @@ impl Shadow {
     }
 }
 
-/// Descriptor memory a list's translated programs read through tables, per heap: synced before submission.
-#[derive(Clone, Copy, Default)]
+/// Descriptor memory a list's translated programs read through one table: synced before submission.
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Span {
-    heap: u64,
     lo: u64,
     hi: u64,
 }
-
-const SPANS: usize = 4;
 
 pub(crate) struct ListState {
     host: Arc<dyn ListHost>,
@@ -293,7 +294,7 @@ pub(crate) struct ListState {
     stats: ListStats,
     private: Vec<(GUID, Vec<u8>)>,
     /// tables the translated programs read since the reset ([`sync_descriptors`])
-    spans: [Span; SPANS],
+    spans: Vec<Span>,
     /// the device's timestamp rings (none on a stand-in backend)
     stamps: Option<Arc<super::stamps::Stamps>>,
     /// timestamp labels of the current host list, resolved at its end: (query, title buffer, its offset)
@@ -304,10 +305,218 @@ pub(crate) struct ListState {
     /// `work_count` then ([`twin`])
     twin_edges: Vec<(Raw, bool, u64)>,
     twin_plan: twin::Plan,
+    /// of `stats.ticks`, what [`cost`] has been given already
+    ticks_counted: u64,
+    /// calls that ran as they arrived while the list kept records, since the last Close ([`mix`])
+    as_arrived: u32,
+    /// what every call touches, in one cache line
+    rec: Rec,
 }
+
+/// The part of a list every call touches, in one cache line: the kept calls ([`Op`]) and the words their
+/// pointed-to arguments were copied into, whether calls are kept ([`mode`], chosen at create and each reset), and
+/// the call count and ticks since the reset ([`ListStats::calls`], [`ListStats::ticks`]).
+#[repr(C, align(64))]
+struct Rec {
+    ops: Vec<Op>,
+    data: Vec<u64>,
+    calls: u32,
+    defer: bool,
+    ticks: u64,
+}
+
+const _: () = assert!(size_of::<Rec>() == 64);
 
 // SAFETY: a list is recorded by one thread at a time (D3D12's rule, and the title's).
 unsafe impl Send for ListState {}
+
+/// What translation costs the threads that record: TSC ticks inside the list slot functions (our translation
+/// plus the host runtime and driver calls it makes), summed over lists at each Close and Reset, with the draws
+/// and dispatches those lists recorded. The frame line's `xlate` and `xdraw` are made from these.
+///
+/// Every slot function that records holds a [`Tick`] for its duration: two `rdtsc` reads (~10-20 ns), into the
+/// list's own [`ListStats::ticks`] (no atomics, no sharing). A call kept as a record is timed one time in
+/// [`SAMPLE`] and counted that many times; Close, where a kept list is translated, is always timed. A list hands
+/// its ticks to the totals here once per Close (one relaxed add per list).
+pub mod cost {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+
+    static TICKS: AtomicU64 = AtomicU64::new(0);
+    static WORK: AtomicU64 = AtomicU64::new(0);
+    static LISTS: AtomicU64 = AtomicU64::new(0);
+
+    /// The time-stamp counter.
+    #[inline(always)]
+    pub fn now() -> u64 {
+        // SAFETY: rdtsc has no preconditions (x86-64 only, as is this crate's console side)
+        unsafe { core::arch::x86_64::_rdtsc() }
+    }
+
+    #[inline]
+    pub(crate) fn add(ticks: u64, work: u64) {
+        TICKS.fetch_add(ticks, Ordering::Relaxed);
+        WORK.fetch_add(work, Ordering::Relaxed);
+        LISTS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// (ticks, draws and dispatches, lists) since the start.
+    pub fn totals() -> (u64, u64, u64) {
+        (TICKS.load(Ordering::Relaxed), WORK.load(Ordering::Relaxed), LISTS.load(Ordering::Relaxed))
+    }
+
+    /// TSC ticks a microsecond, measured once (20 ms against the OS clock, on the first caller's thread).
+    pub fn ticks_per_us() -> f64 {
+        static T: OnceLock<f64> = OnceLock::new();
+        *T.get_or_init(|| {
+            let (t0, c0) = (std::time::Instant::now(), now());
+            while t0.elapsed() < std::time::Duration::from_millis(20) {
+                std::hint::spin_loop();
+            }
+            let (us, c) = (t0.elapsed().as_secs_f64() * 1e6, now() - c0);
+            (c as f64 / us).max(1.0)
+        })
+    }
+
+    /// Ticks as milliseconds.
+    pub fn ms(ticks: u64) -> f64 {
+        ticks as f64 / ticks_per_us() / 1000.0
+    }
+}
+
+/// `REBUILD_XLATE_SLOTS=1` (diagnostic): ticks and calls by list function, for the run report ([`report`]). Off:
+/// one relaxed load a call.
+pub mod by_slot {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::OnceLock;
+
+    pub const NAMES: [&str; 53] = ["get_private_data", "set_private_data", "get_device", "close", "reset", "draw_instanced", "draw_indexed", "dispatch", "dispatch_mesh", "execute_indirect", "copy_buffer_region", "copy_resource", "copy_memory", "discard", "topology", "viewports", "scissors", "blend_factor", "stencil_ref", "depth_bounds", "set_pipeline", "resource_barrier", "barrier_groups", "pipe_sync", "descriptor_heaps", "root_signature", "root_table", "root_view", "root_constant", "root_constants", "index_buffer", "vertex_buffers", "render_targets", "clear_dsv", "clear_rtv", "clear_uav_uint", "clear_uav_float", "label", "memory_wait", "allocate_upload", "reset: host Reset", "reset: Close before", "label: cpu_memory", "label: host label", "label: GPU stamp", "split: Close", "split: host Reset", "split: replay", "close: stamps", "close: host Close", "reset: set_pipeline", "stamp: cpu_memory", "stamp: EndQuery"];
+    static TICKS: [AtomicU64; NAMES.len()] = [const { AtomicU64::new(0) }; NAMES.len()];
+    static CALLS: [AtomicU64; NAMES.len()] = [const { AtomicU64::new(0) }; NAMES.len()];
+    static ON: AtomicBool = AtomicBool::new(false);
+
+    /// Read `REBUILD_XLATE_SLOTS` (once, at the first list).
+    pub(crate) fn init() {
+        static I: OnceLock<()> = OnceLock::new();
+        I.get_or_init(|| ON.store(std::env::var("REBUILD_XLATE_SLOTS").is_ok_and(|v| v.trim() == "1"), Ordering::Relaxed));
+    }
+
+    #[inline(always)]
+    pub(crate) fn on() -> bool {
+        ON.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub(crate) fn add(i: usize, ticks: u64) {
+        TICKS[i].fetch_add(ticks, Ordering::Relaxed);
+        CALLS[i].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A part of a function, timed while on ([`part`]).
+    pub(crate) struct Part(usize, u64);
+
+    impl Drop for Part {
+        #[inline]
+        fn drop(&mut self) {
+            if self.1 != 0 {
+                add(self.0, super::cost::now().wrapping_sub(self.1));
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn part(i: usize) -> Part {
+        Part(i, if on() { super::cost::now() } else { 0 })
+    }
+
+    /// One line a function, most time first; `None` when off.
+    pub fn report() -> Option<Vec<String>> {
+        if !on() {
+            return None;
+        }
+        let mut v: Vec<(u64, u64, &str)> = NAMES.iter().enumerate().map(|(i, n)| (TICKS[i].load(Ordering::Relaxed), CALLS[i].load(Ordering::Relaxed), *n)).filter(|t| t.1 > 0).collect();
+        v.sort_by(|a, b| b.0.cmp(&a.0));
+        Some(
+            v.iter()
+                .map(|(t, c, n)| format!("{n:<20} {c:>9} calls {:>10.1} ms {:>9.2} µs a call", super::cost::ms(*t), super::cost::ms(*t) * 1000.0 / *c as f64))
+                .collect(),
+        )
+    }
+}
+
+/// Held for a slot function's duration: its ticks go to the list's [`ListStats::ticks`].
+struct Tick {
+    /// 0: this call is not timed
+    at: u64,
+    /// index in [`by_slot::NAMES`]
+    slot: u16,
+    /// what a timed call counts for (1, or [`SAMPLE`] for a sampled record)
+    scale: u64,
+    to: *mut u64,
+}
+
+/// A call kept as a record ([`mode`]) is timed one time in `SAMPLE` (by a hash of the list's call count, so no
+/// period in the title's calls lines up with it) and counts `SAMPLE` times: records cost the same few
+/// nanoseconds each, and two `rdtsc` reads would cost as much as the record itself. Every other call, Close
+/// (where a kept list is translated) and Reset are always timed.
+const SAMPLE: u64 = 8;
+
+impl Tick {
+    /// Every call timed.
+    #[inline(always)]
+    fn on(this: Raw, slot: u16) -> Tick {
+        // SAFETY: title code calls list methods on lists we handed out; a raw place, no reference is made
+        let to = unsafe { std::ptr::addr_of_mut!((*this.cast::<ListObject>()).ours.rec.ticks) };
+        Tick { at: cost::now(), slot, scale: 1, to }
+    }
+
+    /// A call that may be kept as a record: sampled while the list keeps records, timed otherwise.
+    #[inline(always)]
+    fn rec(this: Raw, slot: u16) -> Tick {
+        // SAFETY: as in `on`; plain reads of the list's own fields, before the call makes its reference
+        let (defer, calls, to) = unsafe {
+            let r = std::ptr::addr_of_mut!((*this.cast::<ListObject>()).ours.rec);
+            (std::ptr::addr_of!((*r).defer).read(), std::ptr::addr_of!((*r).calls).read(), std::ptr::addr_of_mut!((*r).ticks))
+        };
+        if !defer {
+            return Tick { at: cost::now(), slot, scale: 1, to };
+        }
+        if calls.wrapping_mul(0x9E37_79B9) >> 29 != 0 {
+            return Tick { at: 0, slot, scale: 0, to };
+        }
+        Tick { at: cost::now(), slot, scale: SAMPLE, to }
+    }
+}
+
+impl Drop for Tick {
+    #[inline(always)]
+    fn drop(&mut self) {
+        if self.at != 0 {
+            let t = cost::now().wrapping_sub(self.at).wrapping_mul(self.scale);
+            // SAFETY: the list outlives the call (the title holds a reference); one thread records it
+            unsafe { *self.to = (*self.to).wrapping_add(t) };
+            if by_slot::on() {
+                by_slot::add(usize::from(self.slot), t);
+            }
+        }
+    }
+}
+
+impl ListState {
+    /// Hand the ticks and work since the last hand-over to [`cost`] (at Close, and at Reset before the counts
+    /// start again).
+    fn count_cost(&mut self) {
+        let t = self.rec.ticks.wrapping_sub(self.ticks_counted);
+        if t != 0 {
+            cost::add(t, u64::from(self.stats.draws) + u64::from(self.stats.dispatches));
+        }
+        self.ticks_counted = self.rec.ticks;
+        if self.as_arrived != 0 {
+            mix::AS_ARRIVED.fetch_add(u64::from(self.as_arrived), std::sync::atomic::Ordering::Relaxed);
+            self.as_arrived = 0;
+        }
+    }
+}
 
 macro_rules! call {
     ($s:ident . $m:ident ( $($a:expr),* $(,)? )) => {
@@ -590,25 +799,16 @@ impl ListState {
         }
     }
 
-    /// Descriptors `at..at + bytes` of the heap at `heap` are read by this list: synced before submission.
+    /// Descriptors `at..at + bytes` of the heap at `heap` are read by this list: synced before submission. Each
+    /// table is kept as it is (a repeat of the last one is not): the tables of one list can lie anywhere in a heap
+    /// of a million descriptors (the title's UI walks a ring through it), and one span over all of them made the
+    /// submit thread sync hundreds of thousands of slots no program reads (`runs/build6-lists.md`).
     #[inline]
-    fn note_span(&mut self, heap: u64, at: u64, bytes: u64) {
-        let end = at + bytes;
-        for s in &mut self.spans {
-            if s.heap == heap && s.hi > s.lo {
-                s.lo = s.lo.min(at);
-                s.hi = s.hi.max(end);
-                return;
-            }
-            if s.hi == s.lo {
-                *s = Span { heap, lo: at, hi: end };
-                return;
-            }
+    fn note_span(&mut self, _heap: u64, at: u64, bytes: u64) {
+        let span = Span { lo: at, hi: at + bytes };
+        if self.spans.last() != Some(&span) {
+            self.spans.push(span);
         }
-        // more heaps than spans: the last one grows (still exact for the slots it covers)
-        let s = &mut self.spans[SPANS - 1];
-        s.lo = s.lo.min(at);
-        s.hi = s.hi.max(end);
     }
 
     /// A barrier that orders every earlier shader write before every later access.
@@ -662,11 +862,15 @@ impl ListState {
         if address == 0 || address % 8 != 0 || self.stamps.is_none() {
             return false;
         }
-        let Some((resource, offset)) = self.host.cpu_memory(address).and_then(|r| r.place(address, 8)) else { return false };
+        let p = by_slot::part(51);
+        let placed = self.host.cpu_memory(address).and_then(|r| r.place(address, 8));
+        drop(p);
+        let Some((resource, offset)) = placed else { return false };
         if offset % 8 != 0 {
             return false;
         }
         let Some((heap, i)) = self.stamps.as_ref().and_then(|s| s.take(self.kind, 1)) else { return false };
+        let _p = by_slot::part(52);
         call!(self.EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, i));
         self.stamp_labels.push((i, resource, offset));
         true
@@ -677,8 +881,12 @@ impl ListState {
             return E_FAIL;
         }
         self.open = false;
+        let p = by_slot::part(48);
         self.close_stamps();
+        drop(p);
+        let p = by_slot::part(49);
         let hr = call!(self.Close());
+        drop(p);
         // a list the host refused is never executed (the submit skips it); the title sees the console's S_OK
         let failed = hr.is_err();
         if let Some(seg) = self.segments.last() {
@@ -782,16 +990,20 @@ impl ListState {
             { self.stats.refused += 1; trace::refused("split") };
             return;
         }
+        let p = by_slot::part(45);
         let _ = self.close_current();
+        drop(p);
         let me = self as *const Self as usize;
         let Some(allocator) = self.allocator().and_then(|a| a.take(me).ok()) else {
             { self.stats.refused += 1; trace::refused("split") };
             return;
         };
+        let p = by_slot::part(46);
         let next = match self.spare.pop() {
             Some(h) => unsafe { h.list.Reset(&allocator, None) }.map(|_| h),
             None => self.backend.list(self.kind, &allocator).map(HostList::new),
         };
+        drop(p);
         match next {
             Ok(h) => {
                 self.segments.push(Segment { list: h, waits: vec![wait] });
@@ -799,6 +1011,7 @@ impl ListState {
                 self.point_at_current();
                 self.open_stamp();
                 self.stats.splits += 1;
+                let _p = by_slot::part(47);
                 self.replay();
                 self.sh.library_layout_lost(0);
                 self.sh.library_layout_lost(1);
@@ -891,12 +1104,268 @@ impl ListState {
     }
 }
 
+/// A list call that is translated as it arrives (every call but the [`Op`] ones): what is kept as records is
+/// translated first, so the call sees the list as the title recorded it.
 #[inline]
 fn enter<'a>(this: Raw) -> &'a mut ListState {
+    let s = enter_rec(this);
+    if s.rec.defer {
+        s.as_arrived += 1;
+    }
+    if !s.rec.ops.is_empty() {
+        s.flush();
+    }
+    s
+}
+
+/// A list call that may be kept as a record ([`Op`]).
+#[inline]
+fn enter_rec<'a>(this: Raw) -> &'a mut ListState {
     // SAFETY: title code calls list methods on lists we handed out, one thread at a time.
     let s = unsafe { &mut (*this.cast::<ListObject>()).ours };
-    s.stats.calls += 1;
+    s.rec.calls += 1;
     s
+}
+
+// ---- translation at Close ----
+
+/// When lists are translated (`REBUILD_XLATE`, read once; [`set`] for the benches):
+///
+/// - `close` (the default): the calls that only set state, draw or dispatch are kept as [`Op`] records (a
+///   32-byte record each, arguments that point into the title's memory copied beside them), and the list is
+///   translated in one pass at Close, on the recording thread. Any other call (targets, clears, copies, labels,
+///   memory waits, barrier groups, ...) first translates what is kept, then runs as it arrives, so every call
+///   sees the list exactly as the title recorded it.
+/// - `call`: every call is translated as it arrives.
+///
+/// Either way the host list holds the same commands in the same order; Build 6 measures which costs the
+/// recording thread less (`runs/build6-lists.md`).
+pub mod mode {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    static MODE: AtomicU8 = AtomicU8::new(0);
+    const CLOSE: u8 = 1;
+    const CALL: u8 = 2;
+
+    /// Lists made or reset from now on keep their calls as records and translate at Close.
+    pub fn at_close() -> bool {
+        match MODE.load(Ordering::Relaxed) {
+            0 => {
+                let m = match std::env::var("REBUILD_XLATE").map(|v| v.trim().to_ascii_lowercase()) {
+                    Ok(v) if v == "call" => CALL,
+                    _ => CLOSE,
+                };
+                let _ = MODE.compare_exchange(0, m, Ordering::Relaxed, Ordering::Relaxed);
+                MODE.load(Ordering::Relaxed) == CLOSE
+            }
+            m => m == CLOSE,
+        }
+    }
+
+    /// Choose for lists made or reset from now on.
+    pub fn set(at_close: bool) {
+        MODE.store(if at_close { CLOSE } else { CALL }, Ordering::Relaxed);
+    }
+
+    /// `close` or `call`, for reports.
+    pub fn name() -> &'static str {
+        if at_close() {
+            "close"
+        } else {
+            "call"
+        }
+    }
+}
+
+/// No copied argument (the title passed null).
+const NONE_AT: u32 = u32::MAX;
+
+/// A list call kept for translation at Close: its arguments, with what they pointed to copied into the list's
+/// record words (`at`, an index into [`ListState::data`]). Console objects and addresses are kept as the title
+/// passed them; translation maps them at Close, as it would have at the call.
+#[derive(Clone, Copy)]
+enum Op {
+    Draw(u32, u32, u32, u32),
+    DrawIndexed(u32, u32, u32, i32, u32),
+    Dispatch(u32, u32, u32),
+    /// signature, max, args, args offset, count, count offset: six words at `at`
+    Indirect(u32),
+    Topology(i32),
+    Viewports(u32, u32),
+    Scissors(u32, u32),
+    Blend(u32),
+    Stencil(u32),
+    Pipeline(Raw),
+    Barriers(u32, u32),
+    Heaps(u32, u32),
+    RootSignature(u8, Raw),
+    Table(u8, u32, u64),
+    View(u8, u8, u32, u64),
+    Constant(u8, u32, u32, u32),
+    Constants(u8, u32, u32, u32, u32),
+    IndexBuffer(u32),
+    VertexBuffers(u32, u32, u32),
+}
+
+const _: () = assert!(size_of::<Op>() <= 32);
+
+impl Op {
+    /// Its index in [`mix::NAMES`].
+    #[inline]
+    fn kind(&self) -> usize {
+        match self {
+            Op::Draw(..) => 0,
+            Op::DrawIndexed(..) => 1,
+            Op::Dispatch(..) => 2,
+            Op::Indirect(..) => 3,
+            Op::Topology(..) => 4,
+            Op::Viewports(..) => 5,
+            Op::Scissors(..) => 6,
+            Op::Blend(..) => 7,
+            Op::Stencil(..) => 8,
+            Op::Pipeline(..) => 9,
+            Op::Barriers(..) => 10,
+            Op::Heaps(..) => 11,
+            Op::RootSignature(..) => 12,
+            Op::Table(..) => 13,
+            Op::View(..) => 14,
+            Op::Constant(..) => 15,
+            Op::Constants(..) => 16,
+            Op::IndexBuffer(..) => 17,
+            Op::VertexBuffers(..) => 18,
+        }
+    }
+}
+
+/// The real call mix of lists kept as records ([`mode`]): records translated at Close by kind, the batches they
+/// were translated in, and the calls that ran as they arrived (each ends a batch). Process-wide; added once per
+/// batch (no atomics per call). The run report prints [`report`].
+pub mod mix {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub const OPS: usize = 19;
+    pub const NAMES: [&str; OPS] = [
+        "draw", "draw indexed", "dispatch", "indirect", "topology", "viewports", "scissors", "blend factor", "stencil ref", "pipeline", "barriers",
+        "heaps", "root signature", "root table", "root view", "root constant", "root constants", "index buffer", "vertex buffers",
+    ];
+    static COUNTS: [AtomicU64; OPS] = [const { AtomicU64::new(0) }; OPS];
+    static BATCHES: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static AS_ARRIVED: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn flushed(kinds: &[u32; OPS]) {
+        BATCHES.fetch_add(1, Ordering::Relaxed);
+        for (c, &n) in COUNTS.iter().zip(kinds) {
+            if n != 0 {
+                c.fetch_add(u64::from(n), Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// (records by kind, batches, calls that ran as they arrived).
+    pub fn totals() -> ([u64; OPS], u64, u64) {
+        let mut k = [0u64; OPS];
+        for (o, c) in k.iter_mut().zip(&COUNTS) {
+            *o = c.load(Ordering::Relaxed);
+        }
+        (k, BATCHES.load(Ordering::Relaxed), AS_ARRIVED.load(Ordering::Relaxed))
+    }
+
+    /// One line: what the records were, most first.
+    pub fn report() -> String {
+        let (k, batches, other) = totals();
+        let records: u64 = k.iter().sum();
+        let mut by: Vec<(u64, &str)> = k.iter().copied().zip(NAMES).filter(|(n, _)| *n > 0).collect();
+        by.sort_by(|a, b| b.0.cmp(&a.0));
+        let list: Vec<String> = by.iter().map(|(n, name)| format!("{name} {n}")).collect();
+        format!(
+            "{records} calls kept as records and translated at Close in {batches} batches ({:.1} a batch); {other} calls ran as they arrived (targets, clears, copies, labels, waits, Close, Reset, ...); records: {}",
+            records as f64 / batches.max(1) as f64,
+            list.join(", ")
+        )
+    }
+}
+
+impl ListState {
+    /// Copy `items` into the record words; their index there.
+    #[inline]
+    fn stash<T: Copy>(&mut self, items: &[T]) -> u32 {
+        const { assert!(align_of::<T>() <= 8) };
+        let at = self.rec.data.len();
+        let bytes = std::mem::size_of_val(items);
+        self.rec.data.resize(at + bytes.div_ceil(8), 0);
+        // SAFETY: `bytes` fit in the words just made; T is plain data
+        unsafe { std::ptr::copy_nonoverlapping(items.as_ptr().cast::<u8>(), self.rec.data.as_mut_ptr().add(at).cast::<u8>(), bytes) };
+        at as u32
+    }
+
+    /// Translate every kept call, in order, then forget them (their buffers stay for the next ones).
+    #[inline(never)]
+    fn flush(&mut self) {
+        if self.rec.ops.is_empty() {
+            return;
+        }
+        let mut ops = std::mem::take(&mut self.rec.ops);
+        let mut data = std::mem::take(&mut self.rec.data);
+        let words = data.as_ptr();
+        let at = |i: u32| -> *const u8 {
+            if i == NONE_AT {
+                std::ptr::null()
+            } else {
+                // SAFETY: an index `stash` returned for this list's words
+                unsafe { words.add(i as usize).cast::<u8>() }
+            }
+        };
+        let mut kinds = [0u32; mix::OPS];
+        for op in &ops {
+            kinds[op.kind()] += 1;
+            // SAFETY: each body is the call's own, given the arguments the title passed (copies of what they
+            // pointed to)
+            unsafe {
+                match *op {
+                    Op::Draw(a, b, c, d) => draw_instanced_now(self, a, b, c, d),
+                    Op::DrawIndexed(a, b, c, d, e) => draw_indexed_now(self, a, b, c, d, e),
+                    Op::Dispatch(x, y, z) => dispatch_now(self, x, y, z),
+                    Op::Indirect(i) => {
+                        let w = at(i).cast::<u64>();
+                        execute_indirect_now(self, *w as Raw, *w.add(1) as u32, *w.add(2) as Raw, *w.add(3), *w.add(4) as Raw, *w.add(5));
+                    }
+                    Op::Topology(t) => topology_now(self, t),
+                    Op::Viewports(n, i) => viewports_now(self, n, at(i).cast()),
+                    Op::Scissors(n, i) => scissors_now(self, n, at(i).cast()),
+                    Op::Blend(i) => blend_factor_now(self, at(i).cast()),
+                    Op::Stencil(r) => stencil_ref_now(self, r),
+                    Op::Pipeline(p) => self.set_pipeline(p),
+                    Op::Barriers(n, i) => {
+                        resource_barrier_now(self, n, at(i).cast());
+                    }
+                    Op::Heaps(n, i) => descriptor_heaps_now(self, n, at(i).cast()),
+                    Op::RootSignature(0, r) => root_signature_now::<0>(self, r),
+                    Op::RootSignature(_, r) => root_signature_now::<1>(self, r),
+                    Op::Table(0, slot, h) => root_table_now::<0>(self, slot, h),
+                    Op::Table(_, slot, h) => root_table_now::<1>(self, slot, h),
+                    Op::View(k, v, slot, va) => match (k, v) {
+                        (0, 2) => root_view_now::<0, 2>(self, slot, va),
+                        (0, 3) => root_view_now::<0, 3>(self, slot, va),
+                        (0, _) => root_view_now::<0, 4>(self, slot, va),
+                        (_, 2) => root_view_now::<1, 2>(self, slot, va),
+                        (_, 3) => root_view_now::<1, 3>(self, slot, va),
+                        _ => root_view_now::<1, 4>(self, slot, va),
+                    },
+                    Op::Constant(0, slot, v, o) => root_constant_now::<0>(self, slot, v, o),
+                    Op::Constant(_, slot, v, o) => root_constant_now::<1>(self, slot, v, o),
+                    Op::Constants(0, slot, n, i, o) => root_constants_now::<0>(self, slot, n, at(i).cast(), o),
+                    Op::Constants(_, slot, n, i, o) => root_constants_now::<1>(self, slot, n, at(i).cast(), o),
+                    Op::IndexBuffer(i) => index_buffer_now(self, at(i).cast()),
+                    Op::VertexBuffers(start, n, i) => vertex_buffers_now(self, start, n, at(i).cast()),
+                }
+            }
+        }
+        mix::flushed(&kinds);
+        ops.clear();
+        data.clear();
+        self.rec.ops = ops;
+        self.rec.data = data;
+    }
 }
 
 /// Ours, if `p` is a list we made.
@@ -917,6 +1386,7 @@ pub(crate) fn host_of<'a>(p: Raw) -> Option<&'a Arc<dyn ListHost>> {
 /// `pipeline` (a console pipeline, or null) bound. Device 0x60 and 0x248 hand this pointer to
 /// the title. It starts with one reference; the title's `Release` frees it.
 pub fn create_list(kind: u32, allocator: Raw, pipeline: Raw) -> windows::core::Result<Raw> {
+    by_slot::init();
     let a = alloc::state(allocator).ok_or_else(|| windows::core::Error::from(E_INVALIDARG))?;
     // a new list starts recording: it holds a host allocator of the pool (a temporary holder until it has an address)
     static TEMP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX / 2);
@@ -959,12 +1429,15 @@ pub fn create_list(kind: u32, allocator: Raw, pipeline: Raw) -> windows::core::R
             buffers: Vec::new(),
             stats: ListStats::default(),
             private: Vec::new(),
-            spans: [Span::default(); SPANS],
+            spans: Vec::new(),
             stamps: a.backend.stamps().cloned(),
             stamp_labels: Vec::new(),
             work_count: 0,
             twin_edges: Vec::new(),
             twin_plan: twin::Plan::default(),
+            ticks_counted: 0,
+            as_arrived: 0,
+            rec: Rec { ops: Vec::new(), data: Vec::new(), calls: 0, defer: mode::at_close(), ticks: 0 },
         },
     });
     let p: Raw = Box::into_raw(obj).cast();
@@ -980,6 +1453,7 @@ pub fn create_list(kind: u32, allocator: Raw, pipeline: Raw) -> windows::core::R
 /// A list cut at memory waits has several: use [`segments`].
 pub fn host_list<'a>(list: Raw) -> Option<&'a ID3D12GraphicsCommandList> {
     let s = state(list)?;
+    s.flush();
     match s.segments.as_slice() {
         [one] if one.waits.is_empty() => Some(&one.list.list),
         _ => None,
@@ -994,6 +1468,7 @@ pub fn host_list<'a>(list: Raw) -> Option<&'a ID3D12GraphicsCommandList> {
 /// the outside pipeline. `false` if `list` is not one of ours.
 pub fn forget_bound_state(list: Raw) -> bool {
     let Some(s) = state(list) else { return false };
+    s.flush();
     let (count, console, host) = (s.sh.heap_count, s.sh.heaps_console, s.sh.heaps_host);
     s.sh.clear();
     if count > 0 && s.open {
@@ -1011,17 +1486,41 @@ pub fn forget_bound_state(list: Raw) -> bool {
 /// for a list that is not ours or read no tables.
 pub fn sync_descriptors(list: Raw) -> u32 {
     let Some(s) = state(list) else { return 0 };
-    s.spans.iter().filter(|p| p.hi > p.lo).map(|p| s.host.sync_descriptors(p.lo, p.hi - p.lo)).sum()
+    s.flush();
+    if s.spans.is_empty() {
+        return 0;
+    }
+    // the tables in address order, overlapping and touching ones joined (kept so, for the next submission of
+    // the same list): each slot synced once
+    s.spans.sort_unstable();
+    let mut w = 0;
+    for i in 1..s.spans.len() {
+        let p = s.spans[i];
+        if p.lo <= s.spans[w].hi {
+            s.spans[w].hi = s.spans[w].hi.max(p.hi);
+        } else {
+            w += 1;
+            s.spans[w] = p;
+        }
+    }
+    s.spans.truncate(w + 1);
+    s.spans.iter().map(|p| s.host.sync_descriptors(p.lo, p.hi - p.lo)).sum()
 }
 
 /// The host lists to submit for `list`, in order, each after its waits hold.
 pub fn segments<'a>(list: Raw) -> Option<&'a [Segment]> {
-    state(list).map(|s| &s.segments[..])
+    state(list).map(|s| {
+        s.flush();
+        &s.segments[..]
+    })
 }
 
 /// The list's counts since its last reset.
 pub fn stats(list: Raw) -> Option<ListStats> {
-    state(list).map(|s| s.stats)
+    state(list).map(|s| {
+        s.flush();
+        ListStats { calls: s.rec.calls, ticks: s.rec.ticks, ..s.stats }
+    })
 }
 
 /// `QueryInterface` on the device the host side names (or `E_NOINTERFACE` without one).
@@ -1096,7 +1595,8 @@ unsafe extern "system" fn get_private_data(this: Raw, guid: *const GUID, size: *
     if guid.is_null() || size.is_null() {
         return E_INVALIDARG;
     }
-    let s = enter(this);
+    let _t = Tick::on(this, 0);
+    let s = enter_rec(this);
     unsafe {
         let Some((_, v)) = s.private.iter().find(|(g, _)| *g == *guid) else {
             *size = 0;
@@ -1119,7 +1619,8 @@ unsafe extern "system" fn set_private_data(this: Raw, guid: *const GUID, size: u
     if guid.is_null() {
         return E_INVALIDARG;
     }
-    let s = enter(this);
+    let _t = Tick::on(this, 1);
+    let s = enter_rec(this);
     let guid = unsafe { *guid };
     s.private.retain(|(g, _)| *g != guid);
     if !data.is_null() && size > 0 {
@@ -1130,30 +1631,38 @@ unsafe extern "system" fn set_private_data(this: Raw, guid: *const GUID, size: u
 }
 
 unsafe extern "system" fn set_name(this: Raw, _name: *const u16) -> HRESULT {
-    enter(this);
+    enter_rec(this);
     S_OK
 }
 
 unsafe extern "system" fn get_device(this: Raw, iid: *const GUID, out: *mut Raw) -> HRESULT {
-    let s = enter(this);
+    let _t = Tick::on(this, 2);
+    let s = enter_rec(this);
     unsafe { device_query(s.host.device(), iid, out) }
 }
 
 unsafe extern "system" fn get_type(this: Raw) -> u32 {
-    enter(this).kind
+    enter_rec(this).kind
 }
 
-/// 0x48 Close. Plan decision 3's "translate at Close" is already done: every call was
-/// translated as it came, on this thread.
+/// 0x48 Close: what is kept as records is translated now, on this thread (plan decision 3; [`mode`]), and the
+/// list's cost goes to [`cost`].
 unsafe extern "system" fn close(this: Raw) -> HRESULT {
-    enter(this).close_current()
+    let t = Tick::on(this, 3);
+    let hr = enter(this).close_current();
+    drop(t);
+    // SAFETY: as in `enter` (the reference above is no longer used)
+    unsafe { (*this.cast::<ListObject>()).ours.count_cost() };
+    hr
 }
 
 /// 0x50 Reset `(allocator, pipeline)`.
 unsafe extern "system" fn reset(this: Raw, allocator: Raw, pipeline: Raw) -> HRESULT {
+    let _t = Tick::on(this, 4);
     let s = enter(this);
     let Some(a) = alloc::state(allocator) else { return E_INVALIDARG };
     if s.open {
+        let _p = by_slot::part(41);
         let _ = s.close_current();
     }
     let me = &*s as *const _ as usize;
@@ -1166,7 +1675,10 @@ unsafe extern "system" fn reset(this: Raw, allocator: Raw, pipeline: Raw) -> HRE
         s.spare.push(seg.list);
     }
     s.segments[0].waits.clear();
-    if let Err(e) = unsafe { s.segments[0].list.list.Reset(&host_allocator, None) } {
+    let p = by_slot::part(40);
+    let r = unsafe { s.segments[0].list.list.Reset(&host_allocator, None) };
+    drop(p);
+    if let Err(e) = r {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 6 {
             let akind = unsafe { (*allocator.cast::<super::alloc::AllocatorObject>()).kind };
@@ -1182,10 +1694,16 @@ unsafe extern "system" fn reset(this: Raw, allocator: Raw, pipeline: Raw) -> HRE
     s.work_since_barrier = false;
     s.sh.clear();
     s.heaps = [None; 2];
+    s.count_cost();
     s.stats = ListStats::default();
-    s.spans = [Span::default(); SPANS];
+    s.ticks_counted = 0;
+    s.rec.calls = 0;
+    s.rec.ticks = 0;
+    s.rec.defer = mode::at_close();
+    s.spans.clear();
     s.twin_edges.clear();
     if !pipeline.is_null() {
+        let _p = by_slot::part(50);
         s.set_pipeline(pipeline);
     }
     S_OK
@@ -1244,7 +1762,17 @@ pub mod skip {
 // ---- draws, dispatches, copies ----
 
 unsafe extern "system" fn draw_instanced(this: Raw, vertices: u32, instances: u32, first_vertex: u32, first_instance: u32) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 5);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        s.rec.ops.push(Op::Draw(vertices, instances, first_vertex, first_instance));
+        return;
+    }
+    unsafe { draw_instanced_now(s, vertices, instances, first_vertex, first_instance) }
+}
+
+/// [`draw_instanced`] translated (as it arrives, or from its record at Close).
+unsafe fn draw_instanced_now(s: &mut ListState, vertices: u32, instances: u32, first_vertex: u32, first_instance: u32) {
     // a rectangle list with no geometry stage bound: expanded on the CPU when its vertices come from buffers
     if s.sh.topology == Some(super::rect::RECTLIST) && !s.sh.pso_missing && !s.sh.pso_rects && s.sh.pso_topology == 3 && !skip::on(skip::DRAW | skip::RECT) {
         if s.rect_draw(vertices, instances, first_vertex, first_instance) {
@@ -1275,7 +1803,17 @@ unsafe extern "system" fn draw_instanced(this: Raw, vertices: u32, instances: u3
 }
 
 unsafe extern "system" fn draw_indexed(this: Raw, indices: u32, instances: u32, first_index: u32, base_vertex: i32, first_instance: u32) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 6);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        s.rec.ops.push(Op::DrawIndexed(indices, instances, first_index, base_vertex, first_instance));
+        return;
+    }
+    unsafe { draw_indexed_now(s, indices, instances, first_index, base_vertex, first_instance) }
+}
+
+/// [`draw_indexed`] translated (as it arrives, or from its record at Close).
+unsafe fn draw_indexed_now(s: &mut ListState, indices: u32, instances: u32, first_index: u32, base_vertex: i32, first_instance: u32) {
     tr!("draw indexed ({indices}, {instances}, {first_index}, {base_vertex}, {first_instance})");
     if s.sh.pso_missing || skip::on(skip::DRAW) || s.topology_mismatch() {
         s.skip_draw();
@@ -1292,7 +1830,17 @@ unsafe extern "system" fn draw_indexed(this: Raw, indices: u32, instances: u32, 
 }
 
 unsafe extern "system" fn dispatch(this: Raw, x: u32, y: u32, z: u32) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 7);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        s.rec.ops.push(Op::Dispatch(x, y, z));
+        return;
+    }
+    unsafe { dispatch_now(s, x, y, z) }
+}
+
+/// [`dispatch`] translated (as it arrives, or from its record at Close).
+unsafe fn dispatch_now(s: &mut ListState, x: u32, y: u32, z: u32) {
     // more than 65,535 groups in a dimension is invalid in D3D12: never sent
     if s.sh.pso_missing || skip::on(skip::DISPATCH) || x > 65535 || y > 65535 || z > 65535 {
         s.stats.skipped += 1;
@@ -1315,6 +1863,7 @@ unsafe extern "system" fn dispatch_x(this: Raw, x: u32, y: u32, z: u32, _flags: 
 
 /// 0x408 DispatchMesh.
 unsafe extern "system" fn dispatch_mesh(this: Raw, x: u32, y: u32, z: u32) {
+    let _t = Tick::on(this, 8);
     let s = enter(this);
     if s.sh.pso_missing || skip::on(skip::MESH) || x > 65535 || y > 65535 || z > 65535 {
         s.stats.skipped += 1;
@@ -1335,8 +1884,19 @@ unsafe extern "system" fn dispatch_mesh(this: Raw, x: u32, y: u32, z: u32) {
 
 /// 0x1e8 ExecuteIndirect `(signature, max count, args, args offset, count buffer, count offset)`.
 unsafe extern "system" fn execute_indirect(this: Raw, signature: Raw, max: u32, args: Raw, args_offset: u64, count: Raw, count_offset: u64) {
+    let _t = Tick::rec(this, 9);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        let at = s.stash(&[signature as u64, u64::from(max), args as u64, args_offset, count as u64, count_offset]);
+        s.rec.ops.push(Op::Indirect(at));
+        return;
+    }
+    unsafe { execute_indirect_now(s, signature, max, args, args_offset, count, count_offset) }
+}
+
+/// [`execute_indirect`] translated (as it arrives, or from its record at Close).
+unsafe fn execute_indirect_now(s: &mut ListState, signature: Raw, max: u32, args: Raw, args_offset: u64, count: Raw, count_offset: u64) {
     use std::sync::atomic::Ordering::Relaxed;
-    let s = enter(this);
     INDIRECT[indirect::CALLS].fetch_add(1, Relaxed);
     if s.sh.pso_missing || skip::on(skip::INDIRECT) {
         s.stats.skipped += 1;
@@ -1427,6 +1987,7 @@ unsafe extern "system" fn execute_indirect(this: Raw, signature: Raw, max: u32, 
 }
 
 unsafe extern "system" fn copy_buffer_region(this: Raw, dst: Raw, dst_offset: u64, src: Raw, src_offset: u64, bytes: u64) {
+    let _t = Tick::on(this, 10);
     let s = enter(this);
     s.work();
     s.stats.copies += 1;
@@ -1435,6 +1996,7 @@ unsafe extern "system" fn copy_buffer_region(this: Raw, dst: Raw, dst_offset: u6
 }
 
 unsafe extern "system" fn copy_resource(this: Raw, dst: Raw, src: Raw) {
+    let _t = Tick::on(this, 11);
     let s = enter(this);
     s.work();
     s.stats.copies += 1;
@@ -1450,6 +2012,7 @@ unsafe extern "system" fn copy_resource_x(this: Raw, dst: Raw, src: Raw, _flags:
 /// 0x1f0 CopyMemoryToMemoryX `(dst va, src va, size, flags)`: a buffer copy between the host
 /// buffers behind the two addresses.
 unsafe extern "system" fn copy_memory(this: Raw, dst: u64, src: u64, size: u64, _flags: u32) {
+    let _t = Tick::on(this, 12);
     let s = enter(this);
     s.work();
     s.stats.copies += 1;
@@ -1465,6 +2028,7 @@ unsafe extern "system" fn copy_memory(this: Raw, dst: u64, src: u64, size: u64, 
 }
 
 unsafe extern "system" fn discard(this: Raw, resource: Raw, region: *const D3D12_DISCARD_REGION) {
+    let _t = Tick::on(this, 13);
     let s = enter(this);
     if let Some(r) = s.resource(resource) {
         if !r.is_null() {
@@ -1514,7 +2078,17 @@ fn topology_type(t: i32) -> u8 {
 }
 
 unsafe extern "system" fn topology(this: Raw, t: i32) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 14);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        s.rec.ops.push(Op::Topology(t));
+        return;
+    }
+    unsafe { topology_now(s, t) }
+}
+
+/// [`topology`] translated (as it arrives, or from its record at Close).
+unsafe fn topology_now(s: &mut ListState, t: i32) {
     if s.sh.topology == Some(t) {
         s.stats.elided += 1;
         return;
@@ -1527,7 +2101,19 @@ unsafe extern "system" fn topology(this: Raw, t: i32) {
 }
 
 unsafe extern "system" fn viewports(this: Raw, n: u32, v: *const D3D12_VIEWPORT) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 15);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        let n = n.min(16);
+        let at = if v.is_null() { NONE_AT } else { s.stash(unsafe { std::slice::from_raw_parts(v, n as usize) }) };
+        s.rec.ops.push(Op::Viewports(n, at));
+        return;
+    }
+    unsafe { viewports_now(s, n, v) }
+}
+
+/// [`viewports`] translated (as it arrives, or from its record at Close).
+unsafe fn viewports_now(s: &mut ListState, n: u32, v: *const D3D12_VIEWPORT) {
     let n = n.min(16);
     if !v.is_null() {
         unsafe { s.sh.viewports.as_mut_ptr().copy_from_nonoverlapping(v, n as usize) };
@@ -1538,7 +2124,19 @@ unsafe extern "system" fn viewports(this: Raw, n: u32, v: *const D3D12_VIEWPORT)
 }
 
 unsafe extern "system" fn scissors(this: Raw, n: u32, r: *const RECT) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 16);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        let n = n.min(16);
+        let at = if r.is_null() { NONE_AT } else { s.stash(unsafe { std::slice::from_raw_parts(r, n as usize) }) };
+        s.rec.ops.push(Op::Scissors(n, at));
+        return;
+    }
+    unsafe { scissors_now(s, n, r) }
+}
+
+/// [`scissors`] translated (as it arrives, or from its record at Close).
+unsafe fn scissors_now(s: &mut ListState, n: u32, r: *const RECT) {
     let n = n.min(16);
     if !r.is_null() {
         unsafe { s.sh.scissors.as_mut_ptr().copy_from_nonoverlapping(r, n as usize) };
@@ -1549,19 +2147,41 @@ unsafe extern "system" fn scissors(this: Raw, n: u32, r: *const RECT) {
 }
 
 unsafe extern "system" fn blend_factor(this: Raw, f: *const f32) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 17);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        let at = if f.is_null() { NONE_AT } else { s.stash(unsafe { std::slice::from_raw_parts(f, 4) }) };
+        s.rec.ops.push(Op::Blend(at));
+        return;
+    }
+    unsafe { blend_factor_now(s, f) }
+}
+
+/// [`blend_factor`] translated (as it arrives, or from its record at Close).
+unsafe fn blend_factor_now(s: &mut ListState, f: *const f32) {
     s.sh.blend = (!f.is_null()).then(|| unsafe { *f.cast::<[f32; 4]>() });
     call!(s.OMSetBlendFactor(f));
 }
 
 unsafe extern "system" fn stencil_ref(this: Raw, r: u32) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 18);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        s.rec.ops.push(Op::Stencil(r));
+        return;
+    }
+    unsafe { stencil_ref_now(s, r) }
+}
+
+/// [`stencil_ref`] translated (as it arrives, or from its record at Close).
+unsafe fn stencil_ref_now(s: &mut ListState, r: u32) {
     s.sh.stencil = Some(r);
     call!(s.OMSetStencilRef(r));
 }
 
 /// 0x230 OMSetDepthBounds.
 unsafe extern "system" fn depth_bounds(this: Raw, min: f32, max: f32) {
+    let _t = Tick::on(this, 19);
     let s = enter(this);
     s.sh.depth_bounds = Some((min, max));
     match &s.current().l1 {
@@ -1571,7 +2191,13 @@ unsafe extern "system" fn depth_bounds(this: Raw, min: f32, max: f32) {
 }
 
 unsafe extern "system" fn set_pipeline(this: Raw, pipeline: Raw) {
-    enter(this).set_pipeline(pipeline);
+    let _t = Tick::rec(this, 20);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        s.rec.ops.push(Op::Pipeline(pipeline));
+        return;
+    }
+    s.set_pipeline(pipeline);
 }
 
 // ---- barriers ----
@@ -1596,7 +2222,20 @@ struct ConsoleBarrier {
 /// resource the host side does not know becomes one barrier on every shader write, so ordering
 /// is never lost. Returns the console's barrier "actions" (none).
 unsafe extern "system" fn resource_barrier(this: Raw, n: u32, barriers: *const ConsoleBarrier) -> u32 {
-    let s = enter(this);
+    let _t = Tick::rec(this, 21);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        if !barriers.is_null() && n != 0 {
+            let at = s.stash(unsafe { std::slice::from_raw_parts(barriers, n as usize) });
+            s.rec.ops.push(Op::Barriers(n, at));
+        }
+        return 0;
+    }
+    unsafe { resource_barrier_now(s, n, barriers) }
+}
+
+/// [`resource_barrier`] translated (as it arrives, or from its record at Close).
+unsafe fn resource_barrier_now(s: &mut ListState, n: u32, barriers: *const ConsoleBarrier) -> u32 {
     if barriers.is_null() || n == 0 {
         return 0;
     }
@@ -1664,6 +2303,7 @@ const _: () = {
 /// barrier on an unknown resource keeps its sync and access as a global barrier. Without them,
 /// one barrier on every shader write keeps the ordering (layouts are then the host's own).
 unsafe extern "system" fn barrier_groups(this: Raw, count: u32, groups: *const ConsoleGroup) {
+    let _t = Tick::on(this, 22);
     let s = enter(this);
     if groups.is_null() || count == 0 {
         return;
@@ -1822,6 +2462,7 @@ fn host_layouts(t: &mut [u8; 64]) {
 /// flush caches, at the top or bottom of the pipe. On the host that is a barrier on every
 /// shader write, and none is needed if nothing ran since the last barrier.
 unsafe extern "system" fn pipe_sync(this: Raw, _flags: u32, _control: u32, _address: u64, _size: u64) {
+    let _t = Tick::on(this, 23);
     let s = enter(this);
     if s.work_since_barrier {
         s.global_barrier();
@@ -1834,7 +2475,19 @@ unsafe extern "system" fn pipe_sync(this: Raw, _flags: u32, _control: u32, _addr
 
 /// 0x100 SetDescriptorHeaps `(count, heaps)`.
 unsafe extern "system" fn descriptor_heaps(this: Raw, n: u32, heaps: *const Raw) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 24);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        let given = if heaps.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(heaps, n.min(2) as usize) } };
+        let at = s.stash(given);
+        s.rec.ops.push(Op::Heaps(given.len() as u32, at));
+        return;
+    }
+    unsafe { descriptor_heaps_now(s, n, heaps) }
+}
+
+/// [`descriptor_heaps`] translated (as it arrives, or from its record at Close).
+unsafe fn descriptor_heaps_now(s: &mut ListState, n: u32, heaps: *const Raw) {
     let given = if heaps.is_null() { &[][..] } else { unsafe { std::slice::from_raw_parts(heaps, n.min(2) as usize) } };
     if given.len() == s.sh.heap_count as usize && given == &s.sh.heaps_console[..given.len()] {
         s.stats.elided += 1;
@@ -1862,7 +2515,17 @@ unsafe extern "system" fn descriptor_heaps(this: Raw, n: u32, heaps: *const Raw)
 /// 0x108 / 0x110 Set{Compute,Graphics}RootSignature. While a translated pipeline is bound on that side, the
 /// host keeps the program library's root signature: the title's only ends its arguments' lifetime.
 unsafe extern "system" fn root_signature<const K: usize>(this: Raw, root: Raw) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 25);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        s.rec.ops.push(Op::RootSignature(K as u8, root));
+        return;
+    }
+    unsafe { root_signature_now::<K>(s, root) }
+}
+
+/// [`root_signature`] translated (as it arrives, or from its record at Close).
+unsafe fn root_signature_now<const K: usize>(s: &mut ListState, root: Raw) {
     if s.sh.user[K].is_some() {
         if s.sh.title_root[K] == root {
             s.stats.elided += 1;
@@ -1894,7 +2557,17 @@ impl ListState {
 }
 
 unsafe extern "system" fn root_table<const K: usize>(this: Raw, slot: u32, handle: u64) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 26);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        s.rec.ops.push(Op::Table(K as u8, slot, handle));
+        return;
+    }
+    unsafe { root_table_now::<K>(s, slot, handle) }
+}
+
+/// [`root_table`] translated (as it arrives, or from its record at Close).
+unsafe fn root_table_now<const K: usize>(s: &mut ListState, slot: u32, handle: u64) {
     let i = slot as usize & 63;
     let a = s.sh.args[K][i];
     if a.kind == 1 && a.console == handle {
@@ -1921,7 +2594,17 @@ unsafe extern "system" fn root_table<const K: usize>(this: Raw, slot: u32, handl
 
 /// Root CBV (`V` = 2), SRV (3) and UAV (4) at a console GPU address.
 unsafe extern "system" fn root_view<const K: usize, const V: u8>(this: Raw, slot: u32, va: u64) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 27);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        s.rec.ops.push(Op::View(K as u8, V, slot, va));
+        return;
+    }
+    unsafe { root_view_now::<K, V>(s, slot, va) }
+}
+
+/// [`root_view`] translated (as it arrives, or from its record at Close).
+unsafe fn root_view_now<const K: usize, const V: u8>(s: &mut ListState, slot: u32, va: u64) {
     let i = slot as usize & 63;
     let a = s.sh.args[K][i];
     if a.kind == V && a.console == va {
@@ -1972,7 +2655,17 @@ impl ListState {
 }
 
 unsafe extern "system" fn root_constant<const K: usize>(this: Raw, slot: u32, value: u32, offset: u32) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 28);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        s.rec.ops.push(Op::Constant(K as u8, slot, value, offset));
+        return;
+    }
+    unsafe { root_constant_now::<K>(s, slot, value, offset) }
+}
+
+/// [`root_constant`] translated (as it arrives, or from its record at Close).
+unsafe fn root_constant_now<const K: usize>(s: &mut ListState, slot: u32, value: u32, offset: u32) {
     if s.keep_consts(K, slot, &[value], offset) {
         return;
     }
@@ -1984,7 +2677,19 @@ unsafe extern "system" fn root_constant<const K: usize>(this: Raw, slot: u32, va
 }
 
 unsafe extern "system" fn root_constants<const K: usize>(this: Raw, slot: u32, n: u32, data: *const u32, offset: u32) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 29);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        let n = if data.is_null() { n } else { n.min(64) };
+        let at = if data.is_null() { NONE_AT } else { s.stash(unsafe { std::slice::from_raw_parts(data, n as usize) }) };
+        s.rec.ops.push(Op::Constants(K as u8, slot, n, at, offset));
+        return;
+    }
+    unsafe { root_constants_now::<K>(s, slot, n, data, offset) }
+}
+
+/// [`root_constants`] translated (as it arrives, or from its record at Close).
+unsafe fn root_constants_now<const K: usize>(s: &mut ListState, slot: u32, n: u32, data: *const u32, offset: u32) {
     if data.is_null() {
         { s.stats.refused += 1; trace::refused("root_constants") };
         return;
@@ -2002,7 +2707,18 @@ unsafe extern "system" fn root_constants<const K: usize>(this: Raw, slot: u32, n
 // ---- input assembler, targets, clears ----
 
 unsafe extern "system" fn index_buffer(this: Raw, view: *const D3D12_INDEX_BUFFER_VIEW) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 30);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        let at = if view.is_null() { NONE_AT } else { s.stash(unsafe { std::slice::from_raw_parts(view, 1) }) };
+        s.rec.ops.push(Op::IndexBuffer(at));
+        return;
+    }
+    unsafe { index_buffer_now(s, view) }
+}
+
+/// [`index_buffer`] translated (as it arrives, or from its record at Close).
+unsafe fn index_buffer_now(s: &mut ListState, view: *const D3D12_INDEX_BUFFER_VIEW) {
     if view.is_null() {
         s.sh.ib_console = None;
         call!(s.IASetIndexBuffer(std::ptr::null()));
@@ -2028,7 +2744,19 @@ unsafe extern "system" fn index_buffer(this: Raw, view: *const D3D12_INDEX_BUFFE
 }
 
 unsafe extern "system" fn vertex_buffers(this: Raw, start: u32, n: u32, views: *const D3D12_VERTEX_BUFFER_VIEW) {
-    let s = enter(this);
+    let _t = Tick::rec(this, 31);
+    let s = enter_rec(this);
+    if s.rec.defer {
+        let n = n.min(32);
+        let at = if views.is_null() { NONE_AT } else { s.stash(unsafe { std::slice::from_raw_parts(views, n as usize) }) };
+        s.rec.ops.push(Op::VertexBuffers(start, n, at));
+        return;
+    }
+    unsafe { vertex_buffers_now(s, start, n, views) }
+}
+
+/// [`vertex_buffers`] translated (as it arrives, or from its record at Close).
+unsafe fn vertex_buffers_now(s: &mut ListState, start: u32, n: u32, views: *const D3D12_VERTEX_BUFFER_VIEW) {
     let start = start.min(32);
     let n = n.min(32 - start);
     let mut changed = false;
@@ -2066,6 +2794,7 @@ unsafe extern "system" fn vertex_buffers(this: Raw, start: u32, n: u32, views: *
 /// 0x190 OMSetRenderTargets `(count, handles, single range, depth)`: each console CPU handle to
 /// the host's (a single range steps by the console's 128-byte increment).
 unsafe extern "system" fn render_targets(this: Raw, n: u32, rts: *const D3D12_CPU_DESCRIPTOR_HANDLE, single: BOOL, dsv: *const D3D12_CPU_DESCRIPTOR_HANDLE) {
+    let _t = Tick::on(this, 32);
     let s = enter(this);
     let n = n.min(8);
     for i in 0..n as usize {
@@ -2105,6 +2834,7 @@ unsafe extern "system" fn render_targets(this: Raw, n: u32, rts: *const D3D12_CP
 }
 
 unsafe extern "system" fn clear_dsv(this: Raw, dsv: D3D12_CPU_DESCRIPTOR_HANDLE, flags: D3D12_CLEAR_FLAGS, depth: f32, stencil: u8, n: u32, rects: *const RECT) {
+    let _t = Tick::on(this, 33);
     let s = enter(this);
     s.work();
     s.stats.clears += 1;
@@ -2126,6 +2856,7 @@ fn probe_clear() -> &'static Option<[f32; 4]> {
 }
 
 unsafe extern "system" fn clear_rtv(this: Raw, rtv: D3D12_CPU_DESCRIPTOR_HANDLE, color: *const f32, n: u32, rects: *const RECT) {
+    let _t = Tick::on(this, 34);
     let s = enter(this);
     s.work();
     s.stats.clears += 1;
@@ -2154,6 +2885,7 @@ fn uav_clear(s: &mut ListState, gpu: u64, cpu: usize, resource: Raw) -> Option<(
 }
 
 unsafe extern "system" fn clear_uav_uint(this: Raw, gpu: u64, cpu: usize, resource: Raw, values: *const u32, n: u32, rects: *const RECT) {
+    let _t = Tick::on(this, 35);
     let s = enter(this);
     if let Some((g, c, r)) = uav_clear(s, gpu, cpu, resource) {
         call!(s.ClearUnorderedAccessViewUint(g, c, r, values, n, rects));
@@ -2161,6 +2893,7 @@ unsafe extern "system" fn clear_uav_uint(this: Raw, gpu: u64, cpu: usize, resour
 }
 
 unsafe extern "system" fn clear_uav_float(this: Raw, gpu: u64, cpu: usize, resource: Raw, values: *const f32, n: u32, rects: *const RECT) {
+    let _t = Tick::on(this, 36);
     let s = enter(this);
     if let Some((g, c, r)) = uav_clear(s, gpu, cpu, resource) {
         call!(s.ClearUnorderedAccessViewFloat(g, c, r, values, n, rects));
@@ -2170,14 +2903,21 @@ unsafe extern "system" fn clear_uav_float(this: Raw, gpu: u64, cpu: usize, resou
 // ---- console: labels, memory waits, upload memory, hints ----
 
 fn label(this: Raw, address: u64, value: LabelValue, bytes: u32, flush: u32, flags: u32) {
+    let _t = Tick::on(this, 37);
     let s = enter(this);
     s.work();
-    if value == LabelValue::GpuTimestamp && s.stamp_label(address) {
-        return;
+    if value == LabelValue::GpuTimestamp {
+        let _p = by_slot::part(44);
+        if s.stamp_label(address) {
+            return;
+        }
     }
     // the CPU's copy: the title polls it (not the card's copy of memory the GPU reads)
+    let p = by_slot::part(42);
     let host_va = s.host.cpu_memory(address).and_then(|r| r.map(address)).filter(|_| address != 0);
+    drop(p);
     let w = LabelWrite { address, value, bytes, flush, flags };
+    let _p = by_slot::part(43);
     let done = match &s.current().l2 {
         Some(l2) => s.host.label(l2, &w, host_va),
         None => false,
@@ -2205,6 +2945,7 @@ unsafe extern "system" fn write64(this: Raw, address: u64, value: u64, flush: u3
 }
 
 fn memory_wait(this: Raw, address: u64, comparison: u32, reference: u64, wide: bool) {
+    let _t = Tick::on(this, 38);
     let s = enter(this);
     let w = MemoryWait { address, comparison, reference, wide };
     match s.host.memory_wait(&w) {
@@ -2225,7 +2966,8 @@ unsafe extern "system" fn wait64(this: Raw, address: u64, comparison: u32, refer
 
 /// 0x4a0 `(size, alignment) -> pointer`: upload memory owned by the list's allocator, or null.
 unsafe extern "system" fn allocate_upload(this: Raw, size: u64, alignment: u64) -> *mut u8 {
-    let s = enter(this);
+    let _t = Tick::on(this, 39);
+    let s = enter_rec(this);
     match s.allocator() {
         Some(a) => a.alloc(size, alignment),
         None => std::ptr::null_mut(),
@@ -2234,14 +2976,14 @@ unsafe extern "system" fn allocate_upload(this: Raw, size: u64, alignment: u64) 
 
 /// 0x328 DriverHintX `(feature, value) -> 0`.
 unsafe extern "system" fn driver_hint(this: Raw, _feature: u64, _value: u64) -> u64 {
-    enter(this);
+    enter_rec(this);
     0
 }
 
 /// Calls with nothing to do on the host (markers; 0x258 pixel shader depth order; 0x470, which
 /// the title's state flush calls with its result unused): counted, 0 returned.
 unsafe extern "system" fn nothing(this: Raw) -> u64 {
-    enter(this);
+    enter_rec(this);
     0
 }
 

@@ -173,11 +173,14 @@ fn device_report() {
                 rebuild_xlist::console::RECTS_DROPPED.load(Relaxed)
             );
             println!(
-                "titlemem  {} of the title's allocations opened for the GPU in place, {} could not be",
+                "titlemem  {} of the title's allocations opened for the GPU in place, {} could not be; lookups: {} answered from an allocation confirmed since the last free or remap, {} queried the address space",
                 rebuild_runtime::titlemem::OPENED.load(Relaxed),
-                rebuild_runtime::titlemem::OPEN_FAILED.load(Relaxed)
+                rebuild_runtime::titlemem::OPEN_FAILED.load(Relaxed),
+                rebuild_runtime::titlemem::CACHED.load(Relaxed),
+                rebuild_runtime::titlemem::QUERIED.load(Relaxed)
             );
             println!("{}", rebuild_runtime::memory::report());
+            println!("{}", rebuild_runtime::memory::vram_line());
             println!("cputex    {}", rebuild_runtime::cputex::report());
             println!("bink      {}", rebuild_runtime::bink::report());
             println!("pagemap   {}", rebuild_runtime::pagemap::report());
@@ -197,6 +200,22 @@ fn device_report() {
                 "lists     {} indirect calls ({} dropped: no host pipeline); by work: {} draw, {} draw-indexed, {} dispatch, {} mesh, {} none, {} other; {} with root arguments under the library root (mapped); refused: {} side, {} buffer views, {} unmappable, {} wrong root",
                 n[CALLS], n[NO_PIPELINE], n[1], n[2], n[3], n[4], n[0], n[5], n[MAPPED], n[SIDE], n[BUFFER_VIEWS], n[UNMAPPABLE], n[WRONG_ROOT]
             );
+        }
+        {
+            let (ticks, work, lists) = rebuild_xlist::console::cost::totals();
+            let ms = rebuild_xlist::console::cost::ms(ticks);
+            println!(
+                "xlate     lists translated {} (REBUILD_XLATE): {ms:.1} ms in the list functions over {lists} lists, {work} draws and dispatches ({:.2} µs each, list costs included); descriptor sync on submit {:.1} ms",
+                if rebuild_xlist::console::mode::at_close() { "at Close" } else { "as each call arrives" },
+                ms * 1000.0 / work.max(1) as f64,
+                rebuild_xlist::console::cost::ms(rebuild_runtime::submit::SYNC_TICKS.load(Relaxed))
+            );
+            if rebuild_xlist::console::mode::at_close() {
+                println!("xlate     {}", rebuild_xlist::console::mix::report());
+            }
+            for l in rebuild_xlist::console::by_slot::report().unwrap_or_default() {
+                println!("xslot     {l}");
+            }
         }
         println!("lists     {} draws and dispatches dropped: a library pipeline with no shadow table bound", rebuild_xlist::console::NO_SHADOW.load(Relaxed));
         println!("lists     {} descriptor tables in no bound heap (user data 0)", rebuild_xlist::console::NO_HEAP_TABLES.load(Relaxed));

@@ -115,6 +115,7 @@ impl Physical {
 
     /// Free frames (their mappings must be gone first).
     pub fn free(&mut self, frames: &[usize]) -> bool {
+        crate::titlemem::changed();
         if frames.iter().any(|f| self.mapped.values().any(|m| m == f)) {
             return false;
         }
@@ -145,6 +146,7 @@ impl Physical {
     /// Map frame `frame` at `addr` (64 KiB aligned, inside a placeholder reservation). Whatever was
     /// mapped there is unmapped first.
     pub fn map(&mut self, addr: u64, frame: usize) -> bool {
+        crate::titlemem::changed();
         let Some(Some((si, k))) = index(frame).and_then(|i| self.frames.get(i)).copied() else { return false };
         if addr % FRAME as u64 != 0 || k >= self.sections[si].frames {
             return false;
@@ -176,6 +178,7 @@ impl Physical {
 
     /// Unmap whatever frame is at `addr`, leaving a placeholder for the next map.
     pub fn unmap(&mut self, addr: u64) -> bool {
+        crate::titlemem::changed();
         if self.mapped.remove(&addr).is_none() {
             return false;
         }
