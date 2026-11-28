@@ -200,6 +200,18 @@ float sir_mul_legacy(float a, float b) { return (a == 0.0f || b == 0.0f) ? 0.0f 
 float sir_med3(float a, float b, float c) { precise float r = (isnan(a) || isnan(b) || isnan(c)) ? min(min(a, b), c) : max(min(a, b), min(max(a, b), c)); return r; }
 float sir_clamp(float x, float lo, float hi) { precise float r = min(max(x, lo), hi); return r; }
 float sir_sub(float a, float b) { precise float r = a - b; return r; }
+// v_fract_f32 is never 1.0: a tiny negative x gives the largest float below one, where the host's frac rounds to 1
+// v_rcp_f32 as a correctly rounded division (DXC's rcp is a fast division, which a host may approximate)
+float sir_rcp(float x) { precise float r = 1.0f / x; return r; }
+float sir_fract(float x) { precise float r = frac(x); return r >= 1.0f ? asfloat(0x3f7fffffu) : r; }
+// v_fract_f16 (in f32, rounded to f16 after): a fraction that would round to 1.0 is the largest half below one
+float sir_fract_h(float x) { precise float r = frac(x); return r >= 0.999755859375f ? 0.99951171875f : r; }
+// v_sin_f32 / v_cos_f32 take turns: the whole turns come off first (exact), so a large angle keeps its fraction
+// (scaling to radians first rounds it away); a zero stays itself (the sine of -0 is -0); a half turn's sine and a
+// quarter turn's cosine are exactly +0 on the console, where the host's function of the rounded angle is ~1e-7
+float sir_turns(float x) { precise float p = x - round(x); return x == 0.0f ? x : p; }
+float sir_sin(float x) { float p = sir_turns(x); return abs(p) == 0.5f ? 0.0f : sin(p * 6.2831855f); }
+float sir_cos(float x) { float p = sir_turns(x); return abs(p) == 0.25f ? 0.0f : cos(p * 6.2831855f); }
 int sir_med3i(int a, int b, int c) { return max(min(a, b), min(max(a, b), c)); }
 uint sir_med3u(uint a, uint b, uint c) { return max(min(a, b), min(max(a, b), c)); }
 // f32 -> f16 rounding toward zero (the console's v_cvt_pkrtz_f16_f32)
@@ -1834,14 +1846,14 @@ impl Lifter<'_> {
                     "v_ceil_f32" => format!("ceil({x})"),
                     "v_trunc_f32" => format!("trunc({x})"),
                     "v_rndne_f32" => format!("round({x})"),
-                    "v_fract_f32" => format!("frac({x})"),
+                    "v_fract_f32" => format!("sir_fract({x})"),
                     "v_sqrt_f32" => format!("sqrt({x})"),
                     "v_rsq_f32" => format!("rsqrt({x})"),
-                    "v_rcp_f32" | "v_rcp_iflag_f32" => format!("rcp({x})"),
+                    "v_rcp_f32" | "v_rcp_iflag_f32" => format!("sir_rcp({x})"),
                     "v_exp_f32" => format!("exp2({x})"),
                     "v_log_f32" => format!("log2({x})"),
-                    "v_sin_f32" => format!("sin(({x}) * 6.2831853f)"),
-                    "v_cos_f32" => format!("cos(({x}) * 6.2831853f)"),
+                    "v_sin_f32" => format!("sir_sin({x})"),
+                    "v_cos_f32" => format!("sir_cos({x})"),
                     _ => unreachable!(),
                 };
                 self.vwrite_f(d, e);
@@ -2058,18 +2070,18 @@ impl Lifter<'_> {
             | "v_exp_f16" | "v_log_f16" | "v_sin_f16" | "v_cos_f16" => {
                 let x = self.fsrc16(d, "src0", 0)?;
                 let e = match name {
-                    "v_rcp_f16" => format!("rcp({x})"),
+                    "v_rcp_f16" => format!("sir_rcp({x})"),
                     "v_sqrt_f16" => format!("sqrt({x})"),
                     "v_rsq_f16" => format!("rsqrt({x})"),
                     "v_floor_f16" => format!("floor({x})"),
                     "v_ceil_f16" => format!("ceil({x})"),
                     "v_trunc_f16" => format!("trunc({x})"),
                     "v_rndne_f16" => format!("round({x})"),
-                    "v_fract_f16" => format!("frac({x})"),
+                    "v_fract_f16" => format!("sir_fract_h({x})"),
                     "v_exp_f16" => format!("exp2({x})"),
                     "v_log_f16" => format!("log2({x})"),
-                    "v_sin_f16" => format!("sin(({x}) * 6.2831853f)"),
-                    _ => format!("cos(({x}) * 6.2831853f)"),
+                    "v_sin_f16" => format!("sir_sin({x})"),
+                    _ => format!("sir_cos({x})"),
                 };
                 self.vwrite16(d, e, true);
                 Some(())
