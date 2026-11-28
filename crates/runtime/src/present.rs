@@ -17,9 +17,13 @@
 //! own thread pumps its messages, so the title's threads never do), and a flip-model swap chain on the host queue
 //! that backs the presenting console queue, at the host display's mode (`dxgi::host_mode`), three buffers, the
 //! frame-latency waitable at 2, and `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING` when the factory reports tearing support
-//! (`IDXGIFactory5::CheckFeatureSupport`; anything that resizes the buffers must pass the same flags,
-//! the presenter's `flags`; nothing resizes them yet). Its format follows the back buffer's family (RGBA8, BGRA8, RGB10A2, RGBA16F;
-//! anything else RGBA8).
+//! (`IDXGIFactory5::CheckFeatureSupport`; `ResizeBuffers` passes the same flags). Its format follows the back
+//! buffer's family (RGBA8, BGRA8, RGB10A2, RGBA16F; anything else RGBA8). The window and swap chain are a `Swap`;
+//! the window mode ([`window_mode`]) is a framed window (the default), borderless over the display ("windowed
+//! fullscreen", independent flip when nothing covers it), or **exclusive full screen** ([`crate::fullscreen`]):
+//! the same borderless window, which takes the focus, then `SetFullscreenState(TRUE)` at a display mode of the
+//! title's image size; its transitions (focus, Alt+Enter, a lost device) run at the start of a present, and each
+//! resizes the buffers.
 //!
 //! **Each present** is one small host list, recorded once per (frame slot, swap-chain buffer, source, size) and
 //! executed again while those stay the same (no allocator reset, no recording; nothing allocated):
@@ -73,6 +77,7 @@ use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::fullscreen;
 use crate::queue::Queue;
 
 /// Frame slots (allocators, lists, timestamps) and swap-chain buffers.
@@ -288,19 +293,9 @@ struct Blit {
 struct Presenter {
     device: ID3D12Device,
     queue: &'static Queue,
-    swap: IDXGISwapChain3,
-    waitable: HANDLE,
-    _window: HWND,
+    /// the window, the swap chain, its buffers and views, and full screen
+    out: Swap,
     format: DXGI_FORMAT,
-    /// the swap chain's creation flags: `ResizeBuffers` must pass the same (nothing resizes yet)
-    #[allow(dead_code)]
-    flags: u32,
-    /// `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING` is among them
-    tearing: bool,
-    size: (u32, u32),
-    buffers: Vec<ID3D12Resource>,
-    rtv: ID3D12DescriptorHeap,
-    rtv_step: usize,
     srv: ID3D12DescriptorHeap,
     srv_step: u64,
     slots: Vec<Slot>,
@@ -431,7 +426,7 @@ pub unsafe extern "system" fn PresentX(this: *mut c_void, planes: u32, plane: *c
     }
     let pr = guard.as_mut().expect("presenter");
     pr.present(q, source, &desc);
-    let output = pr.size;
+    let output = pr.out.size;
     drop(guard);
     crate::framelog::presented(started.elapsed(), (desc.Width as u32, desc.Height), output);
     0
@@ -441,57 +436,10 @@ impl Presenter {
     fn new(q: &'static Queue, source: &D3D12_RESOURCE_DESC) -> Result<Presenter, String> {
         let device = crate::device::get().ok_or("no device")?.host.clone();
         let e = |what: &'static str| move |e: windows::core::Error| format!("{what}: {e}");
-        let mode = crate::dxgi::host_mode();
-        // the window's client size, and the swap chain's: a window keeps the title's own image size in its swap
-        // chain (the plain copy path) and DXGI stretches it into the window at present (`DXGI_SCALING_STRETCH`)
-        let (window_size, size) = match window_mode() {
-            WindowMode::Borderless => {
-                let s = (mode.width.max(1), mode.height.max(1));
-                (s, s)
-            }
-            // REBUILD_PRESENT_SCALE=blit: the swap chain at the window's size, and the blit scales into it
-            WindowMode::Windowed(w, h) if std::env::var("REBUILD_PRESENT_SCALE").is_ok_and(|v| v.trim() == "blit") => ((w, h), (w, h)),
-            WindowMode::Windowed(w, h) => ((w, h), ((source.Width as u32).max(1), source.Height.max(1))),
-        };
         let format = family(source.Format.0 as u32).unwrap_or(DXGI_FORMAT_R8G8B8A8_UNORM);
-        let window = window(window_size, WINDOW_HIDDEN.load(Ordering::Relaxed))?;
+        let out = Swap::new(&device, &q.host, window_mode(), ((source.Width as u32).max(1), source.Height.max(1)), format, WINDOW_HIDDEN.load(Ordering::Relaxed))?;
+        let size = out.size;
         unsafe {
-            let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).map_err(e("DXGI factory"))?;
-            let tearing = factory.cast::<IDXGIFactory5>().is_ok_and(|f5| {
-                let mut allow = windows::Win32::Foundation::BOOL(0);
-                f5.CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &mut allow as *mut _ as *mut c_void, std::mem::size_of_val(&allow) as u32).is_ok() && allow.as_bool()
-            });
-            let flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32 | if tearing { DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 as u32 } else { 0 };
-            let desc = DXGI_SWAP_CHAIN_DESC1 {
-                Width: size.0,
-                Height: size.1,
-                Format: format,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-                BufferCount: FRAMES as u32,
-                Scaling: DXGI_SCALING_STRETCH,
-                SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-                AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-                Flags: flags,
-                ..Default::default()
-            };
-            let swap: IDXGISwapChain1 = factory.CreateSwapChainForHwnd(&q.host, window, &desc, None, None).map_err(e("swap chain"))?;
-            let _ = factory.MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
-            let swap: IDXGISwapChain3 = swap.cast().map_err(e("IDXGISwapChain3"))?;
-            swap.SetMaximumFrameLatency(2).map_err(e("frame latency"))?;
-            let waitable = swap.GetFrameLatencyWaitableObject();
-            if format == DXGI_FORMAT_R16G16B16A16_FLOAT {
-                let _ = swap.SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
-            }
-            let buffers: Vec<ID3D12Resource> = (0..FRAMES as u32).map(|i| swap.GetBuffer(i)).collect::<Result<_, _>>().map_err(e("swap chain buffers"))?;
-            let rtv: ID3D12DescriptorHeap = device
-                .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC { Type: D3D12_DESCRIPTOR_HEAP_TYPE_RTV, NumDescriptors: FRAMES as u32, ..Default::default() })
-                .map_err(e("RTV heap"))?;
-            let rtv_step = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) as usize;
-            for (i, b) in buffers.iter().enumerate() {
-                let h = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: rtv.GetCPUDescriptorHandleForHeapStart().ptr + i * rtv_step };
-                device.CreateRenderTargetView(b, None, h);
-            }
             let srv: ID3D12DescriptorHeap = device
                 .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
                     Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
@@ -529,23 +477,15 @@ impl Presenter {
                 slots.push(Slot { cache, _begin: (ba, bl), done: 0, timed: false });
             }
             let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE).map_err(e("fence"))?;
-            TEARING.store(1 + usize::from(tearing), Ordering::Relaxed);
+            TEARING.store(1 + usize::from(out.tearing), Ordering::Relaxed);
             PRESENT_QUEUE.store(q as *const Queue as usize, Ordering::Release);
             // the in-game menu: its input thread, font and pipeline are made off this thread
             crate::overlay::attach(&device, format, frequency, FRAMES);
             Ok(Presenter {
                 device,
                 queue: q,
-                swap,
-                waitable,
-                _window: window,
+                out,
                 format,
-                flags,
-                tearing,
-                size,
-                buffers,
-                rtv,
-                rtv_step,
                 srv,
                 srv_step,
                 slots,
@@ -564,9 +504,20 @@ impl Presenter {
     }
 
     fn present(&mut self, from: &'static Queue, source: &ID3D12Resource, desc: &D3D12_RESOURCE_DESC) {
+        // full screen's transitions (focus, Alt+Enter) happen here, on the presenting thread; one that resized the
+        // swap chain's buffers leaves no list recorded for the old ones
+        if self.out.pump() {
+            for slot in &mut self.slots {
+                for c in &mut slot.cache {
+                    c.key = None;
+                }
+            }
+            // ResizeBuffers shows the whole buffer again
+            self.shown = self.out.size;
+        }
         let i = SLOT.load(Ordering::Relaxed);
         // the slot's last copy must be done, and the display must take a frame: else the frame is late
-        if unsafe { self.fence.GetCompletedValue() } < self.slots[i].done || unsafe { WaitForSingleObject(self.waitable, 0) } != WAIT_OBJECT_0 {
+        if unsafe { self.fence.GetCompletedValue() } < self.slots[i].done || unsafe { WaitForSingleObject(self.out.waitable, 0) } != WAIT_OBJECT_0 {
             crate::framelog::late();
             return;
         }
@@ -601,17 +552,21 @@ impl Presenter {
         let capture_main = capture && !capture_overlay;
         let (w, h) = (desc.Width as u32, desc.Height);
         let copy = family(desc.Format.0 as u32) == Some(self.format)
-            && w <= self.size.0
-            && h <= self.size.1
+            && w <= self.out.size.0
+            && h <= self.out.size.1
             && desc.SampleDesc.Count <= 1
             && desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D
             && self.source_size_works;
-        let back = unsafe { self.swap.GetCurrentBackBufferIndex() } as usize;
-        let target = self.buffers[back].clone();
+        let back = unsafe { self.out.swap.GetCurrentBackBufferIndex() } as usize;
+        // none after a failed ResizeBuffers: the frame is late
+        let Some(target) = self.out.buffers.get(back).cloned() else {
+            crate::framelog::late();
+            return;
+        };
         let (allocator, list) = (self.slots[i].cache[back].allocator.clone(), self.slots[i].cache[back].list.clone());
         let list = &list;
         let mut readback = None;
-        let shown_size = if copy { (w, h) } else { self.size };
+        let shown_size = if copy { (w, h) } else { self.out.size };
         let cached = !capture_main && self.slots[i].cache[back].key.as_ref().is_some_and(|k| k.0 == *source && (k.1, k.2, k.3) == (w, h, copy));
         unsafe {
             if !cached {
@@ -629,10 +584,10 @@ impl Presenter {
                 } else {
                     static ONCE: AtomicBool = AtomicBool::new(false);
                     if !ONCE.swap(true, Ordering::Relaxed) {
-                        eprintln!("present   the blit: {w}x{h} format {} ({} mips, {} layers, flags {:#x}) onto {}x{} format {}", desc.Format.0, desc.MipLevels, desc.DepthOrArraySize, desc.Flags.0, self.size.0, self.size.1, self.format.0);
+                        eprintln!("present   the blit: {w}x{h} format {} ({} mips, {} layers, flags {:#x}) onto {}x{} format {}", desc.Format.0, desc.MipLevels, desc.DepthOrArraySize, desc.Flags.0, self.out.size.0, self.out.size.1, self.format.0);
                     }
                     self.draw(list, i * FRAMES + back, back, source, desc, &target);
-                    (self.size.0, self.size.1, D3D12_RESOURCE_STATE_RENDER_TARGET)
+                    (self.out.size.0, self.out.size.1, D3D12_RESOURCE_STATE_RENDER_TARGET)
                 };
                 if capture_main {
                     list.ResourceBarrier(&[transition(&target, shown.2, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
@@ -654,7 +609,7 @@ impl Presenter {
             crate::overlay::set_target(shown_size.0, shown_size.1);
             let mut over = None;
             if overlay {
-                let rtv = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: self.rtv.GetCPUDescriptorHandleForHeapStart().ptr + back * self.rtv_step };
+                let rtv = self.out.rtv(back);
                 if let Some(l) = crate::overlay::record(i, &target, D3D12_RESOURCE_STATE_PRESENT, rtv, self.fence.GetCompletedValue(), self.value + 1) {
                     if capture_overlay {
                         l.ResourceBarrier(&[transition(&target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
@@ -680,7 +635,7 @@ impl Presenter {
             (Interface::vtable(&self.queue.host).ExecuteCommandLists)(Interface::as_raw(&self.queue.host), (count - first) as u32, raw[first..].as_ptr() as *const _);
             let shown = shown_size;
             if (shown.0, shown.1) != self.shown {
-                let s2: Option<IDXGISwapChain2> = self.swap.cast().ok();
+                let s2: Option<IDXGISwapChain2> = self.out.swap.cast().ok();
                 if s2.is_some_and(|s| s.SetSourceSize(shown.0, shown.1).is_ok()) {
                     self.shown = (shown.0, shown.1);
                 } else if copy {
@@ -689,11 +644,8 @@ impl Presenter {
                 }
             }
             let flip = Instant::now();
-            let _ = if crate::frame::vsync() {
-                self.swap.Present(1, DXGI_PRESENT(0))
-            } else {
-                self.swap.Present(0, if self.tearing { DXGI_PRESENT_ALLOW_TEARING } else { DXGI_PRESENT(0) })
-            };
+            // vsync on: (1, 0); off: (0, ALLOW_TEARING) when allowed, except in exclusive full screen: (0, 0)
+            let _ = self.out.present(crate::frame::vsync());
             DXGI_NS.fetch_add(flip.elapsed().as_nanos() as u64, Ordering::Relaxed);
             self.value += 1;
             let _ = self.queue.host.Signal(&self.fence, self.value);
@@ -725,8 +677,8 @@ impl Presenter {
         unsafe {
             list.ResourceBarrier(&[transition(target, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET)]);
             let Some(b) = &self.blit else { return };
-            let rtv = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: self.rtv.GetCPUDescriptorHandleForHeapStart().ptr + back * self.rtv_step };
-            record_blit(&self.device, list, b, &self.srv, self.srv_step, descriptor, rtv, source, desc, self.size);
+            let rtv = self.out.rtv(back);
+            record_blit(&self.device, list, b, &self.srv, self.srv_step, descriptor, rtv, source, desc, self.out.size);
         }
     }
 
@@ -975,12 +927,524 @@ fn write_png(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), 
     writer.write_image_data(rgba).map_err(|e| e.to_string())
 }
 
+// ------------------------------------------------------------------------------------- the swap chain
+
+const DXGI_OCCLUDED: i32 = 0x087a_0001;
+const DXGI_MODE_CHANGE_IN_PROGRESS: i32 = 0x087a_0008;
+const DXGI_NOT_CURRENTLY_AVAILABLE: i32 = 0x887a_0022u32 as i32;
+/// DEVICE_REMOVED, DEVICE_HUNG, DEVICE_RESET
+const DXGI_DEVICE_LOST: [i32; 3] = [0x887a_0005u32 as i32, 0x887a_0006u32 as i32, 0x887a_0007u32 as i32];
+
+/// The full-screen state now (`None`: not in [`WindowMode::Fullscreen`]), for logs and the run report.
+static FS_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn fullscreen_state() -> Option<fullscreen::State> {
+    use fullscreen::State as S;
+    Some(match FS_STATE.load(Ordering::Relaxed) {
+        1 => S::Pending,
+        2 => S::Exclusive,
+        3 => S::Suspended,
+        4 => S::Borderless,
+        5 => S::Off,
+        _ => return None,
+    })
+}
+
+fn store_state(s: fullscreen::State) {
+    use fullscreen::State as S;
+    FS_STATE.store(match s { S::Pending => 1, S::Exclusive => 2, S::Suspended => 3, S::Borderless => 4, S::Off => 5 }, Ordering::Relaxed);
+}
+
+/// The window, its flip-model swap chain, the buffers' render-target views and, in [`WindowMode::Fullscreen`], the
+/// full-screen machine ([`fullscreen::Controller`] over [`DxgiDisplay`]). Made from any device and queue: the
+/// presenter's, or WARP's in the tests.
+pub(crate) struct Swap {
+    pub(crate) swap: ManuallyDrop<IDXGISwapChain3>,
+    queue: ID3D12CommandQueue,
+    device: ID3D12Device,
+    pub(crate) waitable: HANDLE,
+    window: HWND,
+    pub(crate) format: DXGI_FORMAT,
+    /// the creation flags: `ResizeBuffers` passes the same
+    flags: u32,
+    /// `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING` is among them
+    pub(crate) tearing: bool,
+    pub(crate) size: (u32, u32),
+    pub(crate) buffers: Vec<ID3D12Resource>,
+    rtv: ID3D12DescriptorHeap,
+    rtv_step: usize,
+    fs: Option<fullscreen::Controller<DxgiDisplay>>,
+    /// the window's events reach this swap chain (a visible full-screen window)
+    window_events: bool,
+    started: bool,
+    next_check: Instant,
+    idle: ID3D12Fence,
+    idle_value: u64,
+    /// `ResizeBuffers` calls so far
+    pub(crate) resized: u32,
+}
+
+impl Swap {
+    /// `source`: the title's image size (a window's swap chain keeps it; full screen looks for a display mode of
+    /// it). `hidden`: an off-screen tool window, and full screen as a dry run (no display change, ever).
+    pub(crate) fn new(device: &ID3D12Device, queue: &ID3D12CommandQueue, mode: WindowMode, source: (u32, u32), format: DXGI_FORMAT, hidden: bool) -> Result<Swap, String> {
+        let e = |what: &'static str| move |e: windows::core::Error| format!("{what}: {e}");
+        let host = crate::dxgi::host_mode();
+        let native = (host.width.max(1), host.height.max(1));
+        // the window's client size, and the swap chain's: a window keeps the title's own image size in its swap
+        // chain (the plain copy path) and DXGI stretches it into the window at present (`DXGI_SCALING_STRETCH`)
+        let (window_size, mut size) = match mode {
+            WindowMode::Borderless | WindowMode::Fullscreen => (native, native),
+            // REBUILD_PRESENT_SCALE=blit: the swap chain at the window's size, and the blit scales into it
+            WindowMode::Windowed(w, h) if std::env::var("REBUILD_PRESENT_SCALE").is_ok_and(|v| v.trim() == "blit") => ((w, h), (w, h)),
+            WindowMode::Windowed(w, h) => ((w, h), source),
+        };
+        let full = mode == WindowMode::Fullscreen;
+        let window_events = full && !hidden;
+        if window_events {
+            FS_EVENTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+            FS_WINDOW.store(true, Ordering::Relaxed);
+        }
+        let window = window(mode, window_size, hidden)?;
+        unsafe {
+            let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).map_err(e("DXGI factory"))?;
+            let tearing = factory.cast::<IDXGIFactory5>().is_ok_and(|f5| {
+                let mut allow = windows::Win32::Foundation::BOOL(0);
+                f5.CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &mut allow as *mut _ as *mut c_void, std::mem::size_of_val(&allow) as u32).is_ok() && allow.as_bool()
+            });
+            let flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT.0 as u32 | if tearing { DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.0 as u32 } else { 0 };
+            // full screen: the display mode for the monitor the window is on, and buffers of its size
+            let dry = hidden || std::env::var("REBUILD_FULLSCREEN_DRYRUN").is_ok_and(|v| !matches!(v.trim(), "" | "0"));
+            let full_mode = full.then(|| {
+                let m = monitor_output(&factory, window).map(|o| choose_mode(&o, format, source)).unwrap_or(DXGI_MODE_DESC {
+                    Width: native.0,
+                    Height: native.1,
+                    RefreshRate: DXGI_RATIONAL { Numerator: host.refresh[0], Denominator: host.refresh[1].max(1) },
+                    Format: format,
+                    ..Default::default()
+                });
+                size = (m.Width.max(1), m.Height.max(1));
+                eprintln!(
+                    "fullscreen the mode: {}x{} at {:.2} Hz for the title's {}x{} image{}",
+                    m.Width,
+                    m.Height,
+                    f64::from(m.RefreshRate.Numerator) / f64::from(m.RefreshRate.Denominator.max(1)),
+                    source.0,
+                    source.1,
+                    if dry { " (dry run: the display is never changed)" } else { "" }
+                );
+                m
+            });
+            let desc = DXGI_SWAP_CHAIN_DESC1 {
+                Width: size.0,
+                Height: size.1,
+                Format: format,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                BufferCount: FRAMES as u32,
+                Scaling: DXGI_SCALING_STRETCH,
+                SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+                Flags: flags,
+                ..Default::default()
+            };
+            let swap: IDXGISwapChain1 = factory.CreateSwapChainForHwnd(queue, window, &desc, None, None).map_err(e("swap chain"))?;
+            // DXGI's own Alt+Enter and window watching are off: every full-screen transition is ours
+            let _ = factory.MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+            let swap: IDXGISwapChain3 = swap.cast().map_err(e("IDXGISwapChain3"))?;
+            swap.SetMaximumFrameLatency(2).map_err(e("frame latency"))?;
+            let waitable = swap.GetFrameLatencyWaitableObject();
+            if format == DXGI_FORMAT_R16G16B16A16_FLOAT {
+                let _ = swap.SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
+            }
+            let buffers: Vec<ID3D12Resource> = (0..FRAMES as u32).map(|i| swap.GetBuffer(i)).collect::<Result<_, _>>().map_err(e("swap chain buffers"))?;
+            let rtv: ID3D12DescriptorHeap = device
+                .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC { Type: D3D12_DESCRIPTOR_HEAP_TYPE_RTV, NumDescriptors: FRAMES as u32, ..Default::default() })
+                .map_err(e("RTV heap"))?;
+            let rtv_step = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) as usize;
+            let idle: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE).map_err(e("fence"))?;
+            let fs = full_mode.map(|mode| {
+                fullscreen::Controller::new(DxgiDisplay { swap: swap.clone(), window, want: source, format, mode, size, dry, dry_exclusive: false, focus: true, resize: false })
+            });
+            if fs.is_some() {
+                store_state(fullscreen::State::Pending);
+            }
+            let s = Swap {
+                swap: ManuallyDrop::new(swap),
+                queue: queue.clone(),
+                device: device.clone(),
+                waitable,
+                window,
+                format,
+                flags,
+                tearing,
+                size,
+                buffers,
+                rtv,
+                rtv_step,
+                fs,
+                window_events,
+                started: false,
+                next_check: Instant::now(),
+                idle,
+                idle_value: 0,
+                resized: 0,
+            };
+            s.views();
+            Ok(s)
+        }
+    }
+
+    /// The render-target view of buffer `i`.
+    pub(crate) fn rtv(&self, i: usize) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        D3D12_CPU_DESCRIPTOR_HANDLE { ptr: unsafe { self.rtv.GetCPUDescriptorHandleForHeapStart() }.ptr + i * self.rtv_step }
+    }
+
+    fn views(&self) {
+        for (i, b) in self.buffers.iter().enumerate() {
+            unsafe { self.device.CreateRenderTargetView(b, None, self.rtv(i)) };
+        }
+    }
+
+    #[allow(dead_code)] // the tests and the probe
+    pub(crate) fn state(&self) -> Option<fullscreen::State> {
+        self.fs.as_ref().map(|f| f.state())
+    }
+
+    /// Full screen's pending events (the first present's start, the window's focus and Alt+Enter, a check each
+    /// second while exclusive or waiting to be), on the presenting thread. `true`: the buffers were resized.
+    pub(crate) fn pump(&mut self) -> bool {
+        let Some(fs) = &self.fs else { return false };
+        let mut events = Vec::new();
+        if !self.started {
+            self.started = true;
+            events.push(fullscreen::Event::Start);
+        }
+        if self.window_events {
+            events.append(&mut FS_EVENTS.lock().unwrap_or_else(|e| e.into_inner()));
+        }
+        let now = Instant::now();
+        if now >= self.next_check && matches!(fs.state(), fullscreen::State::Pending | fullscreen::State::Exclusive) {
+            self.next_check = now + std::time::Duration::from_secs(1);
+            events.push(fullscreen::Event::Check);
+        }
+        let mut resized = false;
+        for e in events {
+            resized |= self.event(e);
+        }
+        resized
+    }
+
+    /// One full-screen event, and the resize it asks for. `true`: the buffers were resized.
+    pub(crate) fn event(&mut self, e: fullscreen::Event) -> bool {
+        let Some(fs) = self.fs.as_mut() else { return false };
+        let before = fs.state();
+        let after = fs.handle(e);
+        if before != after {
+            eprintln!("fullscreen {e:?}: {before:?} -> {after:?}");
+            store_state(after);
+        }
+        if !std::mem::take(&mut fs.display.resize) || after == fullscreen::State::Off {
+            return false;
+        }
+        let size = fs.display.size;
+        self.resize(size);
+        true
+    }
+
+    /// `ResizeBuffers` (same count, format and flags) once no list in flight uses the old buffers, then new views.
+    fn resize(&mut self, size: (u32, u32)) {
+        unsafe {
+            self.idle_value += 1;
+            if self.queue.Signal(&self.idle, self.idle_value).is_ok() && self.idle.GetCompletedValue() < self.idle_value {
+                if let Ok(event) = CreateEventW(None, false, false, None) {
+                    if self.idle.SetEventOnCompletion(self.idle_value, event).is_ok() && WaitForSingleObject(event, 5000) != WAIT_OBJECT_0 {
+                        eprintln!("fullscreen the GPU did not finish within 5 s before ResizeBuffers");
+                    }
+                    let _ = windows::Win32::Foundation::CloseHandle(event);
+                }
+            }
+            self.buffers.clear();
+            match self.swap.ResizeBuffers(FRAMES as u32, size.0, size.1, self.format, DXGI_SWAP_CHAIN_FLAG(self.flags as i32)) {
+                Ok(()) => self.size = size,
+                Err(e) => eprintln!("fullscreen ResizeBuffers {}x{}: {e}", size.0, size.1),
+            }
+            self.buffers = (0..FRAMES as u32).filter_map(|i| self.swap.GetBuffer(i).ok()).collect();
+        }
+        self.views();
+        self.resized += 1;
+    }
+
+    /// `Present` with vsync on (1, 0) or off: (0, ALLOW_TEARING) when the swap chain allows tearing, (0, 0) in
+    /// exclusive full screen or without tearing support ([`fullscreen::present_flags`]). Occluded or a lost device
+    /// reaches full screen's machine.
+    pub(crate) fn present(&mut self, vsync: bool) -> windows::core::HRESULT {
+        let exclusive = self.fs.as_ref().is_some_and(|f| f.exclusive());
+        let (interval, tear) = fullscreen::present_flags(vsync, self.tearing, exclusive);
+        let hr = unsafe { self.swap.Present(interval, if tear { DXGI_PRESENT_ALLOW_TEARING } else { DXGI_PRESENT(0) }) };
+        if self.fs.is_some() {
+            if hr.0 == DXGI_OCCLUDED {
+                self.next_check = Instant::now(); // full screen may be gone: look at the next present
+            } else if DXGI_DEVICE_LOST.contains(&hr.0) {
+                self.event(fullscreen::Event::DeviceLost);
+            }
+        }
+        hr
+    }
+}
+
+impl Drop for Swap {
+    /// Leave full screen (DXGI: never release a swap chain in it), release the swap chain, destroy the window.
+    fn drop(&mut self) {
+        if let Some(fs) = self.fs.as_mut() {
+            fs.handle(fullscreen::Event::Shutdown);
+            store_state(fullscreen::State::Off);
+        }
+        self.fs = None;
+        self.buffers.clear();
+        if self.window_events {
+            FS_WINDOW.store(false, Ordering::Relaxed);
+        }
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.waitable);
+            ManuallyDrop::drop(&mut self.swap);
+            let _ = PostMessageW(self.window, WM_GOODBYE, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// The output (monitor) the window is on, from every adapter's outputs; else the first output there is.
+unsafe fn monitor_output(factory: &IDXGIFactory2, window: HWND) -> Option<IDXGIOutput> {
+    use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+    unsafe {
+        let monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+        let mut first = None;
+        for a in 0.. {
+            let Ok(adapter) = factory.EnumAdapters1(a) else { break };
+            for o in 0.. {
+                let Ok(output) = adapter.EnumOutputs(o) else { break };
+                if output.GetDesc().is_ok_and(|d| d.Monitor == monitor) {
+                    return Some(output);
+                }
+                first.get_or_insert(output);
+            }
+        }
+        first
+    }
+}
+
+/// An output's display modes of `format` (none listed: of RGBA8).
+unsafe fn display_modes(output: &IDXGIOutput, format: DXGI_FORMAT) -> Vec<DXGI_MODE_DESC> {
+    let list = |f: DXGI_FORMAT| unsafe {
+        let mut n = 0u32;
+        if output.GetDisplayModeList(f, DXGI_ENUM_MODES(0), &mut n, None).is_err() || n == 0 {
+            return Vec::new();
+        }
+        let mut v = vec![DXGI_MODE_DESC::default(); n as usize];
+        if output.GetDisplayModeList(f, DXGI_ENUM_MODES(0), &mut n, Some(v.as_mut_ptr())).is_err() {
+            return Vec::new();
+        }
+        v.truncate(n as usize);
+        v
+    };
+    let v = list(format);
+    if v.is_empty() && format != DXGI_FORMAT_R8G8B8A8_UNORM {
+        list(DXGI_FORMAT_R8G8B8A8_UNORM)
+    } else {
+        v
+    }
+}
+
+/// The output's desktop size and its refresh rate now (0 when unknown).
+unsafe fn desktop(output: &IDXGIOutput) -> ((u32, u32), f64) {
+    use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
+    unsafe {
+        let Ok(d) = output.GetDesc() else { return ((0, 0), 0.0) };
+        let r = d.DesktopCoordinates;
+        let size = ((r.right - r.left).max(1) as u32, (r.bottom - r.top).max(1) as u32);
+        let mut dm = DEVMODEW { dmSize: std::mem::size_of::<DEVMODEW>() as u16, ..Default::default() };
+        let hz = if EnumDisplaySettingsW(PCWSTR(d.DeviceName.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm).as_bool() { f64::from(dm.dmDisplayFrequency) } else { 0.0 };
+        (size, hz)
+    }
+}
+
+/// The full-screen display mode on `output` for an image of `want` ([`fullscreen::pick_mode`]).
+unsafe fn choose_mode(output: &IDXGIOutput, format: DXGI_FORMAT, want: (u32, u32)) -> DXGI_MODE_DESC {
+    unsafe {
+        let (native, hz) = desktop(output);
+        let list = display_modes(output, format);
+        let ours: Vec<fullscreen::ModeDesc> =
+            list.iter().map(|d| fullscreen::ModeDesc { width: d.Width, height: d.Height, refresh: (d.RefreshRate.Numerator, d.RefreshRate.Denominator) }).collect();
+        let m = fullscreen::pick_mode(&ours, want, native, hz);
+        let found = list.iter().find(|d| (d.Width, d.Height, d.RefreshRate.Numerator, d.RefreshRate.Denominator) == (m.width, m.height, m.refresh.0, m.refresh.1));
+        let mut d = found.copied().unwrap_or(DXGI_MODE_DESC {
+            Width: m.width,
+            Height: m.height,
+            RefreshRate: DXGI_RATIONAL { Numerator: m.refresh.0, Denominator: m.refresh.1 },
+            ..Default::default()
+        });
+        d.Format = format;
+        d
+    }
+}
+
+/// [`fullscreen::Display`] through DXGI and the window. A dry run (a hidden window, or
+/// `REBUILD_FULLSCREEN_DRYRUN=1`) logs each display change instead of making it and keeps the window as it is;
+/// `ResizeBuffers` stays real.
+pub(crate) struct DxgiDisplay {
+    swap: IDXGISwapChain3,
+    window: HWND,
+    /// the title's image size: the display mode wanted
+    want: (u32, u32),
+    format: DXGI_FORMAT,
+    /// the mode entered last (or to be entered)
+    mode: DXGI_MODE_DESC,
+    /// the buffers' size for the next resize
+    size: (u32, u32),
+    dry: bool,
+    dry_exclusive: bool,
+    /// a dry run's focus (tests set it)
+    pub(crate) focus: bool,
+    /// the machine asked for `ResizeBuffers`
+    resize: bool,
+}
+
+impl fullscreen::Display for DxgiDisplay {
+    fn enter(&mut self) -> fullscreen::Enter {
+        use fullscreen::Enter;
+        // the monitor the window is on now, and its mode for the title's image
+        let output = unsafe { self.swap.GetContainingOutput() }.ok();
+        if let Some(o) = &output {
+            self.mode = unsafe { choose_mode(o, self.format, self.want) };
+        }
+        self.size = (self.mode.Width.max(1), self.mode.Height.max(1));
+        let hz = f64::from(self.mode.RefreshRate.Numerator) / f64::from(self.mode.RefreshRate.Denominator.max(1));
+        if self.dry {
+            eprintln!("fullscreen (dry run) would enter exclusive at {}x{} {hz:.2} Hz", self.mode.Width, self.mode.Height);
+            self.dry_exclusive = true;
+            return Enter::Entered;
+        }
+        let target = output.as_ref().map_or(std::ptr::null_mut(), |o| o.as_raw());
+        let hr = unsafe { (Interface::vtable(&self.swap).base__.base__.base__.SetFullscreenState)(Interface::as_raw(&self.swap), true.into(), target) };
+        match hr.0 {
+            0 => {}
+            DXGI_MODE_CHANGE_IN_PROGRESS | DXGI_NOT_CURRENTLY_AVAILABLE => return Enter::NotNow,
+            _ => {
+                eprintln!("fullscreen SetFullscreenState(TRUE): {hr:?}: staying borderless (Alt+Enter tries again)");
+                return Enter::Failed;
+            }
+        }
+        // the display mode: DXGI entered at the one closest to the window; this switches to ours
+        if let Err(e) = unsafe { self.swap.ResizeTarget(&self.mode) } {
+            eprintln!("fullscreen ResizeTarget {}x{}: {e}", self.mode.Width, self.mode.Height);
+        }
+        eprintln!("fullscreen exclusive at {}x{} {hz:.2} Hz", self.mode.Width, self.mode.Height);
+        Enter::Entered
+    }
+
+    fn leave(&mut self) {
+        if self.dry {
+            eprintln!("fullscreen (dry run) would leave exclusive");
+            self.dry_exclusive = false;
+            return;
+        }
+        if let Err(e) = unsafe { self.swap.SetFullscreenState(false, None) } {
+            eprintln!("fullscreen SetFullscreenState(FALSE): {e}");
+        }
+    }
+
+    fn is_exclusive(&mut self) -> bool {
+        if self.dry {
+            return self.dry_exclusive;
+        }
+        let mut on = windows::Win32::Foundation::BOOL(0);
+        unsafe { self.swap.GetFullscreenState(Some(&mut on), None) }.is_ok() && on.as_bool()
+    }
+
+    fn resize_buffers(&mut self) {
+        self.resize = true;
+    }
+
+    fn minimize(&mut self) {
+        if self.dry {
+            return;
+        }
+        unsafe {
+            let _ = ShowWindowAsync(self.window, SW_MINIMIZE);
+        }
+    }
+
+    fn restore(&mut self) {
+        if self.dry {
+            return;
+        }
+        use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+        unsafe {
+            let _ = ShowWindowAsync(self.window, SW_RESTORE);
+            // over the whole monitor it is on (asynchronous: this thread never waits for the window's)
+            let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if GetMonitorInfoW(MonitorFromWindow(self.window, MONITOR_DEFAULTTONEAREST), &mut info).as_bool() {
+                let r = info.rcMonitor;
+                let _ = SetWindowPos(self.window, HWND_TOP, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_SHOWWINDOW | SWP_NOOWNERZORDER);
+            }
+            let _ = SetForegroundWindow(self.window);
+        }
+    }
+
+    fn focused(&mut self) -> bool {
+        if self.dry {
+            return self.focus;
+        }
+        unsafe { GetForegroundWindow() == self.window }
+    }
+}
+
 // ------------------------------------------------------------------------------------- the window
 
 /// Posted by [`shutdown`]: the window thread destroys the window and ends.
 const WM_GOODBYE: u32 = WM_APP + 1;
 
+/// The full-screen window's events (focus, Alt+Enter), from its thread to the presenter's next present. Collected
+/// only for a visible full-screen window ([`WindowMode::Fullscreen`]); the other modes' windows behave as before.
+static FS_WINDOW: AtomicBool = AtomicBool::new(false);
+static FS_EVENTS: Mutex<Vec<fullscreen::Event>> = Mutex::new(Vec::new());
+
+fn fs_event(e: fullscreen::Event) {
+    let mut q = FS_EVENTS.lock().unwrap_or_else(|e| e.into_inner());
+    if q.len() < 64 {
+        q.push(e);
+    }
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if FS_WINDOW.load(Ordering::Relaxed) {
+        const VK_RETURN: usize = 0x0d;
+        let alt = lparam.0 & (1 << 29) != 0;
+        match msg {
+            WM_ACTIVATEAPP => {
+                fs_event(if wparam.0 != 0 { fullscreen::Event::FocusGained } else { fullscreen::Event::FocusLost });
+            }
+            // Alt+Enter (not its auto-repeat); WM_SYSCHAR's Enter is eaten so it does not beep
+            WM_SYSKEYDOWN if wparam.0 == VK_RETURN && alt => {
+                if lparam.0 & (1 << 30) == 0 {
+                    fs_event(fullscreen::Event::AltEnter);
+                }
+                return LRESULT(0);
+            }
+            WM_SYSCHAR if wparam.0 == VK_RETURN => return LRESULT(0),
+            WM_CLOSE => {
+                // the presenter may be inside SetFullscreenState, which sends this thread messages: shut down from
+                // another thread so this one keeps pumping
+                let _ = std::thread::Builder::new().name("close".into()).spawn(|| {
+                    crate::framelog::write_summary("window closed");
+                    shutdown();
+                    std::process::exit(0);
+                });
+                return LRESULT(0);
+            }
+            _ => {}
+        }
+    }
     if msg == WM_CLOSE {
         crate::framelog::write_summary("window closed");
         shutdown();
@@ -1001,19 +1465,27 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 pub enum WindowMode {
     /// A normal window with a frame, of this client size, shown without taking focus (the default).
     Windowed(u32, u32),
-    /// A borderless window over the whole primary display.
+    /// A borderless window over the whole primary display (the launcher's "windowed fullscreen").
     Borderless,
+    /// Exclusive full screen ([`crate::fullscreen`]): a borderless window that takes the focus, then
+    /// `SetFullscreenState(TRUE)` at a display mode of the title's image size (else the desktop's).
+    Fullscreen,
 }
 
-/// `REBUILD_WINDOW=windowed|borderless` (default windowed) and `REBUILD_WINDOW_SIZE=WxH` (default 1280x720).
+/// `REBUILD_WINDOW=windowed|borderless|fullscreen` (default windowed) and `REBUILD_WINDOW_SIZE=WxH` (default
+/// 1280x720).
 pub fn window_mode() -> WindowMode {
     parse_window_mode(std::env::var("REBUILD_WINDOW").ok().as_deref(), std::env::var("REBUILD_WINDOW_SIZE").ok().as_deref())
 }
 
 fn parse_window_mode(mode: Option<&str>, size: Option<&str>) -> WindowMode {
-    // borderless = the launcher's "windowed fullscreen"; fullscreen runs the same until exclusive mode is built
-    if mode.is_some_and(|m| ["borderless", "fullscreen", "windowed fullscreen", "windowed_fullscreen"].iter().any(|k| m.trim().eq_ignore_ascii_case(k))) {
+    let is = |keys: &[&str]| mode.is_some_and(|m| keys.iter().any(|k| m.trim().eq_ignore_ascii_case(k)));
+    // borderless = the launcher's "windowed fullscreen"
+    if is(&["borderless", "windowed fullscreen", "windowed_fullscreen"]) {
         return WindowMode::Borderless;
+    }
+    if is(&["fullscreen", "exclusive", "exclusive fullscreen", "exclusive_fullscreen"]) {
+        return WindowMode::Fullscreen;
     }
     let (w, h) = size
         .and_then(|s| {
@@ -1042,9 +1514,11 @@ pub fn fit_client(client: (u32, u32), frame: (u32, u32), work: (u32, u32)) -> (u
 }
 
 /// The title's window (borderless over the display, a framed window of the chosen client size, or a hidden one),
-/// on its own thread that pumps its messages. A visible window is shown without taking focus.
-fn window(size: (u32, u32), hidden: bool) -> Result<HWND, String> {
-    let windowed = matches!(window_mode(), WindowMode::Windowed(..));
+/// on its own thread that pumps its messages. A visible window is shown without taking focus, except a full-screen
+/// one: exclusive full screen needs the focus, and the user asked for the whole screen.
+fn window(mode: WindowMode, size: (u32, u32), hidden: bool) -> Result<HWND, String> {
+    let windowed = matches!(mode, WindowMode::Windowed(..));
+    let activate = mode == WindowMode::Fullscreen && !hidden;
     let (tx, rx) = std::sync::mpsc::channel::<Result<usize, String>>();
     std::thread::Builder::new()
         .name("window".into())
@@ -1084,8 +1558,13 @@ fn window(size: (u32, u32), hidden: bool) -> Result<HWND, String> {
             let hwnd = CreateWindowExW(ex, PCWSTR(class.as_ptr()), PCWSTR(title.as_ptr()), style, x, y, w, h, None, None, instance, None);
             match hwnd {
                 Ok(hwnd) => {
-                    // every visible kind is shown without stealing focus from what the user is doing
-                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                    if activate {
+                        let _ = ShowWindow(hwnd, SW_SHOW);
+                        let _ = SetForegroundWindow(hwnd);
+                    } else {
+                        // every other visible kind is shown without stealing focus from what the user is doing
+                        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                    }
                     let _ = tx.send(Ok(hwnd.0 as usize));
                 }
                 Err(e) => {
@@ -1126,10 +1605,8 @@ pub fn shutdown() {
                 let _ = windows::Win32::Foundation::CloseHandle(event);
             }
         }
-        let _ = windows::Win32::Foundation::CloseHandle(p.waitable);
-        let window = p._window;
+        // the swap chain leaves full screen, is released, and the window is destroyed (`Swap`'s drop)
         drop(p);
-        let _ = PostMessageW(window, WM_GOODBYE, WPARAM(0), LPARAM(0));
     }
 }
 
@@ -1314,6 +1791,97 @@ mod tests {
 }
 
 #[cfg(test)]
+mod swap_tests {
+    use super::*;
+    use fullscreen::{Event, State};
+
+    /// One frame into `s`: its back buffer cleared, then presented (vsync off: the tearing flag unless exclusive).
+    fn frame(s: &mut Swap, queue: &ID3D12CommandQueue, allocator: &ID3D12CommandAllocator, list: &ID3D12GraphicsCommandList, fence: &ID3D12Fence, value: &mut u64) {
+        unsafe {
+            let _ = WaitForSingleObject(s.waitable, 1000);
+            let back = s.swap.GetCurrentBackBufferIndex() as usize;
+            let target = s.buffers[back].clone();
+            allocator.Reset().unwrap();
+            list.Reset(allocator, None).unwrap();
+            list.ResourceBarrier(&[transition(&target, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET)]);
+            list.ClearRenderTargetView(s.rtv(back), &[0.25, 0.5, 0.75, 1.0], None);
+            list.ResourceBarrier(&[transition(&target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT)]);
+            list.Close().unwrap();
+            queue.ExecuteCommandLists(&[Some(list.cast::<ID3D12CommandList>().unwrap())]);
+            let hr = s.present(false);
+            assert!(hr.is_ok(), "present: {hr:?}");
+            *value += 1;
+            queue.Signal(fence, *value).unwrap();
+            let event = CreateEventW(None, false, false, None).unwrap();
+            fence.SetEventOnCompletion(*value, event).unwrap();
+            assert_eq!(WaitForSingleObject(event, 10_000), WAIT_OBJECT_0, "WARP finished within 10 s");
+            let _ = windows::Win32::Foundation::CloseHandle(event);
+        }
+    }
+
+    /// The swap chain in each window mode on WARP, in a hidden off-screen window (full screen therefore a dry run:
+    /// the display is never changed). Every mode presents. A window keeps the image's size and borderless the
+    /// display's, and both ignore full screen's events; full screen's buffers are its mode's size, and the first
+    /// present, Alt+Enter both ways, focus loss and regain each resize them (real `ResizeBuffers`), with presents
+    /// going on after each; a lost device ends it.
+    #[test]
+    fn each_window_mode_presents_on_warp_and_full_screen_transitions_resize_the_buffers() {
+        use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory4};
+        // WARP is part of Windows: a missing one fails the test rather than passing it silently
+        let factory = unsafe { CreateDXGIFactory1::<IDXGIFactory4>() }.expect("DXGI factory");
+        let adapter = unsafe { factory.EnumWarpAdapter::<windows::core::IUnknown>() }.expect("WARP adapter");
+        let mut device: Option<ID3D12Device> = None;
+        unsafe { D3D12CreateDevice(&adapter, windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0, &mut device) }.expect("WARP device");
+        let device = device.unwrap();
+        let host = crate::dxgi::host_mode();
+        unsafe {
+            let queue: ID3D12CommandQueue = device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC::default()).unwrap();
+            let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE).unwrap();
+            let allocator: ID3D12CommandAllocator = device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT).unwrap();
+            let list: ID3D12GraphicsCommandList = device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None).unwrap();
+            list.Close().unwrap();
+            let mut v = 0;
+            let image = (256, 144);
+            for mode in [WindowMode::Windowed(320, 180), WindowMode::Borderless, WindowMode::Fullscreen] {
+                let mut s = Swap::new(&device, &queue, mode, image, DXGI_FORMAT_R8G8B8A8_UNORM, true).unwrap_or_else(|e| panic!("{mode:?}: {e}"));
+                match mode {
+                    WindowMode::Windowed(..) => assert_eq!(s.size, image, "a window keeps the image's size"),
+                    WindowMode::Borderless => assert_eq!(s.size, (host.width, host.height), "borderless: the display's"),
+                    WindowMode::Fullscreen => assert!(s.size.0 >= 1 && s.size.1 >= 1),
+                }
+                for _ in 0..3 {
+                    frame(&mut s, &queue, &allocator, &list, &fence, &mut v);
+                }
+                if mode != WindowMode::Fullscreen {
+                    assert!(!s.pump() && !s.event(Event::AltEnter) && !s.event(Event::FocusLost), "{mode:?}: no full-screen machine");
+                    assert_eq!((s.state(), s.resized), (None, 0));
+                    continue;
+                }
+                let mode_size = s.size;
+                assert!(s.pump(), "the first present enters (dry) and resizes");
+                assert_eq!((s.state(), s.resized, s.size), (Some(State::Exclusive), 1, mode_size));
+                assert_eq!(fullscreen_state(), Some(State::Exclusive));
+                assert!(!s.pump(), "nothing pending: no resize");
+                let steps = [(Event::AltEnter, State::Borderless, true), (Event::AltEnter, State::Exclusive, true), (Event::FocusLost, State::Suspended, false), (Event::FocusGained, State::Exclusive, true)];
+                for (k, (e, want, focus)) in steps.into_iter().enumerate() {
+                    s.fs.as_mut().unwrap().display.focus = focus;
+                    assert!(s.event(e), "{e:?} resizes");
+                    assert_eq!((s.state(), s.resized), (Some(want), 2 + k as u32), "after {e:?}");
+                    assert_eq!(s.buffers.len(), FRAMES);
+                    for _ in 0..2 {
+                        frame(&mut s, &queue, &allocator, &list, &fence, &mut v);
+                    }
+                }
+                assert!(!s.event(Event::DeviceLost), "dry exclusive left; no resize after the end");
+                assert_eq!(s.state(), Some(State::Off));
+                frame(&mut s, &queue, &allocator, &list, &fence, &mut v);
+            }
+            device.GetDeviceRemovedReason().expect("device alive");
+        }
+    }
+}
+
+#[cfg(test)]
 mod window_mode_tests {
     use super::{parse_window_mode, WindowMode};
 
@@ -1322,7 +1890,11 @@ mod window_mode_tests {
         assert_eq!(parse_window_mode(None, None), WindowMode::Windowed(1280, 720));
         assert_eq!(parse_window_mode(Some("windowed"), Some("1600x900")), WindowMode::Windowed(1600, 900));
         assert_eq!(parse_window_mode(Some("Borderless"), Some("1600x900")), WindowMode::Borderless);
-        assert_eq!(parse_window_mode(Some("fullscreen"), None), WindowMode::Borderless);
+        assert_eq!(parse_window_mode(Some("windowed fullscreen"), None), WindowMode::Borderless);
+        // the launcher's "fullscreen" is exclusive now, and no longer runs as borderless
+        assert_eq!(parse_window_mode(Some("fullscreen"), None), WindowMode::Fullscreen);
+        assert_eq!(parse_window_mode(Some(" Exclusive "), Some("1600x900")), WindowMode::Fullscreen);
+        assert_eq!(parse_window_mode(Some("tv"), None), WindowMode::Windowed(1280, 720), "unknown: a window");
         // unreadable or absurd sizes fall back to 720p
         assert_eq!(parse_window_mode(None, Some("huge")), WindowMode::Windowed(1280, 720));
         assert_eq!(parse_window_mode(None, Some("10x10")), WindowMode::Windowed(1280, 720));
