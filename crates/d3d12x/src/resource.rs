@@ -301,13 +301,14 @@ impl Resources {
                     let clear = unsafe { clear.as_ref() }.map(|c| {
                         let mut c = *c;
                         c.Format = DXGI_FORMAT(format::host_format(c.Format.0 as u32) as i32);
-                        if c.Format.0 as u32 == format::STAND_IN.0 {
-                            c.Format = DXGI_FORMAT(format::STAND_IN.1 as i32);
+                        if let Some(s) = format::stand_in(c.Format.0 as u32) {
+                            c.Format = DXGI_FORMAT(s as i32);
                         }
                         c
                     });
                     let clear = clear.filter(|_| hd.Flags.0 & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL.0) != 0);
-                    match ctx.host.resource_in(&hd, clear.as_ref(), initial_layout(initial, &hd)) {
+                    let layout = initial_layout(initial, &hd);
+                    match ctx.host.resource_in(&hd, clear.as_ref(), layout) {
                         Ok(t) => t,
                         Err(hr) => {
                             if owned {
@@ -315,6 +316,10 @@ impl Resources {
                             }
                             ctx.counters.refused.fetch_add(1, Ordering::Relaxed);
                             ctx.events.note("host texture refused", hr.0 as u32 as u64);
+                            ctx.events.note("  its (dimension, host format, flags, layout)", (hd.Dimension.0 as u64) << 48 | (hd.Format.0 as u64 & 0xffff) << 32 | (hd.Flags.0 as u64 & 0xffff) << 16 | layout.0 as u64 & 0xffff);
+                            ctx.events.note("  its (width, height)", hd.Width << 32 | u64::from(hd.Height));
+                            ctx.events.note("  its (depth or array, mips, samples, quality)", u64::from(hd.DepthOrArraySize) << 48 | u64::from(hd.MipLevels) << 32 | u64::from(hd.SampleDesc.Count) << 16 | u64::from(hd.SampleDesc.Quality) & 0xffff);
+                            ctx.events.note("  its (title format, title flags, clear format or ffff)", (desc.Format.0 as u64 & 0xffff) << 32 | (desc.Flags.0 as u64 & 0xffff) << 16 | clear.map_or(0xffff, |c| c.Format.0 as u64 & 0xffff));
                             return hr;
                         }
                     }

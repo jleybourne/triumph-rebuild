@@ -137,8 +137,17 @@ pub fn default_view_format(format: u32, depth_view: bool) -> u32 {
     }
 }
 
-/// The host does not render to B5G5R5A1 (86); RGBA8 stands in (the fork's rule, timing-run L662).
-pub const STAND_IN: (u32, u32) = (86, 28);
+/// The format that stands in for one the host does not render to, when the title makes a render target of it:
+/// RGBA8 (28) for B5G5R5A1 (86, the fork's rule, timing-run L662) and for B4G4R4A4 (115). Both are optional
+/// render-target formats on PC: WARP takes them, the RTX 4070 Ti refuses them with `E_INVALIDARG`, and the title
+/// asserts when its resource at an address (0x428) fails (`exe+0x131a2ad`, the 2560x1440 B4G4R4A4 target it makes
+/// as the loading screen ends).
+pub fn stand_in(format: u32) -> Option<u32> {
+    match format {
+        86 | 115 => Some(28),
+        _ => None,
+    }
+}
 
 /// The console description as `rebuild-xg` takes it.
 pub fn xg_desc(d: &D3D12_RESOURCE_DESC) -> rebuild_xg::ResourceDesc {
@@ -254,8 +263,8 @@ pub fn host_desc(d: &D3D12_RESOURCE_DESC) -> (D3D12_RESOURCE_DESC, u32) {
     }
     h.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     let mut f = host_format(d.Format.0 as u32);
-    if f == STAND_IN.0 && d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 != 0 {
-        f = STAND_IN.1;
+    if d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 != 0 {
+        f = stand_in(f).unwrap_or(f);
     }
     let view = f;
     h.Format = DXGI_FORMAT(typeless(f).unwrap_or(f) as i32);
@@ -312,6 +321,10 @@ mod tests {
         assert_eq!((h.Format.0, view), (27, 29));
         let (h, view) = host_desc(&tex(64, 64, 86, 1, 1));
         assert_eq!((h.Format.0, view), (27, 28), "B5G5R5A1 render target: RGBA8 stands in");
+        let (h, view) = host_desc(&tex(2560, 1440, 115, 1, 1));
+        assert_eq!((h.Format.0, view), (27, 28), "B4G4R4A4 render target (the card refuses it): RGBA8 stands in");
+        let (h, view) = host_desc(&tex(64, 64, 115, 1, 0));
+        assert_eq!((h.Format.0, view), (115, 115), "B4G4R4A4 sampled only: kept");
         let (h, view) = host_desc(&tex(64, 64, 118, 1, 2));
         assert_eq!((h.Format.0, view), (44, 45), "console 16/8 depth: the 24/8 one");
         assert_eq!(default_view_format(40, false), 41);
