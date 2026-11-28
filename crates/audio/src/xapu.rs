@@ -322,6 +322,7 @@ fn run(job: Job, decoders: &mut [Option<OpusDecoder>], pcm: &mut [f32], deinterl
                 (true, _) => XAPU_ALREADY_ACTIVE,
                 (false, 1 | 2) => match OpusDecoder::new(48_000, channels as usize) {
                     Ok(d) => {
+                        crate::stats::count(&crate::stats::OPUS_STREAMS);
                         *slot = Some(d);
                         S_OK
                     }
@@ -355,6 +356,7 @@ fn run(job: Job, decoders: &mut [Option<OpusDecoder>], pcm: &mut [f32], deinterl
             // SAFETY: the title's packet.
             let packet = unsafe { std::slice::from_raw_parts(p.input, p.input_length as usize) };
             let Ok(decoded) = d.decode(packet, MAX_FRAMES, &mut pcm[..MAX_FRAMES * ch]) else {
+                crate::stats::count(&crate::stats::OPUS_ERRORS);
                 r.error = XAPU_BAD_PACKET;
                 return r;
             };
@@ -375,6 +377,8 @@ fn run(job: Job, decoders: &mut [Option<OpusDecoder>], pcm: &mut [f32], deinterl
             }
             r.frames = frames as u32;
             r.output_length = (frames * ch * 4) as u32;
+            crate::stats::count(&crate::stats::OPUS_PACKETS);
+            crate::stats::OPUS_FRAMES.fetch_add(frames as u64, std::sync::atomic::Ordering::Relaxed);
         }
     }
     r
@@ -392,6 +396,7 @@ pub unsafe extern "system" fn XApuConnect(
     if input.is_null() || output.is_null() || handle.is_null() {
         return E_INVALIDARG;
     }
+    crate::stats::count(&crate::stats::XAPU_CONNECTS);
     match Connection::connect(heap::global().clone(), &*input) {
         Ok((c, out)) => {
             output.write(out);

@@ -1,7 +1,7 @@
 # Lane `audio`: the console's audio hardware
 
 Crate `crates/audio` (package `rebuild-audio`). No GPU, no title bytes (every test builds its own input).
-State: **A1-A5 closed.** A5 (round 2): our own XMA2 decoder, `crates/audio/src/wma`, now the XMA contexts'
+State: **A1-A5 closed; round 3 (title sound through our layer): Bink video sound and music play, holes fixed (1 ms timer); the title engine's own output not yet seen.** A5 (round 2): our own XMA2 decoder, `crates/audio/src/wma`, now the XMA contexts'
 default. 18 tests green (`cargo test --release -p rebuild-audio`), plus four hand-run checks (ignored by default:
 the tone, the title-call timings, and A5's two checks against the title's own streams). Workspace: 245 passed, 6 ignored, 0 warnings.
 
@@ -9,6 +9,77 @@ Sources for A1: the fork's `victory-hle` modules `audio.rs` (acphal), `apu.rs` (
 through `git show triumph/main:...` and not copied, plus its run log
 `diagnostics/timing-run-295s-2026-11-25.txt` (audio lines only). Layouts below are the fork's observations;
 the code in this crate is ours.
+
+## Round 3: the title's sound through our layer (branch `agent/audio2`)
+
+### Inventory: every audio API the title imports, and what it binds to
+
+| importer | imports | binds to today | seen in the card runs (`audio1`-`audio3`) |
+|:--|:--|:--|:--|
+| exe | `acphal.dll` (9): heap, SHAPE contexts, coprocessor | ours, `crates/audio` (`heap.rs`, `acp.rs`) through `runtime::exports::console_export` | heap made; coprocessor connected; **one command** (2, register messages, mask `0xc0`); never polled; no XMA voice |
+| exe | `xapu.dll` (5): Opus decode | ours, `xapu.rs` (`opus-pure`) | 1 connection at start; **Bink's audio decodes here**: 2 streams, 1,717 packets -> 1.65 M frames, 0 refused |
+| exe | `chad.dll` (5): DSP convolution | ours, `xdsp.rs` (returns are dry) | 0 streams |
+| exe | `Bink2Scarlett.dll` (23) | the title's own DLL, mapped by our loader; 15 through `runtime::bink` counting wrappers, now with `BinkSetSoundSystem` and `BinkSetVolume` | `BinkSetSoundSystem(open, 0)`: Bink makes its own XAudio2; `BinkSetVolume(.., 0, 0x8000)` |
+| `Bink2Scarlett.dll` | `xaudio2_9.dll` ordinal 1 | the host's System32 `xaudio2_9.dll`, ordinal 1 = `XAudio2Create` (its export table checked: the ordinals match) | renders through `ISpatialAudioClient`: 2 streams (intro video, then the next video), static FL+FR, 48 kHz float, 480-frame periods, never late |
+| exe, Bink | `api-ms-win-core-com` (`CoCreateInstance`, `CoInitializeEx`, `CoUninitialize`, `CoTaskMemFree`, `PropVariantClear`, `StringFromGUID2`) | host `combase`; `MMDeviceEnumerator` is the host's `mmdevapi`/`audioses`, watched by `hostout` | the exe activates an `IAudioClient` (caller `exe+0x5c5958f` <- `+0x43aec1e` <- `+0x43ad919`) and **never initializes it** |
+| exe | `mfplat.dll` (6), `mfreadwrite.dll` (1) | host Media Foundation | `mfplat.dll` loaded; no sound seen from it |
+
+There are no other audio imports: none from `xaudio2*` in the exe, `x3daudio`, `winmm`, `dsound` or `avrt`, and no
+`GetProcAddress` of an audio name (`loader-getproc.csv`).
+
+### Found and fixed: the title's sound played in 10-30 ms pieces
+
+The card run `audio2` (before the fix) captured the intro video's sound and the music after it, both choppy: process
+loopback at title level showed **1,781 holes of 10-30 ms in 69 s of sound** (about 26 a second). The file tap shows
+the same holes, so they are in what XAudio2 was given. The engine itself ran on time (0 late periods, longest gap
+19 ms). Cause: **`Sleep(1)` takes 15.55 ms in our process** (measured). The host's global resolution is already 1 ms
+(another process asks for it), but Windows 11 applies a process's own request only. The feeders are written for the
+console's 1 ms sleeps, so they let their voices run dry between wake-ups.
+
+Fix: `hostout::fine_timer()`, called by `launch::run` before the title starts: `timeBeginPeriod(1)` for the life of
+the process, plus `PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION`, so the request holds while no window of ours is
+visible. `REBUILD_TIMER_RESOLUTION=default` turns it off. With the fix (`audio3`), `Sleep(1)` takes 1.5-1.9 ms and
+the holes drop to **1** (one 48 ms hole at 33.7 s), the same intro and music. Test:
+`the_fine_timer_makes_a_one_ms_sleep_take_about_one_ms`.
+
+### Measured: card runs (RTX 4070 Ti; `runtitle --run`; `REBUILD_AUDIO_VOLUME=0.05`, so nothing loud on the speakers)
+
+Each run took `agents\MEASURING` and `agents\CARD` create-new. nvlddmkm was 453 before, after and 2-5 minutes
+after every run. A was pressed by `titlectl ... run sleep:30,A*60,...` (taken at 30.7 s). The levels below are
+loopback divided by the 0.05 gain, so they are what the title made.
+
+| run | change | sound (process loopback, title level) | holes |
+|:--|:--|:--|:--|
+| `audio1` | none; A not pressed (a titlectl path error) | silent for all 113 s: engagement screen. The coprocessor was connected but idle, and Bink's XAudio2 output played silence | 0 |
+| `audio2` | none | 31-46 s intro video, peak -10.6 dBFS; 50-99 s music, rms -42 to -49 dBFS. Choppy | **1,781** |
+| `audio3` | 1 ms timer | 30-43 s intro, rms -20 to -27, peak -10.5 dBFS; 47-94 s music, rms -39 to -42, peak -29 dBFS | **1** |
+
+`audio2` and `audio3` both ended in a Rust allocation failure in `runtitle` (`memory allocation of 19005456` /
+`153216 bytes failed`) about 100 s in, while the world loads after the intro; `audio3` was then killed at 120 s.
+This matches the vram lanes' load-time memory failures and is not audio: the audio taps are kilobytes a second.
+
+### Not done: the title's own engine makes no sound yet
+
+Through the intro and the music, all of the sound is Bink's: XApu Opus (ours), then Bink's mixer, then host XAudio2,
+then spatial audio. The title's own engine opens an `IAudioClient` from the exe and never calls `Initialize`. It
+registers coprocessor messages (`0xc0`) and never polls them. It enables no XMA voice, and the DSP gets no stream.
+On these screens that may be correct (the console may play only the videos here), or the engine may be waiting for
+something we don't give. A 70 s WARP run (`warp1`, no A pressed, with the new method counts) shows the whole client use: one `GetMixFormat`, then nothing (no format question, no period, no `Initialize`). Next: a card run that goes past the intro, once the load-time memory failure is fixed, to see whether the engine starts (XMA voices, coprocessor polls, its own `Initialize`); the counts above will show it.
+
+### Built (round 3)
+
+- `hostout` (the previous agent's work, made green): hooks the host's `IMMDevice`, `IAudioClient`, render client,
+  spatial streams (`spatial.rs`) and XAudio2 voices (`xaudio.rs`). `REBUILD_AUDIO_SINK` taps every stream into WAV
+  files. `REBUILD_AUDIO_VOLUME` sets a gain after the tap. Added this round: the first caller of each activation
+  (`module+offset`), counts of `IAudioClient`'s other methods (IsFormatSupported with the formats asked,
+  GetMixFormat, GetDevicePeriod, IAudioClient2/3 slots), the coprocessor's registered mask, posts, takes and polls,
+  each voice's dry-queue count and gaps between submits, `Sleep(1)`'s time, and `REBUILD_AUDIO_REPORT=<s>` (the
+  report every s seconds, so a run that crashes still leaves one).
+- `audiocap` (bin): `record --wait runtitle.exe --out x.wav` (process loopback of the title only, in a process of
+  its own), `analyze x.wav [--gain g]` (per-second RMS/peak/flatness, holes, clicks), and `selftest`. The analyzer no
+  longer counts a sound starting out of digital silence as a click.
+- `selftest --volume 0.05`: tap peak -26.4 dBFS, loopback -52.5 dBFS. Loopback is taken after the gain, so a run's
+  loopback is analysed with `--gain 0.05`.
 
 ## A1: the 19 functions
 
