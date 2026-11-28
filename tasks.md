@@ -125,7 +125,7 @@ decision 4.
 |---|---|---|
 | doing | D3D12.X device, lists, PSOs, root signatures from title state: all built; stream/graphics/compute pipelines and on-demand translation of programs outside the library (#31, #44, #52) done; **next: host PSOs built on first use, not all 54k at creation (memory)** | creation path completes |
 | doing | console descriptor heaps (T#/V# slots shaders index), PC descriptors beside, dirty list (no scan): heap buffers are raw SRVs, never CBVs (#37); index ranges apart next | a shader samples a texture made by title code |
-| doing | present / vsync / window: present, capture, frame-rate setting (#45) and vsync done; every loading-screen draw has shaders, frame still black | a non-black frame, captured to PNG |
+| done | present / vsync / window: present, capture, frame-rate setting (#45), vsync; the title's start screen captured at 3840×2160 on the card (2026-11-28) | a non-black frame, captured to PNG |
 | todo | frame line: fps · ms · draws · dropped · upload MB · upload ms · translation ms · output res · upscaler/mode · vendor | one parseable line a second |
 | doing | Build 0 (c), moved here: the title's GPU time from per-list timestamp pairs, RT on and off. Built: a query pair in every direct/compute host list, resolved per queue and frame in one run, read a few frames late (`runtime/src/gputime.rs`); frame line `gpu` and summary `gpu_ms` are the frames' busy time (union over queues), `gpu_sum_ms` the plain sum. The title's own GPU timestamp labels (flag 1) are written into its memory the same way. WARP, loading screen: 44 ms a frame (indicative only). Left: the card's number, RT on and off, once the real frame renders | measured; replaces the ~45 ms everywhere it is quoted |
 

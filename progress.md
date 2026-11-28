@@ -1,7 +1,7 @@
 # Progress
 
 ```
-overall   █████████████░░░░░░░  66 %   work toward 30 fps, weighted by build step
+overall   ██████████████░░░░░░  68 %   work toward 30 fps, weighted by build step
 fps       card: 60 s, 18.9 fps avg, 21 fps after the loading screen (GPU 1.5 ms a frame) · target 30 · baseline 7.6
 updated   2026-11-28
 ```
@@ -13,7 +13,7 @@ and becomes the number that counts.
 
 | track | progress | | note |
 |---|---|--:|---|
-| **Build 5 · first frame** | `████████████████░░░░` | 80 % | memory model in the run (tiles + upload ring, #60): 12-13 → 18-21 fps, past the loading screen; first pixels drawn (a seam bug); content still the title's black fade |
+| **Build 5 · first frame** | `██████████████████░░` | 90 % | **first real frame captured on the card**: the title's start screen (Account picker / Player); next: input past it |
 | shaders compiled (every class) | `██████████░░░░░░░░░░` | 12,981 / 25,694 | pixel 9,965 · vertex 1,672 · compute 1,344 · of them wave-wide 4,182 ([wave64](runs/build4-wave64.md)) · agnostic 8,799 / 9,128 ([v1](runs/build4-v1.md)) |
 | shaders counted | `████░░░░░░░░░░░░░░░░` | 5,195 / 25,694 | bit-exact vs the oracle on WARP ([exec](runs/build4-exec.md)) |
 | runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
@@ -50,7 +50,7 @@ and becomes the number that counts.
 | graphics and stream pipelines (0x50, 0x2b0) | `████████████████████` | done (PR #30): 14 created, 0 refused |
 | title start-up to its first submission | `████████████████████` | done: ExecuteCommandListsX and PresentX called at 1.44 s |
 | ExecuteCommandLists + PresentX | `████████████████████` | done (PR #32): submit, borderless window, flip swap chain, PNG capture |
-| a non-black frame, captured | `██████████████░░░░░░` | capture verified (a clear probe shows magenta); 2 of 3 loading-screen draws run; draw 1's VS/PS are not in shaders.rpf, on-demand graphics translation next |
+| a non-black frame, captured | `████████████████████` | done: the title's start screen at 3840×2160 on the card (CBV shadow stride fix, #63) |
 | frame line (fps, ms, draws, …) | `██████████████████░░` | written each second + summary.toml (PR #32); upload/xlate/upscale fields to come |
 | Build 0 (c): the title's GPU time | `░░░░░░░░░░░░░░░░░░░░` | needs a frame |
 
@@ -115,6 +115,19 @@ Older entries are never edited.
 
 > The three entries below (58, 59, 61 %) were missing; they are filled in afterwards from the commits that moved
 > the header (`6292f20`, `bafec7c`, `71c075d`). The points behind each step were not recorded.
+
+### 2026-11-28 — First real frame: the title's start screen on the card
+
+```
+[██████████████░░░░░░]  68 %   (Build 5 80 % → 90 %)
+title       the start screen ("ACCOUNT PICKER · SCREEN NARRATION (OFF) · PLAYER") rendered at 3840x2160 on the RTX
+```
+
+- **Cause of the last black:** constant buffers got a shadow record with stride 1, so the UI vertex shader read
+  rows 2 and 4 as the same 16 bytes and every vertex had x == y (the diagonal). Stride 16 now (#63).
+- Also merged: #61 load performance (concurrent DirectStorage reads, `REBUILD_PROFILE`), #62 full-screen rect as one
+  primitive.
+- **Next:** input past the start screen (it waits for A), then menus and gameplay.
 
 ### 2026-11-28 — The memory model runs the title: 18-21 fps, past the loading screen
 
