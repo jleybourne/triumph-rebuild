@@ -132,8 +132,9 @@ pub extern "system" fn GetProcAddress(module: HMODULE, name: PCSTR) -> *mut c_vo
                 std::ptr::null_mut()
             }
         },
+        // a host function; the title's window functions (by name or ordinal, from user32 or an API set) are ours
         None => match unsafe { HostGetProcAddress(module, name) } {
-            Some(f) => f as *mut c_void,
+            Some(f) => crate::titlewindow::override_host_address(f as usize as u64).map_or(f as *mut c_void, |o| o as *mut c_void),
             None => {
                 let mut buf = [0u16; 260];
                 let n = unsafe { HostGetModuleFileNameW(module, &mut buf) } as usize;
@@ -331,6 +332,38 @@ mod tests {
         let n = GetModuleFileNameW(HMODULE::default(), buf.as_mut_ptr(), 64) as usize;
         assert_eq!(String::from_utf16_lossy(&buf[..n]), "G:\\title_test.exe");
         assert_eq!(FreeLibrary(exe).0, 1);
+    }
+
+    /// `GetProcAddress` of a window function, by name from user32 or an API set, or by user32 ordinal, gives ours.
+    #[test]
+    fn window_functions_by_get_proc_address_are_ours_by_name_ordinal_or_api_set() {
+        let u = wstr("user32.dll");
+        let user32 = LoadLibraryW(PCWSTR(u.as_ptr()));
+        assert!(!user32.is_invalid());
+        let ours = crate::titlewindow::override_export("ShowWindow").unwrap();
+        let n = cstr("ShowWindow");
+        assert_eq!(GetProcAddress(user32, PCSTR(n.as_ptr() as *const u8)) as u64, ours, "by name");
+        // the same function by its user32 ordinal (found from the export table: ordinals differ between builds)
+        let ordinal = (1u16..=3000).find(|&o| {
+            let host = unsafe { HostGetProcAddress(user32, PCSTR(o as usize as *const u8)) };
+            let named = unsafe { HostGetProcAddress(user32, PCSTR(n.as_ptr() as *const u8)) };
+            host.is_some() && host.map(|f| f as usize) == named.map(|f| f as usize)
+        });
+        if let Some(o) = ordinal {
+            assert_eq!(GetProcAddress(user32, PCSTR(o as usize as *const u8)) as u64, ours, "by ordinal #{o}");
+        }
+        // through an API set that forwards to user32
+        let set = wstr("ext-ms-win-ntuser-window-l1-1-0.dll");
+        let h = LoadLibraryW(PCWSTR(set.as_ptr()));
+        if !h.is_invalid() {
+            let f = GetProcAddress(h, PCSTR(n.as_ptr() as *const u8));
+            if !f.is_null() {
+                assert_eq!(f as u64, ours, "through the API set");
+            }
+        }
+        // other user32 functions stay the host's
+        let d = cstr("DestroyWindow");
+        assert_eq!(GetProcAddress(user32, PCSTR(d.as_ptr() as *const u8)) as usize, unsafe { HostGetProcAddress(user32, PCSTR(d.as_ptr() as *const u8)) }.unwrap() as usize);
     }
 
     #[test]

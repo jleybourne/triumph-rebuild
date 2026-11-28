@@ -27,8 +27,10 @@
 //! - **copy** when the back buffer is of the swap chain's format family and fits: `CopyTextureRegion` into the
 //!   top-left corner, and the swap chain's source size set to the back buffer's (`IDXGISwapChain2::SetSourceSize`),
 //!   so the compositor or the display scales it to the screen: no shader, no extra pass;
-//! - **blit** otherwise (another format family, larger than the screen): a full-screen triangle samples the back
-//!   buffer (linear) into the swap-chain buffer; the sampler converts the format.
+//! - **blit** otherwise (another format family, larger than the swap chain, e.g. borderless on a display smaller
+//!   than the image): a full-screen triangle samples the back buffer (linear) into the swap-chain buffer; the sampler
+//!   converts the format. `REBUILD_PRESENT_SCALE=blit` makes a window's swap chain the window's size, so the blit
+//!   scales there too (a check of this path: the card shows the title's start screen through it at 1280x720).
 //!
 //! The back buffer is read in the state the title left it in for presenting (`PRESENT` = `COMMON`; the copy or the
 //! shader read promotes it implicitly and it decays back after). Then `Present`, with vsync as set now
@@ -447,6 +449,8 @@ impl Presenter {
                 let s = (mode.width.max(1), mode.height.max(1));
                 (s, s)
             }
+            // REBUILD_PRESENT_SCALE=blit: the swap chain at the window's size, and the blit scales into it
+            WindowMode::Windowed(w, h) if std::env::var("REBUILD_PRESENT_SCALE").is_ok_and(|v| v.trim() == "blit") => ((w, h), (w, h)),
             WindowMode::Windowed(w, h) => ((w, h), ((source.Width as u32).max(1), source.Height.max(1))),
         };
         let format = family(source.Format.0 as u32).unwrap_or(DXGI_FORMAT_R8G8B8A8_UNORM);
@@ -623,6 +627,10 @@ impl Presenter {
                     list.CopyTextureRegion(&dst, 0, 0, 0, &src, Some(&area));
                     (w, h, D3D12_RESOURCE_STATE_COPY_DEST)
                 } else {
+                    static ONCE: AtomicBool = AtomicBool::new(false);
+                    if !ONCE.swap(true, Ordering::Relaxed) {
+                        eprintln!("present   the blit: {w}x{h} format {} ({} mips, {} layers, flags {:#x}) onto {}x{} format {}", desc.Format.0, desc.MipLevels, desc.DepthOrArraySize, desc.Flags.0, self.size.0, self.size.1, self.format.0);
+                    }
                     self.draw(list, i * FRAMES + back, back, source, desc, &target);
                     (self.size.0, self.size.1, D3D12_RESOURCE_STATE_RENDER_TARGET)
                 };
@@ -717,24 +725,8 @@ impl Presenter {
         unsafe {
             list.ResourceBarrier(&[transition(target, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET)]);
             let Some(b) = &self.blit else { return };
-            let cpu = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: self.srv.GetCPUDescriptorHandleForHeapStart().ptr + descriptor * self.srv_step as usize };
-            let view = D3D12_SHADER_RESOURCE_VIEW_DESC {
-                Format: typed(desc.Format.0 as u32),
-                ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
-                Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 { Texture2D: D3D12_TEX2D_SRV { MostDetailedMip: 0, MipLevels: 1, ..Default::default() } },
-            };
-            self.device.CreateShaderResourceView(source, Some(&view), cpu);
             let rtv = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: self.rtv.GetCPUDescriptorHandleForHeapStart().ptr + back * self.rtv_step };
-            list.OMSetRenderTargets(1, Some(&rtv), false, None);
-            list.SetDescriptorHeaps(&[Some(self.srv.clone())]);
-            list.SetGraphicsRootSignature(&b.root);
-            list.SetPipelineState(&b.pso);
-            list.SetGraphicsRootDescriptorTable(0, D3D12_GPU_DESCRIPTOR_HANDLE { ptr: self.srv.GetGPUDescriptorHandleForHeapStart().ptr + descriptor as u64 * self.srv_step });
-            list.RSSetViewports(&[D3D12_VIEWPORT { TopLeftX: 0.0, TopLeftY: 0.0, Width: self.size.0 as f32, Height: self.size.1 as f32, MinDepth: 0.0, MaxDepth: 1.0 }]);
-            list.RSSetScissorRects(&[RECT { left: 0, top: 0, right: self.size.0 as i32, bottom: self.size.1 as i32 }]);
-            list.IASetPrimitiveTopology(windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            list.DrawInstanced(3, 1, 0, 0);
+            record_blit(&self.device, list, b, &self.srv, self.srv_step, descriptor, rtv, source, desc, self.size);
         }
     }
 
@@ -780,6 +772,42 @@ float4 ps(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target {
     return float4(source.SampleLevel(linear_clamp, uv, 0).rgb, 1);
 }
 ";
+
+/// Record the blit: `source` (in a state a pixel shader may read, COMMON included) sampled over `size` of the
+/// render target at `rtv` (in RENDER_TARGET), through the shader-visible `srv` heap's `descriptor`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn record_blit(
+    device: &ID3D12Device,
+    list: &ID3D12GraphicsCommandList,
+    b: &Blit,
+    srv: &ID3D12DescriptorHeap,
+    srv_step: u64,
+    descriptor: usize,
+    rtv: D3D12_CPU_DESCRIPTOR_HANDLE,
+    source: &ID3D12Resource,
+    desc: &D3D12_RESOURCE_DESC,
+    size: (u32, u32),
+) {
+    unsafe {
+        let cpu = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: srv.GetCPUDescriptorHandleForHeapStart().ptr + descriptor * srv_step as usize };
+        let view = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: typed(desc.Format.0 as u32),
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 { Texture2D: D3D12_TEX2D_SRV { MostDetailedMip: 0, MipLevels: 1, ..Default::default() } },
+        };
+        device.CreateShaderResourceView(source, Some(&view), cpu);
+        list.OMSetRenderTargets(1, Some(&rtv), false, None);
+        list.SetDescriptorHeaps(&[Some(srv.clone())]);
+        list.SetGraphicsRootSignature(&b.root);
+        list.SetPipelineState(&b.pso);
+        list.SetGraphicsRootDescriptorTable(0, D3D12_GPU_DESCRIPTOR_HANDLE { ptr: srv.GetGPUDescriptorHandleForHeapStart().ptr + descriptor as u64 * srv_step });
+        list.RSSetViewports(&[D3D12_VIEWPORT { TopLeftX: 0.0, TopLeftY: 0.0, Width: size.0 as f32, Height: size.1 as f32, MinDepth: 0.0, MaxDepth: 1.0 }]);
+        list.RSSetScissorRects(&[RECT { left: 0, top: 0, right: size.0 as i32, bottom: size.1 as i32 }]);
+        list.IASetPrimitiveTopology(windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        list.DrawInstanced(3, 1, 0, 0);
+    }
+}
 
 fn compile(entry: &str, target: &str) -> Result<ID3DBlob, String> {
     let entry = std::ffi::CString::new(entry).map_err(|e| e.to_string())?;
@@ -996,6 +1024,22 @@ fn parse_window_mode(mode: Option<&str>, size: Option<&str>) -> WindowMode {
     WindowMode::Windowed(w, h)
 }
 
+/// A window's client size that fits, frame included (`frame`: what the frame adds), in the `work` area: `client`
+/// itself when it fits, else scaled down keeping its shape. A work area too small to read leaves it as asked.
+pub fn fit_client(client: (u32, u32), frame: (u32, u32), work: (u32, u32)) -> (u32, u32) {
+    let room = (work.0.saturating_sub(frame.0), work.1.saturating_sub(frame.1));
+    if room.0 < 160 || room.1 < 90 || (client.0 <= room.0 && client.1 <= room.1) {
+        return client;
+    }
+    let (cw, ch, rw, rh) = (u64::from(client.0.max(1)), u64::from(client.1.max(1)), u64::from(room.0), u64::from(room.1));
+    // the tighter side sets the scale: the width when rw/cw < rh/ch
+    if rw * ch < rh * cw {
+        (room.0, ((ch * rw / cw) as u32).max(1))
+    } else {
+        (((cw * rh / ch) as u32).max(1), room.1)
+    }
+}
+
 /// The title's window (borderless over the display, a framed window of the chosen client size, or a hidden one),
 /// on its own thread that pumps its messages. A visible window is shown without taking focus.
 fn window(size: (u32, u32), hidden: bool) -> Result<HWND, String> {
@@ -1019,10 +1063,18 @@ fn window(size: (u32, u32), hidden: bool) -> Result<HWND, String> {
             let (ex, style, x, y, w, h) = if hidden {
                 (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, WS_POPUP, -32000, -32000, 64, 64)
             } else if windowed {
-                // a framed window whose client area is `size`; created hidden, then shown without activation
+                // a framed window whose client area is `size` (scaled down, same shape, to fit the screen's work area);
+                // created hidden, then shown without activation
                 let style = WS_OVERLAPPEDWINDOW;
                 let mut r = RECT { left: 0, top: 0, right: size.0 as i32, bottom: size.1 as i32 };
                 let _ = AdjustWindowRectEx(&mut r, style, false, WS_EX_APPWINDOW);
+                let mut work = RECT::default();
+                if SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut work as *mut RECT as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).is_ok() {
+                    let frame = ((r.right - r.left) as u32 - size.0, (r.bottom - r.top) as u32 - size.1);
+                    let fits = fit_client(size, frame, ((work.right - work.left).max(0) as u32, (work.bottom - work.top).max(0) as u32));
+                    r = RECT { left: 0, top: 0, right: fits.0 as i32, bottom: fits.1 as i32 };
+                    let _ = AdjustWindowRectEx(&mut r, style, false, WS_EX_APPWINDOW);
+                }
                 (WS_EX_APPWINDOW, style, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top)
             } else {
                 (WS_EX_APPWINDOW, WS_POPUP, 0, 0, size.0 as i32, size.1 as i32)
@@ -1118,6 +1170,146 @@ mod tests {
         assert_eq!(half(0x3c00), 1.0);
         assert_eq!(half(0xc000), -2.0);
     }
+
+    fn texture(device: &ID3D12Device, w: u32, h: u32, format: DXGI_FORMAT, flags: D3D12_RESOURCE_FLAGS, state: D3D12_RESOURCE_STATES) -> ID3D12Resource {
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Width: u64::from(w),
+            Height: h,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: format,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Flags: flags,
+            ..Default::default()
+        };
+        let mut r: Option<ID3D12Resource> = None;
+        unsafe { device.CreateCommittedResource(&D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() }, D3D12_HEAP_FLAG_NONE, &desc, state, None, &mut r) }.unwrap();
+        r.unwrap()
+    }
+
+    fn run(queue: &ID3D12CommandQueue, fence: &ID3D12Fence, value: u64, list: &ID3D12GraphicsCommandList) {
+        unsafe {
+            list.Close().unwrap();
+            queue.ExecuteCommandLists(&[Some(list.cast::<ID3D12CommandList>().unwrap())]);
+            queue.Signal(fence, value).unwrap();
+            let event = CreateEventW(None, false, false, None).unwrap();
+            fence.SetEventOnCompletion(value, event).unwrap();
+            assert_eq!(WaitForSingleObject(event, 10_000), WAIT_OBJECT_0, "WARP finished within 10 s");
+            let _ = windows::Win32::Foundation::CloseHandle(event);
+        }
+    }
+
+    /// The scaling path: a 64x64 image of four coloured quadrants (left in COMMON, as the title leaves its plane),
+    /// blitted onto a smaller 40x24 RGBA8 target, read back. Each quadrant's centre keeps its colour, right side up,
+    /// an image of another channel order (BGRA) reaches the RGBA target in the right channels, and so does the title's
+    /// kind of image (typeless RGBA8 with render-target and UAV use). On WARP.
+    #[test]
+    fn the_blit_scales_an_image_onto_a_smaller_target_on_warp() {
+        use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory4};
+        let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory4>() }) else { return };
+        let Ok(adapter) = (unsafe { factory.EnumWarpAdapter::<windows::core::IUnknown>() }) else { return };
+        let mut device: Option<ID3D12Device> = None;
+        if unsafe { D3D12CreateDevice(&adapter, windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0, &mut device) }.is_err() {
+            return;
+        }
+        let device = device.unwrap();
+        const QUADS: [[u8; 4]; 4] = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 255, 255]];
+        let (sw, sh, tw, th) = (64u32, 64u32, 40u32, 24u32);
+        unsafe {
+            let queue: ID3D12CommandQueue = device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC::default()).unwrap();
+            let fence: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_NONE).unwrap();
+            let allocator: ID3D12CommandAllocator = device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT).unwrap();
+            let list: ID3D12GraphicsCommandList = device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None).unwrap();
+            list.Close().unwrap();
+            let b = blit(&device, DXGI_FORMAT_R8G8B8A8_UNORM).expect("the blit's pipeline");
+            let srv: ID3D12DescriptorHeap = device
+                .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC { Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, NumDescriptors: 4, Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, ..Default::default() })
+                .unwrap();
+            let srv_step = u64::from(device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
+            let rtv_heap: ID3D12DescriptorHeap = device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC { Type: D3D12_DESCRIPTOR_HEAP_TYPE_RTV, NumDescriptors: 1, ..Default::default() }).unwrap();
+            let rtv = rtv_heap.GetCPUDescriptorHandleForHeapStart();
+            let mut value = 0;
+            // the title's own image is typeless RGBA8 with render-target and unordered-access use (flags 0x5)
+            let title_flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            let cases = [
+                (DXGI_FORMAT_R8G8B8A8_UNORM, false, D3D12_RESOURCE_FLAG_NONE),
+                (DXGI_FORMAT_B8G8R8A8_UNORM, true, D3D12_RESOURCE_FLAG_NONE),
+                (DXGI_FORMAT_R8G8B8A8_TYPELESS, false, title_flags),
+            ];
+            for (case, (format, bgra, flags)) in cases.into_iter().enumerate() {
+                // the image, uploaded, then left in COMMON
+                let source = texture(&device, sw, sh, format, flags, D3D12_RESOURCE_STATE_COMMON);
+                let pitch = (sw * 4).next_multiple_of(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+                let upload = {
+                    let desc = D3D12_RESOURCE_DESC {
+                        Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                        Width: u64::from(pitch * sh),
+                        Height: 1,
+                        DepthOrArraySize: 1,
+                        MipLevels: 1,
+                        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                        Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                        ..Default::default()
+                    };
+                    let mut r: Option<ID3D12Resource> = None;
+                    device.CreateCommittedResource(&D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_UPLOAD, ..Default::default() }, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, None, &mut r).unwrap();
+                    r.unwrap()
+                };
+                let mut p: *mut c_void = std::ptr::null_mut();
+                upload.Map(0, None, Some(&mut p)).unwrap();
+                let bytes = std::slice::from_raw_parts_mut(p as *mut u8, (pitch * sh) as usize);
+                for y in 0..sh {
+                    for x in 0..sw {
+                        let q = QUADS[usize::from(y >= sh / 2) * 2 + usize::from(x >= sw / 2)];
+                        let px = if bgra { [q[2], q[1], q[0], q[3]] } else { q };
+                        let o = (y * pitch + x * 4) as usize;
+                        bytes[o..o + 4].copy_from_slice(&px);
+                    }
+                }
+                upload.Unmap(0, None);
+                allocator.Reset().unwrap();
+                list.Reset(&allocator, None).unwrap();
+                let footprint = |format| D3D12_PLACED_SUBRESOURCE_FOOTPRINT { Offset: 0, Footprint: D3D12_SUBRESOURCE_FOOTPRINT { Format: format, Width: sw, Height: sh, Depth: 1, RowPitch: pitch } };
+                let src = D3D12_TEXTURE_COPY_LOCATION { pResource: borrowed(&upload), Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: footprint(format) } };
+                let dst = D3D12_TEXTURE_COPY_LOCATION { pResource: borrowed(&source), Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 } };
+                list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
+                list.ResourceBarrier(&[transition(&source, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON)]);
+                value += 1;
+                run(&queue, &fence, value, &list);
+
+                // the blit onto the smaller target, as the presenter records it, then a readback
+                let target = texture(&device, tw, th, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                device.CreateRenderTargetView(&target, None, rtv);
+                allocator.Reset().unwrap();
+                list.Reset(&allocator, None).unwrap();
+                list.ClearRenderTargetView(rtv, &[1.0, 0.0, 1.0, 1.0], None);
+                record_blit(&device, &list, &b, &srv, srv_step, case, rtv, &source, &source.GetDesc(), (tw, th));
+                list.ResourceBarrier(&[transition(&target, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+                let rpitch = (tw * 4).next_multiple_of(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+                let readback = buffer(&device, D3D12_HEAP_TYPE_READBACK, u64::from(rpitch * th)).unwrap();
+                let fp = D3D12_PLACED_SUBRESOURCE_FOOTPRINT { Offset: 0, Footprint: D3D12_SUBRESOURCE_FOOTPRINT { Format: DXGI_FORMAT_R8G8B8A8_UNORM, Width: tw, Height: th, Depth: 1, RowPitch: rpitch } };
+                let dst = D3D12_TEXTURE_COPY_LOCATION { pResource: borrowed(&readback), Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: fp } };
+                let src = D3D12_TEXTURE_COPY_LOCATION { pResource: borrowed(&target), Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 } };
+                list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
+                value += 1;
+                run(&queue, &fence, value, &list);
+                device.GetDeviceRemovedReason().expect("device alive");
+
+                let mut p: *mut c_void = std::ptr::null_mut();
+                readback.Map(0, None, Some(&mut p)).unwrap();
+                let got = to_rgba8(std::slice::from_raw_parts(p as *const u8, (rpitch * th) as usize), tw, th, rpitch, DXGI_FORMAT_R8G8B8A8_UNORM);
+                readback.Unmap(0, None);
+                let at = |x: u32, y: u32| got[((y * tw + x) * 4) as usize..][..4].to_vec();
+                for (k, q) in QUADS.iter().enumerate() {
+                    let (x, y) = (tw / 4 + (k as u32 % 2) * tw / 2, th / 4 + (k as u32 / 2) * th / 2);
+                    assert_eq!(at(x, y), q.to_vec(), "{format:?}: quadrant {k} at ({x}, {y})");
+                }
+                // every pixel was drawn (no clear colour left), and none is black
+                assert!(got.chunks(4).all(|p| p != [255, 0, 255, 255] && p[..3] != [0, 0, 0]), "{format:?}: the whole target is the image");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1134,5 +1326,14 @@ mod window_mode_tests {
         assert_eq!(parse_window_mode(None, Some("huge")), WindowMode::Windowed(1280, 720));
         assert_eq!(parse_window_mode(None, Some("10x10")), WindowMode::Windowed(1280, 720));
         assert_eq!(parse_window_mode(None, Some(" 1920 X 1080 ")), WindowMode::Windowed(1920, 1080));
+    }
+
+    #[test]
+    fn a_window_larger_than_the_screen_is_scaled_down_to_fit_keeping_its_shape() {
+        use super::fit_client;
+        // a 4K launcher size in a 2560x1400 work area, a 16x39 frame: 16:9 in 2544x1361
+        assert_eq!(fit_client((3840, 2160), (16, 39), (2560, 1400)), (2419, 1361));
+        assert_eq!(fit_client((1280, 720), (16, 39), (2560, 1400)), (1280, 720), "fits: unchanged");
+        assert_eq!(fit_client((1280, 720), (16, 39), (0, 0)), (1280, 720), "no work area: as asked");
     }
 }

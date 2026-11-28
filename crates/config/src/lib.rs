@@ -140,9 +140,9 @@ use Tier::*;
 /// Every option. Add one only with its measured effect; its default is the measured best.
 pub static REGISTRY: &[Setting] = &[
     s("game.dir", "Game folder", "The title's folder. Read-only: nothing is ever written into it.", Kind::Path, Default::Path(""), Restart, Stable),
-    s("display.width", "Output width", "The size of the window or screen the frame is presented at.", Kind::Int { min: 640, max: 7680 }, Default::Int(3840), Restart, Stable),
-    s("display.height", "Output height", "The height of the window or screen the frame is presented at.", Kind::Int { min: 360, max: 4320 }, Default::Int(2160), Restart, Stable),
-    s("display.window", "Window mode", "borderless = a window the size of the screen (fastest to switch away from); fullscreen = exclusive.", Kind::Choice { options: &["windowed", "borderless", "fullscreen"] }, Default::Choice("borderless"), Restart, Stable),
+    s("display.width", "Output width", "Windowed: the window's width (REBUILD_WINDOW_SIZE) once you set it, else 1280; never larger than the screen. Borderless and fullscreen use the screen's size.", Kind::Int { min: 640, max: 7680 }, Default::Int(3840), Restart, Stable),
+    s("display.height", "Output height", "Windowed: the window's height (REBUILD_WINDOW_SIZE) once you set it, else 720; never larger than the screen. Borderless and fullscreen use the screen's size.", Kind::Int { min: 360, max: 4320 }, Default::Int(2160), Restart, Stable),
+    s("display.window", "Window mode", "REBUILD_WINDOW. windowed = a framed window of Output width x height (the default); borderless = a window covering the screen at its resolution; fullscreen = borderless for now (exclusive full screen is not built).", Kind::Choice { options: &["windowed", "borderless", "fullscreen"] }, Default::Choice("windowed"), Restart, Stable),
     s("display.vsync", "Vsync", "Wait for the display's refresh before presenting.", Kind::Bool, Default::Bool(false), Live, Stable),
     s("display.frame_rate", "Frame rate", "title = the game's own pacing (30 fps); capped = at most Frame cap; unlimited = as fast as the PC can go (with vsync off).", Kind::Choice { options: &["title", "capped", "unlimited"] }, Default::Choice("title"), Live, Stable),
     Setting {
