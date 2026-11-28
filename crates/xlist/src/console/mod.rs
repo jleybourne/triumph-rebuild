@@ -41,6 +41,7 @@ mod list;
 pub mod rect;
 mod slots;
 pub mod stamps;
+pub mod twin;
 
 #[cfg(test)]
 mod fake;
@@ -54,7 +55,8 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
 
 pub use alloc::{create_allocator, host_allocator, upload_range};
-pub use list::{create_list, CLOSE_FAILED, INDIRECT, INDIRECT_REFUSED, NO_SHADOW, RECTS_EXPANDED, RECTS_DROPPED, STAMP_LABELS, forget_bound_state, host_list, segments, skip, stats, sync_descriptors, trace, HostList, ListStats, Segment};
+pub use list::{create_list, TWIN_COPIES, CLOSE_FAILED, INDIRECT, INDIRECT_REFUSED, NO_SHADOW, RECTS_EXPANDED, RECTS_DROPPED, STAMP_LABELS, forget_bound_state, host_list, segments, skip, stats, sync_descriptors, trace, HostList, ListStats, Segment};
+pub use twin::UavTwin;
 pub use slots::{allocator_slots, list_slots, traps, Returns, SlotInfo, SlotKind, Trap, ALLOCATOR_SLOTS, LIST_SLOTS};
 
 /// A COM or console object pointer, borrowed: never released through this.
@@ -404,6 +406,11 @@ pub trait ListHost: PipelineSource + Send + Sync {
     }
     /// A console resource as an `ID3D12Resource`.
     fn resource(&self, console: Raw) -> Option<Raw>;
+    /// A console texture whose host resource lost the unordered access the console gave it (a depth target):
+    /// its host depth texture and the twin its UAVs write ([`twin`]). `None` for every other resource.
+    fn uav_twin(&self, _console: Raw) -> Option<UavTwin> {
+        None
+    }
     /// A console descriptor heap (device 0x70) bound by `SetDescriptorHeaps`.
     fn descriptor_heap(&self, console: Raw) -> Option<HeapBinding>;
     /// A console CPU descriptor handle (RTV, DSV, or the CPU side of a UAV clear) as a host CPU

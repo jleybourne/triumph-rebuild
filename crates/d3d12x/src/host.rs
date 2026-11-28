@@ -42,6 +42,10 @@ impl<P: PipelineSource + Send + Sync> ListHost for Host<P> {
         self.resources.host_resource(console)
     }
     #[inline]
+    fn uav_twin(&self, console: Raw) -> Option<rebuild_xlist::console::UavTwin> {
+        self.resources.uav_twin(console)
+    }
+    #[inline]
     fn descriptor_heap(&self, console: Raw) -> Option<HeapBinding> {
         self.resources.binding(console)
     }

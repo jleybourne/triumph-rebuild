@@ -271,6 +271,35 @@ pub fn host_desc(d: &D3D12_RESOURCE_DESC) -> (D3D12_RESOURCE_DESC, u32) {
     (h, view)
 }
 
+/// The twin of a depth texture the console also lets the title write as a UAV (`docs/design/depth-uav.md`): a
+/// colour texture of the depth plane's typeless format, with unordered access and no depth, that the title's UAVs
+/// name. `d` is the console description; `None` when it is not such a texture or its depth plane has no UAV
+/// format on the host (the console's 16-bit depth with stencil, which the host keeps as 24/8).
+pub fn twin_desc(d: &D3D12_RESOURCE_DESC) -> Option<D3D12_RESOURCE_DESC> {
+    const DS: i32 = 0x2;
+    const UAV: i32 = 0x4;
+    if d.Dimension.0 == DIMENSION_BUFFER || d.Flags.0 & (DS | UAV) != DS | UAV {
+        return None;
+    }
+    let (h, _) = host_desc(d);
+    let f = match h.Format.0 as u32 {
+        53 => 53, // D16: R16
+        39 => 39, // D32: R32
+        19 => 39, // D32 with stencil: its depth plane, R32
+        _ => return None,
+    };
+    Some(D3D12_RESOURCE_DESC { Format: DXGI_FORMAT(f as i32), Flags: D3D12_RESOURCE_FLAGS(UAV), ..h })
+}
+
+/// A UAV format of a depth texture as a view of its twin: depth formats as their colour reading.
+pub fn twin_view_format(f: u32) -> u32 {
+    match f {
+        40 | 20 | 21 => 41, // D32 / D32S8 / R32 of R32X8X24: R32_FLOAT
+        55 => 56,           // D16: R16_UNORM
+        f => f,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +359,19 @@ mod tests {
         assert_eq!(default_view_format(40, false), 41);
         assert_eq!(default_view_format(40, true), 40);
         assert_eq!(h.Layout, D3D12_TEXTURE_LAYOUT_UNKNOWN);
+    }
+
+    #[test]
+    fn depth_textures_written_as_uavs_get_a_colour_twin() {
+        let t = |format, flags| twin_desc(&tex(512, 512, format, 1, flags)).map(|d| (d.Format.0, d.Flags.0));
+        assert_eq!(t(53, 0x6), Some((53, 0x4)), "D16 + UAV: an R16 twin with unordered access only");
+        assert_eq!(t(39, 0x8030_0006_u32 as i32), Some((39, 0x4)), "D32 + UAV (console bits): R32");
+        assert_eq!(t(19, 0x6), Some((39, 0x4)), "D32S8: its depth plane, R32");
+        assert_eq!(t(118, 0x6), None, "the console's D16S8 is 24/8 here: no 16-bit twin");
+        assert_eq!(t(53, 0x2), None, "depth only");
+        assert_eq!(t(28, 0x4), None, "a colour UAV keeps its own unordered access");
+        let d = twin_desc(&tex(256, 256, 53, 3, 0x6)).unwrap();
+        assert_eq!((d.Width, d.Height, d.MipLevels, d.Layout), (256, 256, 3, D3D12_TEXTURE_LAYOUT_UNKNOWN));
+        assert_eq!((twin_view_format(56), twin_view_format(21), twin_view_format(40)), (56, 41, 41));
     }
 }
