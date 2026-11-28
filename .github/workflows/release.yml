@@ -1,0 +1,99 @@
+# The release build: the portable zip (scripts/package.ps1), as a workflow artifact, and on a v* tag a
+# DRAFT GitHub Release with the zip attached. Publishing the draft is the owner's call, by hand.
+#
+# Runs only when asked: a pushed tag v* (e.g. v0.1.0), or "Run workflow" on the Actions tab.
+# Never on pushes or pull requests.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.100.0"
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    outputs:
+      name: ${{ steps.package.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # git describe needs the history and tags
+
+      - name: Rust ${{ env.RUST_TOOLCHAIN }}
+        shell: powershell
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal
+          rustup default $env:RUST_TOOLCHAIN
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: The repository holds no game data
+        shell: powershell
+        run: ./scripts/package.ps1 -CheckOnly
+
+      - name: Build
+        shell: powershell
+        run: cargo build --release --workspace
+
+      # The runner has no GPU. Tests that need the card are #[ignore]d; the rest run on WARP or skip
+      # themselves (no card, no game copy, no DXC), so this is the whole non-GPU suite.
+      - name: Tests (no GPU)
+        shell: powershell
+        run: cargo test --release --workspace --no-fail-fast
+
+      - name: Package
+        id: package
+        shell: powershell
+        run: ./scripts/package.ps1 -SkipBuild
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.package.outputs.name }}
+          path: dist
+
+      - name: Draft release (not published)
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $notes = @"
+          Preview build for testers. The launcher, settings, profiles, saves, storage and mods work; the title's
+          menus run in development builds; gameplay is not reached yet. No game files are included: you need
+          your own copy of the game.
+
+          Unzip into a folder you own and run rebuild-launcher.exe. Player's guide:
+          https://github.com/${{ github.repository }}/blob/$env:TAG/docs/user-guide.md
+          "@
+          gh release create $env:TAG (Get-ChildItem dist -File).FullName --repo "${{ github.repository }}" --draft --title "triumph-rebuild $env:TAG" --notes $notes

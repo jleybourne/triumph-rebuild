@@ -177,25 +177,16 @@ Full status with outcomes: **[tasks](tasks.md)** · **[progress](progress.md)**.
 - **The title's FSR isn't an API call.** Method 0x218 creates pipelines; the upscale passes are ordinary
   dispatches found by their bindings (fork commit `ee0b94a3`, on its local `dlss-hook` branch, not pushed). Plan decision 5 is corrected.
 
-## ▶️ Running it
+## ▶️ Get started
 
-Requirements: Windows 10/11 x64, a Direct3D 12 GPU with tiled resources tier 2 or higher, and Rust.
+**Playing:** download the zip from [Releases](https://github.com/jleybourne/triumph-rebuild/releases), unzip it
+into a folder you own, run `rebuild-launcher.exe`, add your own copy of the game and press Play. Windows 10/11
+x64 and a Direct3D 12 card with tiled resources tier 2 are needed. It is a preview: gameplay is not reached
+yet. The **[player's guide](docs/user-guide.md)** covers it all, with screenshots.
 
-```powershell
-cargo test --release                                  # 824 tests, no game data needed (GPU tests use WARP or skip)
-cargo run --release --bin gputest                     # the GPU writes, the CPU reads, no copy
-cargo run --release --bin gputest -- --bare           # control: never blame the machine
-cargo run --release --bin gputest -- --tiled          # Build 1: tiles, console addresses, sharing
-cargo run --release --bin gputest -- --arena          # what cannot be tiled on this card
-cargo run --release --bin gputest -- --scale 10       # commit 10 GiB through the tiles
-cargo run --release --bin gputest -- --ring           # Build 2: the upload ring, 60 frames
-cargo run --release --bin gputest -- --labels         # Build 2: GPU-written labels into title memory
-cargo run --release --bin uploadbench [-- --tiled]    # Build 0 (a): the upload benchmark
-cargo run --release --bin listbench                   # Build 0 (b): per-draw translation
-cargo run --release --bin runtimecensus               # Build 3: what the title's imports bind to
-$env:REBUILD_GAME_DIR='<title folder>'; cargo run --release --bin maptitle   # Build 3: map and bind the title (no code run)
-cargo run --release --bin sirtest                     # Build 4: shader core IR → HLSL → DXC → GPU, exact
-```
+**Building:** `cargo build --release`, then `cargo test --release` (824 tests, no game data or GPU needed).
+The **[building guide](docs/building.md)** covers running from source, `rebuild.exe --config` and `runtitle`,
+the benchmarks, the environment variables and the release zip (`scripts/package.ps1`).
 
 <details>
 <summary><b>The tree</b></summary>
@@ -241,6 +232,8 @@ runs/             every measurement: a write-up and the raw output beside it
 
 | | page | what it holds |
 |:--:|:--|:--|
+| 🎮 | [Player's guide](docs/user-guide.md) | install, add your game, Play, settings, the F10 menu, saves, storage, mods, troubleshooting |
+| 🛠️ | [Building](docs/building.md) | build and run from source, tests, benchmarks, env vars, the release zip and workflow |
 | 🔬 | [Deep dive](deepdive.md) | the whole repository in depth: a title run end to end, every crate and bin, memory, GPU, shaders, env vars, gaps |
 | 📈 | [Progress](progress.md) | done / not done, % by build step, the shader bar, one entry per upload |
 | 🗺️ | [Plan](plan.md) | the nine decisions, the build order, what we refuse to build |
