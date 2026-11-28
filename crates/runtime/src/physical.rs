@@ -77,6 +77,7 @@ impl Drop for Physical {
                 if s.view != 0 {
                     crate::titlemem::section_gone(s.view_id);
                     let _ = UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: s.view as *mut c_void });
+                    crate::titlemem::changed(s.view as u64, (s.view + s.frames * FRAME) as u64);
                 }
                 if !s.handle.is_invalid() && s.live > 0 {
                     let _ = CloseHandle(s.handle);
