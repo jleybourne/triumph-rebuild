@@ -13,7 +13,7 @@ and becomes the number that counts.
 
 | track | progress | | note |
 |---|---|--:|---|
-| **Build 5 · first frame** | `███████████████████░` | 95 % | the title's menus on the card at 30 fps (start screen → setup → Navigation Experience → legal terms → Finish Setup); body text missing letters, black video stretches (video lane) |
+| **Build 5 · first frame** | `████████████████████` | 98 % | the title's menus on the card at 30 fps, readable, intro video playing; next: swizzled CPU-written textures (detile) |
 | shaders compiled (every class) | `██████████░░░░░░░░░░` | 12,981 / 25,694 | pixel 9,965 · vertex 1,672 · compute 1,344 · of them wave-wide 4,182 ([wave64](runs/build4-wave64.md)) · agnostic 8,799 / 9,128 ([v1](runs/build4-v1.md)) |
 | shaders counted | `████░░░░░░░░░░░░░░░░` | 5,195 / 25,694 | bit-exact vs the oracle on WARP ([exec](runs/build4-exec.md)) |
 | runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
@@ -118,6 +118,21 @@ Older entries are never edited.
 
 > The three entries below (58, 59, 61 %) were missing; they are filled in afterwards from the commits that moved
 > the header (`6292f20`, `bafec7c`, `71c075d`). The points behind each step were not recorded.
+
+### 2026-11-28 — Intro video plays, menu text complete
+
+```
+[██████████████░░░░░░]  71 %   (Build 5 95 % → 98 %: menus readable, video plays)
+title       intro video (eagle art, Rockstar logo) → UI TEXT SIZE with full body text and gradient, 29 fps
+```
+
+- **video (agent/video):** CPU-written linear textures (Bink planes, glyph atlas, UI gradients) are copied into
+  their host textures (`crates/runtime/src/cputex.rs`); queue slot 0xf8 `CopyPageMappingsBatchX` is bookkeeping
+  (`pagemap.rs`) instead of E_NOTIMPL; Bink imports counted (`bink.rs`).
+- **The start screen's black stretches were the UI's descriptor ring passing index 750k** (fixed by #70), not Bink.
+- Open: 606 swizzled CPU-written textures not refreshed yet (needs an xg detile pass); Bink frames copy through an
+  upload buffer (~1–2 ms CPU each).
+- Tests: 724 green.
 
 ### 2026-11-28 — Menus at 30 fps; saves, depth twins, view remap, launcher recommendation
 
