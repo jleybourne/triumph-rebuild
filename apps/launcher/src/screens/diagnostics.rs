@@ -8,7 +8,7 @@ use crate::ui::theme as th;
 use crate::ui::widgets::{self as w, Tone};
 use crate::{open_folder, App, Dialog};
 use eframe::egui::{self, Align, Layout, Sense, Vec2};
-use rebuild_launcher::{play, session, syscheck};
+use rebuild_launcher::{play, recommend, session, syscheck};
 use std::path::PathBuf;
 
 const LOG_TABS: [&str; 3] = ["Frame line", "session.toml", "summary.toml"];
@@ -23,6 +23,7 @@ impl App {
         let checking = self.check_rx.is_some();
         let checks = self.checks.clone();
         let entries = self.sessions.clone();
+        let (specs, rec, reading) = (self.specs.clone(), self.rec.clone(), self.specs_rx.is_some());
         split(
             ui,
             0.5,
@@ -58,6 +59,8 @@ impl App {
                         });
                     }
                 });
+                ui.add_space(th::S2);
+                this_pc_card(ui, specs.as_ref(), rec.as_ref(), reading);
                 ui.add_space(th::S2);
                 w::card(ui, Some("Crash reports"), |ui| {
                     let crashes: Vec<(&session::Entry, &PathBuf)> = entries.iter().flat_map(|e| e.crashes.iter().map(move |p| (e, p))).collect();
@@ -168,6 +171,7 @@ impl App {
         }
     }
 
+
     fn proof_card(&mut self, ui: &mut egui::Ui) {
         let c = th::p();
         let mut run = false;
@@ -241,4 +245,43 @@ impl App {
             });
         });
     }
+}
+
+/// The specs the recommendation was made from (DXGI, no device), and the recommendation with its reason.
+fn this_pc_card(ui: &mut egui::Ui, specs: Option<&recommend::Specs>, rec: Option<&recommend::Recommendation>, reading: bool) {
+    let c = th::p();
+    w::card(ui, Some("This PC"), |ui| {
+        let Some(s) = specs else {
+            w::muted(ui, if reading { "Reading the specs…" } else { "The specs could not be read." });
+            return;
+        };
+        let row = |ui: &mut egui::Ui, k: &str, v: String| {
+            ui.horizontal_top(|ui| {
+                w::fixed(ui, 118.0, egui::RichText::new(k).font(th::medium(13.0)).color(c.text));
+                ui.add(egui::Label::new(egui::RichText::new(v).font(th::regular(13.0)).color(c.text_2)).wrap());
+            });
+        };
+        match &s.gpu {
+            Some(g) => {
+                row(ui, "GPU", format!("{} ({})", g.name, syscheck::vendor(g.vendor_id)));
+                row(ui, "VRAM", format!("{} dedicated", recommend::gb(g.vram_bytes)));
+            }
+            None => row(ui, "GPU", "no hardware adapter (software only)".into()),
+        }
+        row(ui, "RAM", if s.ram_bytes > 0 { format!("{} installed", recommend::gb(s.ram_bytes)) } else { "—".into() });
+        row(ui, "CPU", match (s.physical, s.logical) {
+            (0, 0) => "—".into(),
+            (0, l) => format!("{l} logical processors"),
+            (p, l) => format!("{p} cores, {l} logical processors"),
+        });
+        row(ui, "Display", s.display.map(|(w, h)| format!("{w}×{h} (primary)")).unwrap_or_else(|| "—".into()));
+        if let Some(r) = rec {
+            w::rule(ui);
+            row(ui, "Recommended", format!("{} · {}×{} internal · no limits", r.name(), r.internal.0, r.internal.1));
+            ui.add(egui::Label::new(egui::RichText::new(&r.why).font(th::small()).color(c.muted)).wrap());
+            for n in &r.notes {
+                ui.add(egui::Label::new(egui::RichText::new(format!("{}  {n}", icon::WARNING)).font(th::small()).color(Tone::Warn.colours().0)).wrap());
+            }
+        }
+    });
 }

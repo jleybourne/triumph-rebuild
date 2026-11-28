@@ -171,6 +171,98 @@ delete only session folders, crash and capture listing), `tests/launch.rs` (a la
 writing `summary.toml` and a crash report through `REBUILD_SESSION_DIR`), the headless smoke test (every section in
 both themes; an old session pruned on restart, a recent one kept).
 
+### Recommended for this PC (owner, 2026-11-28)
+
+The owner asked for the launcher "to recommend a profile to run the game at based on the specs of the machine
+automatically". Code: `apps/launcher/src/recommend.rs` (detection, the pure mapping, first run), the strip on Play,
+"This PC" on Diagnostics, `rebuild-launcher --recommend` (prints it, no window).
+
+**Decided: a recommendation is not a test profile.** The built-ins (`docs/design/test-profiles.md`) impose
+`limits.*` on purpose, to make this machine behave like a weaker one; applied on a real player's machine they would
+only slow the game. A recommendation sets the same eight keys a built-in does (`PROFILE_KEYS`, so nothing of a test
+profile is left behind when it is applied after one) with **every limit 0**: output (`display.width/height`) and
+upscaler (`upscaler.backend/mode`). Nothing else is touched (window mode, window size, vsync, frame rate and every
+other setting are kept). `profile` becomes `recommended`; the launcher shows it as "Recommended for this PC", and
+"(edited)" once a value differs.
+
+**Detection** (Windows, the `windows` crate already in use; DXGI only, **no D3D12 device**, so it is safe while
+`agents\MEASURING` exists). Read once per start, on a thread:
+
+| fact | how |
+|:--|:--|
+| GPU name, vendor, dedicated VRAM | every DXGI adapter (`EnumAdapters1`), software adapters and the Basic Render Driver (WARP) skipped; the one with the most dedicated VRAM |
+| RAM | installed (`GetPhysicallyInstalledSystemMemory`), else usable total (`GlobalMemoryStatusEx`) |
+| cores | physical = processor-core records, logical = their group masks (`GetLogicalProcessorInformationEx`) |
+| display | the primary display's current mode in physical pixels (`EnumDisplaySettingsW`, unaffected by DPI scaling) |
+
+**The mapping** (`recommend::recommend`, pure, unit-tested with a table of machines):
+
+1. **The GPU's class.** Dedicated VRAM gives a class (with half a GiB of slack: DXGI reports a 12 GB card as
+   12,282 MiB). A known model **caps** it, so a small chip with a lot of VRAM (RTX 3060 12 GB, Arc A770 16 GB) isn't
+   over-rated; a laptop part is one class lower. Under 2 GiB dedicated (an integrated GPU's carve-out), Intel UHD /
+   Iris, or no hardware GPU at all is the lowest class. The models are placed against the minimum spec (RTX 4070 Ti):
+   roughly 0.9x and up is 4K, 0.5x is 1440p, 0.3x is 1080p (the list is in `recommend::MODELS`).
+
+   | class | VRAM | known models (examples) | output | mode | internal |
+   |:--|:--|:--|:--|:--|:--|
+   | 4K (the minimum spec) | ≥ 11.5 GiB | RTX 4070 Ti and up, 3090, 5070 Ti and up; RX 7900 XT/XTX, 9070 XT | 3840 x 2160 | Quality | 2560 x 1440 (the console's own) |
+   | 1440p | ≥ 7.5 GiB | RTX 4070, 5070, 3070/3080, 4060 Ti, 2080 Ti; RX 6800-6950, 7700-7900 GRE, 9070, 6700 XT | 2560 x 1440 | Quality | 1707 x 960 |
+   | 1080p | ≥ 5.5 GiB | RTX 2060-2080, 3060, 4060, 5060; GTX 1070/1080; RX 5600-6700, 7600; Arc A750/A770, B570/B580 | 1920 x 1080 | Quality | 1280 x 720 |
+   | lowest | less, or integrated | iGPUs, RTX 3050, GTX 16/10 series below 1070, RX 6500 and older, Arc A380 | 1280 x 720 | Performance | 640 x 360 |
+
+2. **The output is never above the display.** When the display is smaller than the class's output, the output is
+   the largest 16:9 size that fits (3840 x 2160, 2560 x 1440, 1920 x 1080, 1600 x 900, 1280 x 720; an ultrawide
+   3440 x 1440 gets 2560 x 1440; below 720p, the largest 16:9 size inside the display).
+3. **The mode keeps the class's internal pixels.** Each class carries a number of internal pixels (its output through
+   its mode); the mode is the one with the most internal pixels within that (DLAA / native AA 1.0, Quality 1.5,
+   Balanced 1.7, Performance 2.0, Ultra Performance 3.0). So a 4070 Ti on a 1440p display gets **1440p DLAA**
+   (2560 x 1440 internal, the same rendering cost as 4K Quality) instead of idling at 1707 x 960.
+4. **The backend:** DLSS on an NVIDIA **RTX** card (DLSS needs tensor cores), FSR on everything else (AMD, Intel, a
+   GTX). Explicit, not `auto`, so a GTX never asks for DLSS. Without a DLSS DLL the layer falls back to FSR, and Play
+   warns, as before.
+5. **Notes, not changes:** RAM and the CPU don't change the output (the resolution doesn't fix them); under 15 GiB
+   of RAM, under 31 GiB, and under 12 logical processors each add a one-line note, shown on hover and on Diagnostics.
+
+The machine table (`recommend::tests::the_machine_table`):
+
+| machine | display | recommended |
+|:--|:--|:--|
+| RTX 4070 Ti 12 GB, 64 GB (the reference) | 3840 x 2160 | 4K · DLSS Quality |
+| the same | 2560 x 1440 / 1920 x 1080 / 3440 x 1440 | 1440p · DLSS DLAA / 1080p · DLSS DLAA / 1440p · DLSS DLAA |
+| RTX 4090 24 GB | 4K | 4K · DLSS Quality |
+| RTX 3070 8 GB, 16 GB | 4K / 1080p / 1920 x 1200 / 1680 x 1050 | 1440p · DLSS Quality / 1080p · DLSS Quality / 1080p · DLSS Quality / 900p · DLSS DLAA |
+| unknown 8 GB card | 4K | 1440p · FSR Quality |
+| RX 5600 XT 6 GB (and an unknown 6 GB AMD) | 1440p | 1080p · FSR Quality |
+| RX 7900 XTX 24 GB | 4K | 4K · FSR Quality |
+| RTX 3060 12 GB / Arc A770 16 GB (capped by model) | 4K | 1080p · DLSS Quality / 1080p · FSR Quality |
+| RTX 4090 Laptop 16 GB | 4K | 1440p · DLSS Quality |
+| GTX 1660 Super 6 GB | 1080p | 720p · FSR Performance |
+| Intel UHD 770 / Iris Xe / AMD APU / no hardware GPU | any | 720p · FSR Performance |
+| Intel UHD on a 1024 x 600 display | 1024 x 600 | 1024 x 576 · FSR Balanced |
+
+**In the launcher:**
+
+- **First run, automatically.** When a game's settings have never chosen an output or upscaler (none of the eight
+  keys is explicit, the profile is the default one) and the launcher hasn't done it for that game before, it applies
+  the recommendation and saves it, with a toast "Set up for this PC: …". It writes `first_run_recommendation =
+  "<name>"` at the top of that game's `rebuild.toml`, so it happens **once per game**: not again on a restart, not
+  after the user resets the keys. It never runs with unsaved edits, and **never overwrites a value the user set**
+  (any of the eight keys explicit, or a profile chosen, means it is not a first run).
+- **Play** always shows "Recommended for this PC: `<name>`" with the detected specs as its one-line reason (the why
+  and any notes on hover) and **Apply**, or "In use" when every value is in force. Apply works like applying a
+  built-in: the eight keys change, everything else is kept, and the save bar appears. The profile picker lists it
+  first, under "For this PC".
+- **Diagnostics** has a "This PC" card: GPU and vendor, VRAM, RAM, cores and logical processors, the display, the
+  recommendation with its internal resolution, the why and the notes.
+- Nothing asks for frames: detection is one thread at start; while it is pending the launcher repaints at the same
+  10 Hz as the system check, then idles again.
+
+Tests: `recommend::tests` (the machine table, the reference's lines, model matching, VRAM slack, apply clears limits
+and keeps the rest, first run only once and never over a choice, detection on this machine), and the smoke test
+`a_new_game_gets_the_recommendation_once_and_the_users_choice_stays` (a new game set up and saved; the user's 1080p
+kept through new specs and a restart; a built-in chosen first is kept; Apply restores it unsaved; Play and
+Diagnostics draw).
+
 ## Mods
 
 A mod is a folder under `mods/<name>/` whose files replace title files by path, through Build 3's overlay

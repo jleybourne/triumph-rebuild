@@ -25,7 +25,9 @@ use rebuild_launcher::{
     home::{self, Home},
     library::{self, Detection, Library},
     model::{Edit, Group, Tab},
-    mods, play, prefs, runs, session,
+    mods, play, prefs,
+    recommend::{self, Recommendation, Specs},
+    runs, session,
     store::Store,
     syscheck, title, verify,
 };
@@ -50,6 +52,11 @@ fn main() {
     if args.iter().any(|a| a == "--check") {
         attach_console();
         std::process::exit(print_check());
+    }
+    if args.iter().any(|a| a == "--recommend") {
+        attach_console();
+        print_recommendation();
+        return;
     }
     let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     if let Some(dir) = arg("--matrix") {
@@ -117,6 +124,18 @@ fn print_check() -> i32 {
         0
     } else {
         1
+    }
+}
+
+/// `--recommend`: this PC's specs and the settings recommended for it (DXGI only: no device is created).
+fn print_recommendation() {
+    let s = recommend::detect();
+    let r = recommend::recommend(&s);
+    println!("specs        {}", r.specs_line);
+    println!("recommended  {}  ({}x{}, upscaler.backend = {}, upscaler.mode = {}, {}x{} internal, no limits)", r.name(), r.width, r.height, r.backend, r.mode, r.internal.0, r.internal.1);
+    println!("why          {}", r.why);
+    for n in &r.notes {
+        println!("note         {n}");
     }
 }
 
@@ -327,6 +346,10 @@ pub struct App {
     saved: Store,
     checks: Vec<syscheck::Check>,
     check_rx: Option<mpsc::Receiver<Vec<syscheck::Check>>>,
+    /// this PC, read once at start on a thread (DXGI only), and what it is recommended to run at
+    specs: Option<Specs>,
+    specs_rx: Option<mpsc::Receiver<Specs>>,
+    rec: Option<Recommendation>,
     mods: Vec<mods::Entry>,
     conflicts: Vec<mods::Conflict>,
     profiles: Vec<String>,
@@ -450,6 +473,9 @@ impl App {
             saved: Store::new(Config::parse("").unwrap()),
             checks: Vec::new(),
             check_rx: None,
+            specs: None,
+            specs_rx: None,
+            rec: None,
             mods: Vec::new(),
             conflicts: Vec::new(),
             profiles: Vec::new(),
@@ -510,8 +536,63 @@ impl App {
         if app.library.games.is_empty() {
             app.tab = Tab::Library;
         }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(recommend::detect());
+        });
+        app.specs_rx = Some(rx);
         app.load_game(ctx);
         app
+    }
+
+    /// This PC's specs arrived (or a test set them): the recommendation, and on a first run, applied.
+    fn set_specs(&mut self, s: Specs) {
+        self.rec = Some(recommend::recommend(&s));
+        self.specs = Some(s);
+        self.specs_rx = None;
+        self.first_run_recommendation();
+    }
+
+    /// A game whose settings never chose an output or upscaler gets the recommendation by itself, once, and
+    /// saved (`recommend::first_run`). Never while there are unsaved edits; never over a value the user set.
+    fn first_run_recommendation(&mut self) {
+        let Some(r) = self.rec.clone() else { return };
+        if self.library.selected.is_none() || self.dirty() || !recommend::first_run(&self.store) {
+            return;
+        }
+        if let Err(e) = recommend::apply_first_run(&mut self.store, &r) {
+            self.toast(Tone::Danger, e);
+            return;
+        }
+        if self.save() {
+            self.toast(Tone::Ok, format!("Set up for this PC: {}", r.name()));
+        }
+    }
+
+    /// Play's "Apply": the recommendation's eight keys (every limit 0); the rest kept. Save makes it active.
+    fn apply_recommendation(&mut self) {
+        let Some(r) = self.rec.clone() else { return };
+        match r.apply(&mut self.store.model) {
+            Ok(()) => {
+                self.toast(Tone::Accent, format!("{} applied (output and upscaler; no limits; the rest kept). Save to make it active.", r.name()));
+            }
+            Err(e) => self.toast(Tone::Danger, e),
+        }
+    }
+
+    /// The active profile as the launcher names it: a built-in's label, "Recommended for this PC", or the
+    /// user's name.
+    fn profile_label(&self) -> String {
+        let c = &self.store.model.config;
+        if c.profile == recommend::PROFILE {
+            let edited = self.rec.as_ref().is_some_and(|r| !r.matches(c));
+            return format!("Recommended for this PC{}", if edited { " (edited)" } else { "" });
+        }
+        match Active::of(c) {
+            Active::Builtin(b) => b.label.to_string(),
+            Active::Edited(b) => format!("{} (edited)", b.label),
+            Active::User(n) => n,
+        }
     }
 
     /// At start: every game's sessions past its `diagnostics.retention_days`.
@@ -613,6 +694,7 @@ impl App {
         self.title_note.clear();
         self.refresh_mods();
         self.start_check();
+        self.first_run_recommendation();
     }
 
     fn switch_game(&mut self, ctx: &egui::Context, id: &str) {
@@ -955,6 +1037,13 @@ impl App {
                 self.verify_rx = None;
             }
         }
+        if let Some(rx) = &self.specs_rx {
+            match rx.try_recv() {
+                Ok(s) => self.set_specs(s),
+                Err(mpsc::TryRecvError::Disconnected) => self.specs_rx = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
     }
 
     /// When the next frame is needed if nothing else asks (input, and egui's own hover animations,
@@ -964,7 +1053,7 @@ impl App {
             screenshots: self.shots.is_some(),
             ambient: false,
             toasts: !self.toasts.is_empty(),
-            check_pending: self.check_rx.is_some() || self.verify_rx.is_some(),
+            check_pending: self.check_rx.is_some() || self.verify_rx.is_some() || self.specs_rx.is_some(),
             game_running: self.running.is_some() || self.plan.is_some(),
             minimised,
         })
@@ -1026,7 +1115,7 @@ impl App {
         let limits = rebuild_config::profiles::limits_in_force(c);
         format!(
             "Profile: {} · {}×{} · {} {} · {}",
-            Active::of(c).describe(),
+            if c.profile == recommend::PROFILE { self.profile_label() } else { Active::of(c).describe() },
             c.int("display.width"),
             c.int("display.height"),
             c.choice("upscaler.backend").to_uppercase(),
@@ -1479,6 +1568,10 @@ mod smoke {
                 let _ = self.ctx.run(input, |ctx| app.frame(ctx));
             }
         }
+        fn set_tab_frames(&mut self, app: &mut App, tab: Tab) {
+            app.set_tab(tab);
+            self.frames(app, 2);
+        }
         /// Every section, the Running view, and a settings search and each pill, in both themes.
         fn every_page(&mut self, app: &mut App) {
             let ctx = self.ctx.clone();
@@ -1511,6 +1604,82 @@ mod smoke {
         }
     }
 
+    /// The reference machine (the minimum spec), so a test's outcome doesn't depend on the machine it runs on.
+    fn reference() -> Specs {
+        Specs {
+            gpu: Some(recommend::Gpu { name: "NVIDIA GeForce RTX 4070 Ti".into(), vendor_id: 0x10de, vram_bytes: 12_282 << 20 }),
+            ram_bytes: 64 << 30,
+            logical: 16,
+            physical: 8,
+            display: Some((3840, 2160)),
+        }
+    }
+
+    /// First run: a new game gets this PC's recommendation by itself, saved; a value the user then sets is
+    /// never overwritten (not on restart, not when the specs arrive again); Apply puts it back on request.
+    #[test]
+    fn a_new_game_gets_the_recommendation_once_and_the_users_choice_stays() {
+        let root = std::env::temp_dir().join(format!("triumph-launcher-recommend-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let a = package(&root.join("games"), "a", "Placeholder A");
+        let b = package(&root.join("games"), "b", "Placeholder B");
+        let app_root = root.join("app");
+        let lock = root.join("MEASURING");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&lock, b"").unwrap();
+        let mid = Specs { gpu: Some(recommend::Gpu { name: "NVIDIA GeForce RTX 3070".into(), vendor_id: 0x10de, vram_bytes: 8 << 30 }), ram_bytes: 16 << 30, logical: 12, physical: 6, display: Some((3840, 2160)) };
+        let ctx = egui::Context::default();
+        let mut run = Run { ctx: ctx.clone(), t: 0.0 };
+        let mut app = App::new(&ctx, app_root.clone(), None, false);
+        app.lock_override = Some(lock.clone());
+        app.set_specs(mid.clone());
+        // game A, new: only game.dir in its file
+        let det = library::detect(&a, &app.detectors).0;
+        assert!(app.confirm_add(&ctx, &a, &det, true));
+        let ida = app.library.selected.clone().unwrap();
+        let c = &app.store.model.config;
+        assert_eq!((c.int("display.width"), c.int("display.height")), (2560, 1440), "the 8 GB class");
+        assert_eq!((c.choice("upscaler.backend"), c.choice("upscaler.mode")), ("dlss".into(), "quality".into()));
+        assert_eq!(c.profile, recommend::PROFILE);
+        assert!(rebuild_config::profiles::limits_in_force(c).is_empty());
+        assert!(!app.dirty(), "applied and saved");
+        assert!(std::fs::read_to_string(app.home.rebuild_toml()).unwrap().contains(recommend::FIRST_RUN_KEY));
+        assert_eq!(app.profile_label(), "Recommended for this PC");
+        run.frames(&mut app, 3);
+        // the user picks 1080p and saves
+        app.store.model.apply(rebuild_config::find("display.width").unwrap(), Edit::Slide(1920)).unwrap();
+        app.store.model.apply(rebuild_config::find("display.height").unwrap(), Edit::Slide(1080)).unwrap();
+        assert!(app.save());
+        assert_eq!(app.profile_label(), "Recommended for this PC (edited)");
+        // the specs arriving again (another start) change nothing
+        app.set_specs(mid.clone());
+        assert_eq!(app.store.model.config.int("display.width"), 1920);
+        assert!(!app.dirty());
+        // B starts with a built-in test profile chosen by the user before the specs arrived: kept
+        let detb = library::detect(&b, &app.detectors).0;
+        app.rec = None;
+        assert!(app.confirm_add(&ctx, &b, &detb, true));
+        app.apply_builtin(rebuild_config::builtin("series-s").unwrap());
+        assert!(app.save());
+        app.set_specs(mid.clone());
+        assert_eq!(Active::of(&app.store.model.config), Active::Builtin(rebuild_config::builtin("series-s").unwrap()), "never over a choice");
+        // restart: A keeps 1920, and Apply puts the recommendation back (unsaved until Save)
+        drop(app);
+        let mut app = App::new(&ctx, app_root.clone(), None, false);
+        app.lock_override = Some(lock.clone());
+        app.set_specs(mid);
+        app.switch_game(&ctx, &ida);
+        assert_eq!(app.store.model.config.int("display.width"), 1920, "the user's value persisted");
+        run.set_tab_frames(&mut app, Tab::Play);
+        run.set_tab_frames(&mut app, Tab::Diagnostics);
+        app.apply_recommendation();
+        assert_eq!(app.store.model.config.int("display.width"), 2560);
+        assert!(app.rec.as_ref().unwrap().matches(&app.store.model.config));
+        assert!(app.dirty(), "Apply doesn't save by itself");
+        run.set_tab_frames(&mut app, Tab::Play);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn the_whole_flow_runs_without_a_panic_and_settings_persist() {
         let root = std::env::temp_dir().join(format!("triumph-launcher-smoke-{}", std::process::id()));
@@ -1527,6 +1696,7 @@ mod smoke {
         let mut run = Run { ctx: ctx.clone(), t: 0.0 };
         let mut app = App::new(&ctx, app_root.clone(), None, false);
         app.lock_override = Some(lock.clone());
+        app.set_specs(reference());
         app.start_check();
         // an empty library: every section shows its empty state
         assert_eq!(app.tab, Tab::Library);
@@ -1616,6 +1786,7 @@ mod smoke {
         let mut app = App::new(&ctx2, app_root.clone(), None, false);
         assert!(!th::is_dark(), "the theme persisted");
         app.lock_override = Some(lock.clone());
+        app.set_specs(reference());
         assert_eq!(app.library.games.len(), 1);
         assert_eq!(app.library.selected.as_deref(), Some(ida.as_str()));
         assert_eq!(app.store.model.config.int("display.width"), 2560, "the setting persisted");
@@ -1629,6 +1800,7 @@ mod smoke {
         drop(app);
         let mut app = App::new(&ctx2, app_root.clone(), None, false);
         app.lock_override = Some(lock.clone());
+        app.set_specs(reference());
         assert!(!old.exists(), "a session past the retention is deleted at start");
         assert!(recent.exists(), "a recent session is kept");
         run2.every_page(&mut app);
