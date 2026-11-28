@@ -47,7 +47,7 @@ saves, mods) · <a href="docs/building.md">building</a> (from source, tests, the
 | ✅ | **Textures written by the CPU** | video frames, font glyphs and UI gradients reach the GPU |
 | ✅ | **Bink 2 video** | the intro video plays |
 | ✅ | **Tiled textures written by the CPU** | converted from the console's tile layouts on the GPU; streamed world textures and the loading-screen artwork draw |
-| 🔄 | **Shaders** | RDNA2 shaders translated to DXIL: 12,981 of 25,694 compile, 5,994 checked bit-exact |
+| 🔄 | **Shaders** | RDNA2 shaders translated to DXIL: 13,199 of 25,694 compile, 6,188 checked bit-exact |
 | ✅ | **Shader library built on your PC** | built once from your own copy of the game; nothing translated is shipped |
 | ⏳ | **Upscaling** | DLSS on NVIDIA, FSR on everything else; both run standalone, wiring to the title is next |
 
@@ -117,7 +117,7 @@ saves, mods) · <a href="docs/building.md">building</a> (from source, tests, the
 | ✅ | **Frame line** | one line a second: fps, frame time, GPU time, draws, upload, translation |
 | ✅ | **Scripted input and captures** | `REBUILD_INPUT_SCRIPT="40s:A,60s:cap"`: timed presses and full-resolution captures, without the overlays unless asked |
 | 🔄 | **Live control** | a pipe to press buttons and take captures while the game runs |
-| ✅ | **Tests** | 837 tests; GPU tests run on WARP, so no card is needed |
+| ✅ | **Tests** | 840 tests; GPU tests run on WARP, so no card is needed |
 | ✅ | **Shader checker** | every translated shader compared bit-for-bit against a reference on WARP |
 | ✅ | **Traces** | lists, textures, descriptors, Bink, files, saves: each behind its own switch |
 | ✅ | **Release zip** | `scripts/package.ps1`: the launcher, the layer, DXC and every licence, in one portable zip; refuses if the repository or the zip would hold game data ([building](docs/building.md#packaging)) |

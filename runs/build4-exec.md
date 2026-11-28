@@ -1,6 +1,7 @@
-# Build 4 — execution against the oracle (lane `shaderexec`)
+# Build 4 — execution against the oracle (lanes `shaderexec`, `shaders`)
 
-`execcheck` · 2026-11-28, re-run 2026-11-29 on the current translator (post-remap, after #37/#65/#70) · **WARP** (the lead's rule after three driver resets on 2026-11-27: translated programs
+`execcheck` · 2026-11-28, re-run 2026-11-29 on the current translator (post-remap, after #37/#65/#70), third pass
+2026-11-29 (lane `shaders`: the affected programs only) · **WARP** (the lead's rule after three driver resets on 2026-11-27: translated programs
 run on the software rasterizer; the card only for a straight-line smoke set under `agents\CARD`). DXC 1.8.2502.11.
 Code: `apps/rebuild/src/bin/execcheck/`. Per program: [`build4-exec.csv`](build4-exec.csv) (hash, stage, v0/v1,
 verdict, reason).
@@ -13,13 +14,15 @@ REBUILD_SHADERS=D:\victory-data\shaders.rpf cargo run --release --bin execcheck 
 ## The counted number
 
 ```
-shaders counted (bit-exact on every input set)      5,994 / 25,694     compute 369 · pixel 4,633 · vertex 992
-                                        was         5,195              compute 252 · pixel 3,980 · vertex 963
-v0 set (straight-line agnostic, 2,881)              2,815 bit-exact    compute 121 / 132 · pixel 1,763 / 1,798 · vertex 931 / 951
-untested (of the 9,128 agnostic)                    1,331              was 2,837
+shaders counted (bit-exact on every input set run)  6,188 / 25,694     compute 401 · pixel 4,467 · vertex 1,320
+                                        was         5,994              compute 369 · pixel 4,633 · vertex 992
+  of them on all three sets                         5,821              was 5,950 (the third pass, below)
+v0 set (straight-line agnostic, 2,881)              2,824 bit-exact    compute 121 / 132 · pixel 1,765 / 1,798 · vertex 938 / 951
+untested (of the 9,128 agnostic)                    196                was 1,331
 ```
 
-A program **counts** when every output word of ours equals the oracle's on all three input sets and at least one set
+A program **counts** when every output word of ours equals the oracle's on every input set that completes (a set that
+never finishes or loses the device is skipped: 367 of the 6,188 match on fewer than three sets) and at least one set
 wrote something. The `-Gis` variant (IEEE strictness: 28 more programs bit-exact in the first pass) was not re-run;
 the counted number never assumes it. Whether to compile with `-Gis` is a performance decision for the lead
 (`rebuild_pipelines::translate::DXC_ARGS`).
@@ -28,20 +31,100 @@ the counted number never assumes it. Whether to compile with `-Gis` is a perform
 
 | stage | set | programs | match (bit-exact) | differ | vacuous | error | crash | untested |
 |:--|:--|--:|--:|--:|--:|--:|--:|--:|
-| cs | v0 | 132 | 121 | 3 | 6 | 0 | 0 | 2 |
-| cs | v1 | 553 | 248 | 79 | 34 | 7 | 6 | 179 |
-| cs | all | 685 | 369 | 82 | 40 | 7 | 6 | 181 |
-| ps | v0 | 1798 | 1763 | 30 | 1 | 0 | 0 | 4 |
-| ps | v1 | 4991 | 2870 | 824 | 590 | 0 | 211 | 496 |
-| ps | all | 6789 | 4633 | 854 | 591 | 0 | 211 | 500 |
-| vs | v0 | 951 | 931 | 9 | 0 | 0 | 0 | 11 |
-| vs | v1 | 703 | 61 | 3 | 0 | 0 | 0 | 639 |
-| vs | all | 1654 | 992 | 12 | 0 | 0 | 0 | 650 |
-| **all** | | **9128** | **5994** | **948** | **631** | **7** | **217** | **1331** |
+| cs | v0 | 132 | 121 | 4 | 6 | 0 | 0 | 1 |
+| cs | v1 | 553 | 280 | 87 | 60 | 7 | 36 | 83 |
+| cs | all | 685 | 401 | 91 | 66 | 7 | 36 | 84 |
+| ps | v0 | 1798 | 1765 | 31 | 1 | 0 | 0 | 1 |
+| ps | v1 | 4991 | 2702 | 876 | 1121 | 0 | 242 | 50 |
+| ps | all | 6789 | 4467 | 907 | 1122 | 0 | 242 | 51 |
+| vs | v0 | 951 | 938 | 8 | 0 | 0 | 0 | 5 |
+| vs | v1 | 703 | 382 | 259 | 0 | 0 | 6 | 56 |
+| vs | all | 1654 | 1320 | 267 | 0 | 0 | 6 | 61 |
+| **all** | | **9128** | **6188** | **1265** | **1188** | **7** | **284** | **196** |
 
 `programs` is every agnostic program of the stage (9,128); `v0` one basic block, `v1` several. `vacuous`: nothing to
 compare (the program writes nothing, or nothing on these inputs: every pixel discarded, every write out of range).
 `differ` includes the float-within-ulp classes (named in the CSV).
+
+## The third pass (2026-11-29, lane `shaders`): the inputs fixed, then the translator
+
+Only the programs each change touches were run again (WARP, 1-3 shards, one DXC each); every other row keeps the
+second pass's verdict. Per step, in commit order:
+
+| step | programs run | before | after | counted |
+|:--|--:|:--|:--|--:|
+| 1 · index words hold indices (bindless, recorded) | 532 | differ 532 | match 6 · vacuous 331 · differ 187 · crash 4 · untested 4 | +6 |
+| 1 · the same, on the recorded programs that matched | 566 + 489 | match 1,055 | match 850 · vacuous 199 · crash 6 | **−205** |
+| 2 · one texture read as 2D and 2D array | 608 | untested 437 · differ 171 | match 18 · differ 570 · crash 18 · vacuous 2 | +18 |
+| 3 · the oracle's root SRVs fed | 508 | untested 508 | match 297 · differ 165 · crash 23 · vacuous 17 · untested 6 | +297 |
+| translator: `v_fract`, `v_sin`/`v_cos` in turns, `v_rcp` | 416 | differ 416 | match 17 · differ 396 · crash 3 | +17 |
+| translator: an image descriptor's base level | 329 | untested 329 | match 61 · differ 118 · vacuous 8 · crash 13 · untested 129 | +61 |
+
+**The correction (−205).** The second pass counted recorded bindless programs whose only writing input set was one
+where a float word, used as a descriptor index, named an index past the console range. Ours reads the null view there
+(by design, `sir_vi`); the recording pass then bound a seeded view into that null-bank slot, and the oracle read far
+past its heap (undefined; WARP gave zeros). Both "matched" on nothing real. Now the recording pass never binds the
+null bank, and a set whose indices leave the heap has the buffer words that feed them found and given set 0's word on
+both sides (all buffer words from set 0, then whole buffers, halves, single words back while the indices stay in the
+heap; 37-100 recording runs a set on the samples). Index words then hold small integers, as the title's do; every
+other word keeps the set's floats. On that data these programs discard every pixel (vacuous: the alpha-test bucket)
+or loop. The same artefact can remain in a filled dynamic region (an index from the data past the heap, not
+recorded): not re-run.
+
+**Step 2.** The slot read both ways gets one 2D-array view of an array texture, read by both declarations (the same
+descriptor on both sides; a single-slice view gave the same results). A dynamic region over a plain and an array
+texture goes to the recording pass, so its index words are kept in the heap too. Most of these programs now run and
+differ on the float sets (1 and 2): the translator rows below are where that leads.
+
+**Step 3.** Every root view the oracle binds is a root SRV `t<k>, space1` for the title's root descriptor at root
+parameter `k` (372 of 508 with the live-slot table `t255` beside it). The plan gives that descriptor an address at
+offset 0 of its own window (8, 9, …), ours reads the window's raw view (the harness heap now reaches the first 32
+windows), and the oracle's root signature gets one root SRV per register bound to the same buffer. The live table
+still needs `REBUILD_EXEC_LIVE=1` (set for this pass). Compute programs with the live table mostly never finish a
+set on WARP (or grow past 3 GB and were stopped): crash. On set 1 the vertex programs lose the WARP device (an
+offset from float data through a root SRV, which has no bounds); their sets 0 and 2 decide, under the existing rule
+(a set that does not complete is skipped, `hung.txt`).
+
+**The translator.** With real float data three VALU results parted: `v_fract_f32` never returns 1.0 on the console
+(the host's `frac` rounds a tiny negative fraction up to 1.0); `v_sin`/`v_cos` take turns and take the whole turns
+off before scaling (exact, and a half turn's sine is +0); `v_rcp_f32` as a correctly rounded division (DXC's `rcp`
+is a fast one). 489 sampled current matches that use these ops: no translator regression (their 48 non-matches are
+the correction above). Cost: a full division where a fast one was; the lead may prefer the fast one (the console's
+own `v_rcp` is 1 ulp).
+
+**Counted: 6,188 / 25,694** (was 5,994): +399 new matches, −205 artefacts withdrawn. Under the existing rule a set
+that never completes is skipped, and a match on the sets left counts: **367** of the 6,188 match on fewer than three
+sets (was 44 of 5,994), 270 of them the root-view vertex programs above. Counting only matches on all three sets:
+**5,821** (was 5,950). Whether the rule should require all three is the lead's call; the per-program detail is in the
+pass CSVs.
+
+## The 329 programs not translated (step 4)
+
+Bucketed by the first refusal (`translate v1`, lift only), before and after this pass:
+
+| refusal | before | after | the older build (fxceless-victory) |
+|:--|--:|--:|:--|
+| `s_bfe_u32` of an image descriptor's word 3, field 12-15 (base level): 173 vs · 41 cs · 15 ps | 229 | 0 | rebuilt the descriptor's words from the host view (word 3: identity swizzle, base level 0, last level from the view's levels, type); **taken here: base level 0, identity swizzle** |
+| `image_sample`: sampler not traced (28 ps · 1 cs) | 29 | 29 | traces a sampler through joins and loads at computed table addresses |
+| `v_movrels_b32` / `v_movreld_b32` (M0-relative registers) | 16 | 16 | registers as an array indexed by M0 |
+| `exp` target 13 (pos1) | 11 | 13 | pos1/pos2 carry the clip then cull distances, in semantic order |
+| `s_lshr_b32` / `s_bfe_u32` of a descriptor word the lifter cannot name | 10 | 10 | |
+| a lane mask read as data (`s_and`, `s_bfe`, `s_bcnt1`) | 8 | 8 | ballots of masks read as data |
+| `s_load_dword` (reached after word 3) | 0 | 7 | |
+| `v_med3_f16` | 6 | 6 | f16 med3 with the NaN rules |
+| `s_and_b32` of an image descriptor's word 4 (depth or layers) | 3 | 3 | word 4 from the view's depth or layers |
+| irreducible control flow | 3 | 3 | |
+| an output parameter in no signature element (reached after word 3) | 0 | 2 | |
+| one or two each (16-bit image, global and LDS forms, `image_gather4_l`, `image_sample_o`, `v_interp_p2_f32`, `s_setpc_b64`) | 14 | 14 | |
+| **all** | **329** | **111** | |
+
+The older build's shader cache (`%LOCALAPPDATA%\victory\cache\shaders`, 32,744 entries, read only) is keyed by its
+translator's fingerprint, not the program hash: an entry was matched to a program by what the console program decides
+in it (stage, user-data and sampler words, static samplers) and its DXIL's input and output signatures, against the
+oracle entry of the same hash. **323 of the 329** have a matching entry (61 entries match more than one program); the
+6 without one are 4 word-3 programs, 1 lane mask and `v_interp_p2_f32`. So the older build translated nearly all of
+them; what it did differently is in the right-hand column (from its source, used as a reference only; nothing of its
+output is copied).
 
 ## The second pass (2026-11-29): testing what the first could not
 
@@ -91,11 +174,13 @@ from its own ISG1 rows and PSV0 interpolation modes, padded so DXC keeps its row
 | d16 typed buffer loads and stores carry halves (they moved whole floats) | `e4d850a7baf18270` | |
 | med3 of a value and two constants is a clamp, max then min (NaN goes to the low bound, as on the console); a general med3 checks for NaN; `0 - x` stays a subtraction (DXC folded it to `-x`: +0 became -0); all three `precise` | `9034c0d9d567c3e5`, `565cc0b38920b229` | 13 of 38 differing compute programs match |
 | buffer loads through a CBV descriptor read the host's CBV (an SRV type over a CBV descriptor lost the WARP device; GPU-based validation named it) | `001a8d494b5f60b3` | vertex programs that lost the device: 16 → 0 |
+| third pass: `v_fract` never 1.0, `v_sin`/`v_cos` in turns, `v_rcp` a correctly rounded division | `016c1c4d4dd2de8a` (bindless, once its index words held indices) | 416 differing → 17 match; no regression in 489 sampled matches |
+| third pass: an image descriptor's base level (word 3, bits 12-15) read as data is 0, the swizzle the identity | 229 refusals, one instruction (`s_bfe_u32 …, 0x4000c`) | refused 329 → 111; of the 329, 61 match |
 
 Every `sirtest` and random-program test is unchanged (the IR, emitter and interpreters are untouched); `cargo test
 --release --no-fail-fast` after merging master (#36): 500 passed, 0 failed; one warning, from master (`rebuild-xlist` lib test, an unused `HRESULT`). After the merge the v0 compute set still gives 110 matching.
 
-## The buckets, biggest first
+## The buckets, biggest first (the second pass; the third pass's work on them is above)
 
 | stage | verdict | programs | reason | examples |
 |:--|:--|--:|:--|:--|
@@ -117,15 +202,16 @@ Every `sirtest` and random-program test is unchanged (the IR, emitter and interp
 
 What each needs:
 
-- **Recorded bindless programs that differ (532)**: most match on set 0 (small integers) and differ on set 1
-  (floats in [-2, 2)): 333 differ on set 1 only, 126 on sets 1 and 2, 61 on all three. An index computed from float
-  data names slots the recording gave a dummy; the oracle, with its own descriptor arithmetic, reads another slot.
-  First read: whether the two sides agree on the index (record the oracle's too), else input sets whose words used
-  as indices land in the filled region.
-- **One slot read as 2D and 2D array (437 pixel)**: a recorded slot sampled both ways; needs the harness to serve one slot
-  to both declarations (two views of the same texture are not possible in one slot; a per-side plan or a copy).
-- **The oracle binds root views (444 vertex, 62 compute)**: the harness has no root-descriptor path for the oracle's
-  root signature yet.
+- **Recorded bindless programs that differ (532)**: done in the third pass (index words): the indices from float data
+  left the heap on both sides; with index words holding indices 331 discard every pixel, 187 still differ, 6 match.
+- **One slot read as 2D and 2D array (437 pixel)**: done in the third pass (one array view for both declarations).
+- **The oracle binds root views (444 vertex, 62 compute)**: done in the third pass (root SRVs over windows); the
+  compute programs with the live table never finish a set on WARP.
+- **Next, from the third pass**: the float sets (1 and 2) of the recorded programs differ in 570 + 187 rows (an
+  example, `0d46328910533465`: `o0.w = vcc ? k : 0` is 0 in ours, k in the oracle's, on set 0 too); the root-view
+  vertex programs lose the WARP device on set 1 (an offset from float data through a root SRV); the recording pass's
+  index search grows a worker past several GB on a few compute programs (stopped by hand; `INDEX_TESTS` 600 is
+  generous, the samples needed 37-100).
 - **Crash (217)**: 102 are bindless programs whose recorded indices loop or leave every view; 92 are newly
   translated. Each named set is in `hung.k.txt` (965 sets across the three shards).
 - **Vacuous pixel programs (587)**: alpha tests that discard every pixel on these inputs. Next: an input set built
