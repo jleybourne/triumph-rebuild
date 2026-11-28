@@ -344,10 +344,8 @@ fn readable(address: u64, bytes: u64) -> bool {
     if crate::device::list_host().and_then(|h| h.memory(address)).is_some() {
         return true;
     }
-    use windows::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS};
-    let mut m = MEMORY_BASIC_INFORMATION::default();
-    let n = unsafe { VirtualQuery(Some(address as *const c_void), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
-    n != 0 && m.State == MEM_COMMIT && m.Protect.0 & (PAGE_NOACCESS.0 | PAGE_GUARD.0) == 0 && address + bytes <= m.BaseAddress as u64 + m.RegionSize as u64
+    // the allocation's descriptor (µs), not VirtualQuery (ms on the title's large regions)
+    rebuild_d3d12x::vmem::committed_protect(address, bytes).is_some_and(|p| p & rebuild_d3d12x::vmem::READ != 0 && p & 0x100 == 0)
 }
 
 // ------------------------------------------------------------------------------------- the bridge

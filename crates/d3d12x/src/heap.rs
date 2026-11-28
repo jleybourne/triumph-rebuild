@@ -1328,15 +1328,11 @@ impl Resources {
         if self.inner.heaps.read().unwrap_or_else(|e| e.into_inner()).iter().any(|r| r.start <= at && end <= r.end) {
             return true;
         }
-        use windows::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION};
-        let mut m = MEMORY_BASIC_INFORMATION::default();
-        // SAFETY: a query, no access
-        if unsafe { VirtualQuery(Some(at as *const _), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
-            return false;
+        // the allocation's descriptor, not VirtualQuery (which walks the page tables of a large region: ms)
+        match crate::vmem::committed_protect(at, len) {
+            Some(p) if p & 0x100 == 0 => p & if write { crate::vmem::WRITE } else { crate::vmem::READ } != 0,
+            _ => false,
         }
-        let writable = m.Protect.0 & 0xCC != 0; // READWRITE, WRITECOPY, EXECUTE_READWRITE, EXECUTE_WRITECOPY
-        let readable = writable || m.Protect.0 & 0x22 != 0; // READONLY, EXECUTE_READ
-        m.State.0 == 0x1000 && (if write { writable } else { readable }) && end <= m.BaseAddress as u64 + m.RegionSize as u64
     }
 
     /// 0xb8 CopyDescriptors `(ndst, *dst starts, *dst sizes, nsrc, *src starts, *src sizes,

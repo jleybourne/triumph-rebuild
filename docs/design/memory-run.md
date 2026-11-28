@@ -97,6 +97,22 @@ it across the 4 workers made it **slower** (32.7 ms a pass): concurrent calls on
 the kernel. Kept serial. To shrink it: watch less (memory the title never writes after load could leave the ring
 once it is quiet), not watch faster.
 
+**Address-space queries.** `VirtualQuery` walks the page tables of the region it lands in (16 ms on 2 GiB); labels
+asked `titlemem` every frame and that was ~69 % of the render thread. `rebuild_d3d12x::vmem` answers from the
+allocation's descriptor (`QueryVirtualMemoryInformation(MemoryRegionInfo)`, 3 µs) and falls back to `VirtualQuery`
+only for partly committed allocations and for mapped views.
+
+A mapped view (each physical frame the title maps into a placeholder, `physical.rs`) is its own allocation, but
+its descriptor counts **no commit** (the section holds it): the first version (#64) took that as "nothing
+committed", so `titlemem` answered no physical-page address (2 allocations opened instead of 346) and every view,
+vertex buffer and root view over them was refused: black frames at ~0 GPU time. The descriptor's commit is now
+trusted for private memory only. `REBUILD_TITLEMEM_CHECK=1` compares every answer with the exact `VirtualQuery`
+walk (card, 60 s: 0 of 8,192+ differ).
+
+Card, start screen (t 36-50 s), same machine and hour, master vs this: 15 fps vs 30 at the title's cap; with
+`REBUILD_FRAME_RATE=unlimited`, ~120 fps (7-9 ms a frame, GPU 1-1.5 ms, upload pass 5.3 ms of which write-watch
+5.3). `titlemem` opens 346 on both. Next: the write-watch scan (every pass reads all 5.2 GiB).
+
 ## Cost
 
 Submit thread: one channel send and one queue `Wait` per `ExecuteCommandLists`. Per draw: nothing new (views are

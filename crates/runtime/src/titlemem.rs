@@ -30,6 +30,8 @@ use rebuild_xlist::console::MemoryRange;
 /// An allocation of the title's, as the GPU sees it.
 struct Opened {
     bytes: u64,
+    /// the whole allocation's size as its descriptor has it (a different one: freed and allocated again)
+    alloc: u64,
     /// `None`: it could not be opened (kept so it is not tried again)
     gpu: Option<(ID3D12Heap, ID3D12Resource, u64)>,
 }
@@ -43,18 +45,22 @@ pub struct TitleMemory {
 unsafe impl Send for TitleMemory {}
 unsafe impl Sync for TitleMemory {}
 
-/// The allocation base of committed, writable memory at `va`, and the protection-uniform region's end.
-fn query(va: u64) -> Option<(u64, u64)> {
-    let mut m = MEMORY_BASIC_INFORMATION::default();
-    if unsafe { VirtualQuery(Some(va as *const c_void), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 || m.State != MEM_COMMIT || !writable(m.Protect) {
+/// The allocation holding `va`: its base and its committed size (`None` if `va` is not committed memory the CPU
+/// can read and write). A fully committed allocation answers from its descriptor (µs); a partly committed one
+/// walks its regions with `VirtualQuery` (which costs ms on a large region: the title's are fully committed).
+pub fn allocation(va: u64) -> Option<(u64, u64)> {
+    let a = rebuild_d3d12x::vmem::allocation_of(va)?;
+    if a.uncommitted() {
         return None;
     }
-    Some((m.AllocationBase as u64, m.BaseAddress as u64 + m.RegionSize as u64))
+    if a.fully_committed() && writable(PAGE_PROTECTION_FLAGS(a.protect)) {
+        return Some((a.base, a.size));
+    }
+    walked_allocation(va)
 }
 
-/// The allocation holding `va`: its base and its committed size (`None` if `va` is not committed memory the CPU
-/// can read and write).
-pub fn allocation(va: u64) -> Option<(u64, u64)> {
+/// The allocation holding `va` by walking its regions with `VirtualQuery` (exact; ms on a large region).
+fn walked_allocation(va: u64) -> Option<(u64, u64)> {
     let mut m = MEMORY_BASIC_INFORMATION::default();
     let size = std::mem::size_of::<MEMORY_BASIC_INFORMATION>();
     if unsafe { VirtualQuery(Some(va as *const c_void), &mut m, size) } == 0 || m.State != MEM_COMMIT || !writable(m.Protect) {
@@ -85,18 +91,45 @@ impl TitleMemory {
 
     /// The title's allocation holding `va`, opened for the GPU.
     pub fn range(&self, va: u64) -> Option<MemoryRange> {
-        // fast path: one VirtualQuery names the allocation; an opened one that still covers `va` is used as is
-        let (alloc_base, _) = query(va)?;
+        let r = self.lookup(va);
+        // REBUILD_TITLEMEM_CHECK=1: every answer against the exact VirtualQuery walk (slow: for diagnosis)
+        static CHECK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *CHECK.get_or_init(|| std::env::var("REBUILD_TITLEMEM_CHECK").is_ok_and(|v| v == "1")) {
+            use std::sync::atomic::Ordering::Relaxed;
+            let n = CHECKED.fetch_add(1, Relaxed) + 1;
+            if n.is_power_of_two() && n >= 1024 {
+                eprintln!("titlemem  check: {n} answers, {} differ from the VirtualQuery walk", MISMATCHED.load(Relaxed));
+            }
+            let fast = r.as_ref().map(|m| (m.console, m.bytes));
+            let walked = walked_allocation(va);
+            // an allocation that could not be opened answers None on both paths: compare only what was answered
+            if fast.is_some() && fast != walked || fast.is_none() && walked.is_some_and(|(b, _)| self.opened.lock().unwrap_or_else(|e| e.into_inner()).get(&b).is_none_or(|o| o.gpu.is_some())) {
+                if MISMATCHED.fetch_add(1, Relaxed) < 16 {
+                    eprintln!("titlemem  check {va:#x}: answered {fast:x?}, VirtualQuery walk {walked:x?}, descriptor {:x?}", rebuild_d3d12x::vmem::allocation_of(va));
+                }
+            }
+        }
+        r
+    }
+
+    fn lookup(&self, va: u64) -> Option<MemoryRange> {
+        // fast path: the allocation's descriptor (3 µs, never VirtualQuery: labels come here every frame) names it;
+        // an opened one of the same size that still covers `va` is used as is
+        let a = rebuild_d3d12x::vmem::allocation_of(va)?;
+        if a.uncommitted() {
+            return None;
+        }
+        let alloc_base = a.base;
         {
             let opened = self.opened.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(o) = opened.get(&alloc_base).filter(|o| va - alloc_base < o.bytes) {
+            if let Some(o) = opened.get(&alloc_base).filter(|o| o.alloc == a.size && va - alloc_base < o.bytes) {
                 let (_, buffer, gpu_va) = o.gpu.as_ref()?;
                 return Some(MemoryRange { console: alloc_base, bytes: o.bytes, host_va: *gpu_va, resource: buffer.as_raw(), resource_offset: 0 });
             }
         }
         let (base, bytes) = allocation(va)?;
         let mut opened = self.opened.lock().unwrap_or_else(|e| e.into_inner());
-        if opened.get(&base).is_none_or(|o| o.bytes != bytes) {
+        if opened.get(&base).is_none_or(|o| o.bytes != bytes || o.alloc != a.size) {
             let gpu = self.open(base, bytes);
             if gpu.is_none() {
                 OPEN_FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -105,7 +138,7 @@ impl TitleMemory {
             }
             // a stale entry for the same base (the title freed it and allocated again) is released here; work
             // already recorded holds its own references
-            opened.insert(base, Opened { bytes, gpu });
+            opened.insert(base, Opened { bytes, alloc: a.size, gpu });
         }
         let o = opened.get(&base)?;
         let (_, buffer, gpu_va) = o.gpu.as_ref()?;
@@ -122,7 +155,10 @@ impl TitleMemory {
                 return None;
             }
         };
-        let size = unsafe { heap.GetDesc() }.SizeInBytes.min(bytes);
+        let hd = unsafe { heap.GetDesc() };
+        let size = hd.SizeInBytes.min(bytes);
+        // a resource in a cross-adapter heap must say so; a heap that is not one takes none (the flag costs)
+        let cross = if hd.Flags.0 & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER.0 != 0 { D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER } else { D3D12_RESOURCE_FLAG_NONE };
         let buffer = |flags: D3D12_RESOURCE_FLAGS| {
             let desc = D3D12_RESOURCE_DESC {
                 Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
@@ -140,7 +176,7 @@ impl TitleMemory {
             unsafe { self.device.CreatePlacedResource(&heap, 0, &desc, D3D12_RESOURCE_STATE_COMMON, None, &mut r) }.ok().and(r)
         };
         // shaders may write it through root UAVs; a heap that refuses that still serves reads and labels
-        let r = buffer(D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS).or_else(|| buffer(D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER))?;
+        let r = buffer(cross | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS).or_else(|| buffer(cross))?;
         let va = unsafe { r.GetGPUVirtualAddress() };
         Some((heap, r, va))
     }
@@ -149,6 +185,9 @@ impl TitleMemory {
 /// Allocations opened for the GPU, and those that could not be.
 pub static OPENED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static OPEN_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// REBUILD_TITLEMEM_CHECK: answers compared, and how many differed
+pub static CHECKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static MISMATCHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
 mod tests {
@@ -199,6 +238,36 @@ mod tests {
         assert_eq!((again.host_va, again.resource), (r.host_va, r.resource), "opened once");
         assert!(m.range(0x10).is_none());
         drop(m);
-        unsafe { VirtualFree(p as *mut c_void, 0, MEM_RELEASE).unwrap() };
+        // cleanup only: WARP may still hold the heap it opened over the memory for a moment (the free then fails
+        // with E_INVALIDARG, seen once in a full gate); a leak of 128 KiB in a test process is harmless
+        for _ in 0..50 {
+            if unsafe { VirtualFree(p as *mut c_void, 0, MEM_RELEASE) }.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// The physical pages' case (the regression that made #64 render black): a frame of a pagefile section mapped
+    /// into a placeholder is its own allocation, and its descriptor counts no commit of its own (the section holds
+    /// it). It must still be found, whole, as `VirtualQuery` finds it.
+    #[test]
+    fn a_physical_frame_mapped_into_a_placeholder_is_an_allocation() {
+        use crate::physical::{reserve_placeholder, Physical, FRAME};
+        let mut p = Physical::default();
+        let frames = p.allocate(2).unwrap();
+        let base = reserve_placeholder(4 * FRAME);
+        assert_ne!(base, 0);
+        assert!(p.map(base + FRAME as u64, frames[0]));
+        let at = base + FRAME as u64;
+        unsafe { ((at + 100) as *mut u32).write_volatile(7) };
+        let d = rebuild_d3d12x::vmem::allocation_of(at + 10).expect("described");
+        println!("mapped frame: {d:?}");
+        assert_eq!(allocation(at + 10), Some((at, FRAME as u64)), "the frame, whole");
+        assert_eq!(rebuild_d3d12x::vmem::committed_protect(at + 8, 8).map(|p| p & 0xff), Some(PAGE_READWRITE.0), "readable for waits");
+        assert_eq!(allocation(base + 10), None, "the placeholder beside it is no memory");
+        p.unmap(at);
+        assert!(p.free(&frames));
     }
 }
+
