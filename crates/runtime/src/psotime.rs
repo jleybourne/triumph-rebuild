@@ -1,8 +1,8 @@
 //! The pipeline timeline: when host pipelines are made, and when a title thread waits for one.
 //!
-//! A title thread that binds a pipeline whose host PSO is not ready either waits for it
-//! (`REBUILD_PSO_FIRST_USE=wait`: created on that thread if no worker has started it, "inline", else waited for
-//! from the pool) or, by default, skips the draw and asks the pool to make it next ("pending"). Every wait is
+//! A title thread that binds a pipeline whose host PSO is not ready by default skips the draw and asks the pool to
+//! make it next ("pending"); with `REBUILD_PSO_FIRST_USE=wait` it waits for it (created on that thread if no
+//! worker has started it, "inline", else waited for from the pool). Every wait is
 //! timed and attributed here; one over [`EVENT_MS`] gets its own stderr line (time, thread, kind, ms, pipeline).
 //!
 //! Once a second the frame-line thread prints a `psotl` line on stderr beside the frame rate: pipelines made in the
@@ -24,6 +24,11 @@ static INLINE: AtomicU64 = AtomicU64::new(0);
 static INLINE_NS: AtomicU64 = AtomicU64::new(0);
 static PENDING: AtomicU64 = AtomicU64::new(0);
 static LONGEST_NS: AtomicU64 = AtomicU64::new(0);
+/// The title's own pipeline creation calls (device 0x50 / 0x58 / 0x1f0 / 0x2b0): count and time inside them
+/// (reading the description, each new program's root layout, the pool request), on the title's thread.
+static CREATES: AtomicU64 = AtomicU64::new(0);
+static CREATE_NS: AtomicU64 = AtomicU64::new(0);
+static CREATE_MAX_NS: AtomicU64 = AtomicU64::new(0);
 
 /// Waits in progress: (thread id, start in ns after the frame-line base); 0 marks a free slot.
 const SLOTS: usize = 64;
@@ -74,6 +79,23 @@ pub fn wait<R>(kind: Kind, what: impl FnOnce() -> String, f: impl FnOnce() -> R)
         eprintln!("psowait   t {:.3} s thread {me} {} {:.0} ms {}", start as f64 / 1e9, if kind == Kind::Inline { "inline" } else { "pool" }, ns as f64 / 1e6, what());
     }
     r
+}
+
+/// Times one of the title's pipeline creation calls.
+#[inline]
+pub fn creation<R>(f: impl FnOnce() -> R) -> R {
+    let t = Instant::now();
+    let r = f();
+    let ns = t.elapsed().as_nanos() as u64;
+    CREATES.fetch_add(1, Ordering::Relaxed);
+    CREATE_NS.fetch_add(ns, Ordering::Relaxed);
+    CREATE_MAX_NS.fetch_max(ns, Ordering::Relaxed);
+    r
+}
+
+/// The title's creation calls: count, ms inside them, the slowest one in ms.
+pub fn creations() -> (u64, f64, f64) {
+    (CREATES.load(Ordering::Relaxed), CREATE_NS.load(Ordering::Relaxed) as f64 / 1e6, CREATE_MAX_NS.load(Ordering::Relaxed) as f64 / 1e6)
 }
 
 /// A bind found its pipeline not ready and did not wait (its draws are skipped).
@@ -134,11 +156,13 @@ pub struct Mark {
     inline: u64,
     inline_ns: u64,
     pending: u64,
+    creates: u64,
+    create_ns: u64,
 }
 
 pub fn mark() -> Mark {
     let r = |a: &AtomicU64| a.load(Ordering::Relaxed);
-    Mark { made: crate::pipeline::made(), waits: r(&WAITS), wait_ns: r(&WAIT_NS), inline: r(&INLINE), inline_ns: r(&INLINE_NS), pending: r(&PENDING) }
+    Mark { made: crate::pipeline::made(), waits: r(&WAITS), wait_ns: r(&WAIT_NS), inline: r(&INLINE), inline_ns: r(&INLINE_NS), pending: r(&PENDING), creates: r(&CREATES), create_ns: r(&CREATE_NS) }
 }
 
 /// The second's `psotl` line.
@@ -149,11 +173,13 @@ pub fn line(t: u64, fps: f64, a: &Mark, b: &Mark) -> String {
     let stuck = stuck();
     let ms = |ns: u64| ns as f64 / 1e6;
     let mut s = format!(
-        "psotl     t {t}s | fps {fps:.1} | made {made} | wait {:.0} ms x{waits} (inline {:.0} ms x{}) | pending {pending} | queue {}",
+        "psotl     t {t}s | fps {fps:.1} | made {made} | wait {:.0} ms x{waits} (inline {:.0} ms x{}) | pending {pending} | queue {} | title creates x{} {:.0} ms",
         ms(b.wait_ns - a.wait_ns),
         ms(b.inline_ns - a.inline_ns),
         b.inline - a.inline,
         crate::pipeline::queued(),
+        b.creates - a.creates,
+        ms(b.create_ns - a.create_ns),
     );
     if let Some((tid, secs)) = stuck {
         s += &format!(" | waiting {secs:.1} s on thread {tid}");

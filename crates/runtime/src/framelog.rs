@@ -481,6 +481,7 @@ fn run() {
         let pso = crate::psotime::mark();
         eprintln!("{}", crate::psotime::line(l.t, l.fps, &prev_pso, &pso));
         prev_pso = pso;
+        crate::pipeline::tick();
         *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         prev = now;
         prev_t = now_t;

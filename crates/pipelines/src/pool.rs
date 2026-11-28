@@ -63,6 +63,8 @@ struct Slot<O> {
     parked: AtomicBool,
     /// on the urgent queue (a title thread binds it)
     hurried: AtomicBool,
+    /// a title thread bound it ([`Pool::mark_used`])
+    used: AtomicBool,
     key: OnceLock<Key>,
     desc: Mutex<Option<Desc>>,
     out: OnceLock<Result<O, String>>,
@@ -70,7 +72,7 @@ struct Slot<O> {
 
 impl<O> Default for Slot<O> {
     fn default() -> Self {
-        Slot { state: AtomicU8::new(QUEUED), requested: AtomicBool::new(false), parked: AtomicBool::new(false), hurried: AtomicBool::new(false), key: OnceLock::new(), desc: Mutex::new(None), out: OnceLock::new() }
+        Slot { state: AtomicU8::new(QUEUED), requested: AtomicBool::new(false), parked: AtomicBool::new(false), hurried: AtomicBool::new(false), used: AtomicBool::new(false), key: OnceLock::new(), desc: Mutex::new(None), out: OnceLock::new() }
     }
 }
 
@@ -430,6 +432,20 @@ impl<C: Creator> Pool<C> {
         self.status(h)
     }
 
+    /// A title thread bound this pipeline (drew or dispatched with it, or tried to). Returns whether this is the
+    /// first time. Lock-free.
+    pub fn mark_used(&self, h: Handle) -> bool {
+        !self.inner.slot(h.0).used.swap(true, Ordering::Relaxed)
+    }
+
+    /// The pipelines the title requested and then bound this session, in first-request order, with their
+    /// descriptions: the few thousand worth creating ahead next session (of the tens of thousands requested).
+    pub fn used(&self) -> Vec<(Key, Desc)> {
+        let requested = self.inner.requested.lock().unwrap().clone();
+        let keys = self.inner.keys.lock().unwrap();
+        requested.into_iter().filter(|(k, _)| keys.get(k).is_some_and(|&i| self.inner.slot(i).used.load(Ordering::Relaxed))).collect()
+    }
+
     /// Every pipeline the title requested this session, in first-request order, with its description: what
     /// [`crate::session::Record`] keeps for the next session's prewarm.
     pub fn requested(&self) -> Vec<(Key, Desc)> {
@@ -575,6 +591,17 @@ mod tests {
         let st = pool.stats();
         assert_eq!((st.hurried, st.unparked, st.inline, st.created), (2, 1, 0, 11));
         assert_eq!(pool.hurry(parked), Status::Ready);
+    }
+
+    /// Only the pipelines a title thread bound are kept as used (what the next session creates ahead).
+    #[test]
+    fn used_is_the_bound_subset_of_the_requests() {
+        let pool = Pool::new(Arc::new(Fake::new(0)), 1);
+        let hs: Vec<_> = (0..6u64).map(|k| pool.request_capped(cs(k).0, cs(k).1, 2)).collect();
+        assert!(pool.mark_used(hs[4]));
+        assert!(pool.mark_used(hs[1]));
+        assert!(!pool.mark_used(hs[4]), "once");
+        assert_eq!(pool.used(), vec![cs(1), cs(4)], "in request order");
     }
 
     #[test]
