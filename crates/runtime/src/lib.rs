@@ -21,6 +21,8 @@ pub mod cpu;
 pub mod drives;
 pub mod dxgi;
 pub mod frame;
+#[cfg(windows)]
+pub mod gameinput;
 pub mod gputime;
 pub mod framelog;
 pub mod fence;
@@ -256,6 +258,10 @@ pub mod host {
                 rebuild_loader::Symbol::Name { name, .. } => (Some(name.as_str()), None),
                 rebuild_loader::Symbol::Ordinal(o) => (None, Some(*o)),
             };
+            // gameinput.dll: the host has one too, but the title's input is ours (crate::gameinput)
+            if let Some(ours) = crate::gameinput::bind(dll, name, ordinal) {
+                return Some(ours);
+            }
             let has_dll = self.host.dll(dll).is_some();
             let f = self.host.function(dll, name, ordinal);
             let tier = super::classify(name.unwrap_or(""), has_dll, f.is_some());

@@ -95,6 +95,16 @@ fn process_age() -> Duration {
     Duration::from_nanos(t(now).saturating_sub(t(c)) * 100)
 }
 
+/// Time since the process started (the input script's clock).
+pub fn elapsed() -> Duration {
+    base().elapsed()
+}
+
+/// Frames the title has presented so far (shown or late).
+pub fn frames() -> u64 {
+    FRAMES.load(Ordering::Relaxed)
+}
+
 fn now_ns() -> u64 {
     base().elapsed().as_nanos() as u64
 }
