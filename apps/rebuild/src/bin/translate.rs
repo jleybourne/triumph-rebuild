@@ -53,6 +53,9 @@ fn is_hint(name: &str) -> bool {
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_else(|| "coverage".into());
+    if mode == "containers" {
+        return containers();
+    }
     let Ok(path) = std::env::var("REBUILD_SHADERS") else {
         eprintln!("translate: set REBUILD_SHADERS to a copy of shaders.rpf (never the game folder)");
         std::process::exit(2);
@@ -117,6 +120,59 @@ fn main() {
             eprintln!("translate: unknown mode {m}");
             std::process::exit(2);
         }
+    }
+}
+
+/// `translate containers <dir> [<hash> ...]`: lifts each `<hash>.dxbc` in `dir` (what the runtime's on-demand
+/// translation dumps under `ondemand\failed` and `ondemand\slow`: programs outside `shaders.rpf`), with the time
+/// and the first refusal. `REBUILD_TRANSLATE_OUT` set: the HLSL of each lifted program is written there.
+fn containers() {
+    use rebuild_pipelines::translate;
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let Some(dir) = args.first() else {
+        eprintln!("translate containers <dir> [<hash> ...]");
+        std::process::exit(2);
+    };
+    let out = std::env::var_os("REBUILD_TRANSLATE_OUT").map(std::path::PathBuf::from);
+    let mut files: Vec<_> = std::fs::read_dir(dir).expect("container folder").filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "dxbc")).collect();
+    files.sort();
+    let (mut ok, mut n, mut total) = (0, 0, 0.0f64);
+    let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
+    for f in files {
+        let name = f.file_stem().unwrap().to_string_lossy().into_owned();
+        if args.len() > 1 && !args[1..].contains(&name) {
+            continue;
+        }
+        let bytes = std::fs::read(&f).expect("read container");
+        let t = std::time::Instant::now();
+        let r = translate::native_of(&bytes).and_then(|(p, isg1, osg1)| {
+            translate::check_kind(&p)?;
+            let stage = format!("{:?} wave64 {}", p.stage, p.wave64);
+            translate::lift_hlsl(&p, &isg1, &osg1, true).map(|h| (stage, h)).map_err(|e| e.reason)
+        });
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        total += ms;
+        n += 1;
+        match r {
+            Ok((stage, h)) => {
+                ok += 1;
+                println!("{name} {stage} lifted in {ms:.1} ms ({} bytes of HLSL)", h.src.len());
+                if let Some(o) = &out {
+                    let _ = std::fs::create_dir_all(o);
+                    let _ = std::fs::write(o.join(format!("{name}.{}.hlsl", h.stage.name())), &h.src);
+                }
+            }
+            Err(e) => {
+                println!("{name} refused in {ms:.1} ms: {e}");
+                *reasons.entry(e.split(" row ").next().unwrap_or(&e).to_string()).or_default() += 1;
+            }
+        }
+    }
+    println!("\n{n} containers · lifted {ok} · {:.1} ms each", total / n.max(1) as f64);
+    let mut v: Vec<_> = reasons.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    for (r, c) in v.iter().take(40) {
+        println!("  {c:>5}  {r}");
     }
 }
 

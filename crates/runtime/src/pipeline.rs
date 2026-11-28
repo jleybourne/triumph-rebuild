@@ -562,16 +562,19 @@ pub fn report() -> String {
     if let Some(od) = pool().and_then(|p| p.creator().programs().ondemand()) {
         let s = od.stats();
         let ms = |d: std::time::Duration, n: u64| if n == 0 { 0.0 } else { d.as_secs_f64() * 1e3 / n as f64 };
-        let done = s.translated + s.from_disk;
         line += &format!(
-            "; outside the library {} · translated {} (dxc {:.1} ms each) · from disk {} · stale {} · failed {} · lift {:.2} ms each",
+            "; outside the library {} · translated {} (dxc {:.1} ms each) · from disk {} · stale {} · failed {} · lifted {} ({:.2} ms each, slowest {:.0} ms {:016x})",
             s.offered,
             s.translated,
             ms(s.dxc, s.translated),
             s.from_disk,
             s.stale,
             s.failed,
-            ms(s.lift, done),
+            s.lifted,
+            // every lift, failed ones included (it was divided by the successes only: "10 s each")
+            ms(s.lift, s.lifted),
+            s.slowest.0.as_secs_f64() * 1e3,
+            s.slowest.1,
         );
         for (h, e) in od.failures().iter().take(8) {
             line += &format!("\n  on demand {h:016x}: {e}");
