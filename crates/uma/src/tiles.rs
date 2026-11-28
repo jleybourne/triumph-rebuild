@@ -44,16 +44,21 @@ pub fn buffer_desc(bytes: u64) -> D3D12_RESOURCE_DESC {
 
 /// A run of consecutive pages backed by consecutive card pages in one heap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Run {
-    window: usize,
-    tile: u32,
-    heap: u32,
-    offset: u32,
-    count: u32,
+pub(crate) struct Run {
+    pub window: usize,
+    pub tile: u32,
+    pub heap: u32,
+    pub offset: u32,
+    pub count: u32,
 }
 
 fn runs(pages: &[Backed]) -> Vec<Run> {
-    let per_window = (WINDOW / PAGE) as u32;
+    runs_in(pages, WINDOW as u64)
+}
+
+/// [`runs`] for windows of `span` bytes (a multiple of a page): `Run::window` is `address / span`.
+pub(crate) fn runs_in(pages: &[Backed], span: u64) -> Vec<Run> {
+    let per_window = (span / PAGE as u64) as u32;
     let mut sorted = pages.to_vec();
     sorted.sort_by_key(|b| b.page);
     let mut out: Vec<Run> = Vec::new();

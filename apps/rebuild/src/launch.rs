@@ -145,6 +145,7 @@ fn device_report() {
                 rebuild_runtime::titlemem::OPENED.load(Relaxed),
                 rebuild_runtime::titlemem::OPEN_FAILED.load(Relaxed)
             );
+            println!("{}", rebuild_runtime::memory::report());
             println!(
                 "gputime   {} GPU timestamp labels written into the title's memory; {} host-list timing pairs read, {} dropped",
                 rebuild_xlist::console::STAMP_LABELS.load(Relaxed),

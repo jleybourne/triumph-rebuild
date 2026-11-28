@@ -485,7 +485,7 @@ pub fn prove_ring(frames: usize, workers: usize) -> Result<Vec<String>, String> 
     }
     gpu.wait()?;
     let windows: Vec<u64> = tiles.windows.iter().map(|w| unsafe { w.GetGPUVirtualAddress() }).collect();
-    let mut ring = Ring::new(&gpu.device, windows, regions.clone(), workers)?;
+    let ring = Ring::new(&gpu.device, windows, regions.clone(), workers)?;
     crate::chunks::mark_submit_thread();
 
     let direct_fence: ID3D12Fence = unsafe { gpu.device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }.map_err(err("fence"))?;

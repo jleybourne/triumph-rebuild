@@ -422,6 +422,12 @@ pub trait ListHost: PipelineSource + Send + Sync {
     /// The range of console GPU memory holding `va`. Asked only when the list's cached range
     /// misses, so a range as large as the lead can make it is fastest.
     fn memory(&self, va: u64) -> Option<MemoryRange>;
+    /// The range holding `va` as the **CPU** sees it, for what the GPU writes and the title's CPU polls (labels,
+    /// GPU timestamps): where GPU-read memory has a copy in card memory (the memory model's tiles), the title's
+    /// own bytes are here, not there. Defaults to [`ListHost::memory`].
+    fn cpu_memory(&self, va: u64) -> Option<MemoryRange> {
+        self.memory(va)
+    }
     /// Record a bottom-of-pipe write into `list`. `host_va` is the host GPU address of `address`
     /// if a [`MemoryRange`] covers it. The default writes values with `WriteBufferImmediate` in
     /// `MARKER_OUT` mode (Build 2's labels: the value lands once the work before it is done); a

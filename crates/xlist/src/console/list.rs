@@ -638,7 +638,7 @@ impl ListState {
         if address == 0 || address % 8 != 0 || self.stamps.is_none() {
             return false;
         }
-        let Some((resource, offset)) = self.host.memory(address).and_then(|r| r.place(address, 8)) else { return false };
+        let Some((resource, offset)) = self.host.cpu_memory(address).and_then(|r| r.place(address, 8)) else { return false };
         if offset % 8 != 0 {
             return false;
         }
@@ -2071,7 +2071,8 @@ fn label(this: Raw, address: u64, value: LabelValue, bytes: u32, flush: u32, fla
     if value == LabelValue::GpuTimestamp && s.stamp_label(address) {
         return;
     }
-    let host_va = s.va(address).filter(|_| address != 0);
+    // the CPU's copy: the title polls it (not the card's copy of memory the GPU reads)
+    let host_va = s.host.cpu_memory(address).and_then(|r| r.map(address)).filter(|_| address != 0);
     let w = LabelWrite { address, value, bytes, flush, flags };
     let done = match &s.current().l2 {
         Some(l2) => s.host.label(l2, &w, host_va),

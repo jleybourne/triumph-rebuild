@@ -205,6 +205,8 @@ pub struct Line {
     pub held: u64,
     pub internal: Option<(u32, u32)>,
     pub output: Option<(u32, u32)>,
+    /// the upload ring (`crate::memory`): coordinator ms a pass, and MB sent a frame
+    pub upload: Option<(f64, f64)>,
 }
 
 fn thousands(n: u64) -> String {
@@ -241,6 +243,9 @@ pub fn format(l: &Line) -> String {
         s += &format!(" | wait {v:.1} ms");
     }
     s += &format!(" | late {} | held {}", l.late, l.held);
+    if let Some((ms, mb)) = l.upload {
+        s += &format!(" | upload {ms:.1} ms | upmb {mb:.2} MB");
+    }
     match (l.internal, l.output) {
         (Some(i), Some(o)) => s += &format!(" | {}x{} -> {}x{}", i.0, i.1, o.0, o.1),
         (None, Some(o)) => s += &format!(" | {}x{}", o.0, o.1),
@@ -263,6 +268,8 @@ struct Counts {
     frame_us: u64,
     frame_n: u64,
     held: u64,
+    /// the upload ring's totals: bytes, busy µs, passes
+    up: (u64, u64, u64),
 }
 
 fn counts() -> Counts {
@@ -279,6 +286,7 @@ fn counts() -> Counts {
         frame_us: r(&FRAME_US),
         frame_n: r(&FRAME_N),
         held: crate::submit::WAITS_BRIDGED.load(Ordering::Relaxed),
+        up: crate::memory::upload_totals().map_or((0, 0, 0), |t| (t.0, t.1, t.2)),
     }
 }
 
@@ -305,6 +313,10 @@ fn line(t: u64, seconds: f64, a: &Counts, b: &Counts) -> Line {
         held: b.held - a.held,
         internal: size(&INTERNAL),
         output: size(&OUTPUT),
+        upload: crate::memory::get().map(|_| {
+            let passes = (b.up.2 - a.up.2).max(1);
+            ((b.up.1 - a.up.1) as f64 / passes as f64 / 1000.0, (b.up.0 - a.up.0) as f64 / 1e6 / frames.max(1) as f64)
+        }),
     }
 }
 
@@ -449,6 +461,7 @@ mod tests {
             held: 2,
             internal: Some((2560, 1440)),
             output: Some((3840, 2160)),
+            upload: None,
         };
         let s = format(&l);
         assert_eq!(s, SAMPLE.trim_end());

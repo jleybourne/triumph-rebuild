@@ -26,6 +26,11 @@ pub trait Memory: Send + Sync {
     /// The range of console GPU memory holding `va` (`ListHost::memory`; every buffer view is
     /// made from it). As large as possible: callers cache the last one.
     fn range(&self, va: u64) -> Option<MemoryRange>;
+    /// The range holding `va` as the CPU sees it (labels and timestamps the GPU writes for the title's CPU to
+    /// poll). Defaults to [`Memory::range`]; a model that keeps a card copy of CPU memory answers the CPU's.
+    fn visible(&self, va: u64) -> Option<MemoryRange> {
+        self.range(va)
+    }
     /// A host buffer whose byte 0 is console `address`, sharing its bytes (copies and barriers
     /// name it). `None`: none can be made (no GPU, or an address the model cannot alias).
     fn buffer(&self, address: u64, bytes: u64) -> Option<ID3D12Resource>;

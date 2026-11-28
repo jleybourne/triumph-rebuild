@@ -666,12 +666,20 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
         if debug {
             debug_messages(&host);
         }
-        // resources, heaps and views behind the device; memory is a host stand-in until the tiles join (Build 1)
-        let memory = match rebuild_d3d12x::HostMemory::new(&host, 1 << 30) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("device: resource memory: {e}");
-                return e.code().0;
+        // plan decision 1: the title's CPU-written graphics memory on card pages at its own addresses, kept current
+        // by the upload ring (crate::memory); REBUILD_MEMORY=standin keeps the old path
+        let model = crate::memory::start(&host, std::env::var_os("REBUILD_WARP").is_some()).is_some();
+        // resources, heaps and views behind the device: their memory on card pages at console addresses (the
+        // arena), or under the stand-in one 1 GiB upload heap
+        let memory: Box<dyn rebuild_d3d12x::Memory> = if model {
+            Box::new(crate::memory::Arena)
+        } else {
+            match rebuild_d3d12x::HostMemory::new(&host, 1 << 30) {
+                Ok(m) => Box::new(m),
+                Err(e) => {
+                    eprintln!("device: resource memory: {e}");
+                    return e.code().0;
+                }
             }
         };
         let memory = Accounted { inner: memory, title: std::sync::Mutex::new(std::collections::HashMap::new()), own: crate::titlemem::TitleMemory::new(&host) };
@@ -682,6 +690,7 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
                 return e.code().0;
             }
         };
+        crate::memory::set_resources(&resources);
         let resources_ref = resources.clone();
         rebuild_ffx::host::install_xbox(resources.clone(), &host);
         // pipelines: the program library and the creation pool (workers start now)
@@ -723,15 +732,15 @@ pub const D3D_ATTRIBUTES: u64 = (0x80 << 16) | (2 << 14);
 /// `XMemAlloc` through the title's hooks with [`D3D_ATTRIBUTES`] (so the title's budgets and arenas see it),
 /// freed with `XMemFree` when the resource goes. The bytes the GPU uses come from `inner` until the tiles
 /// join; the title only keeps the hooked address for its bookkeeping.
-struct Accounted<M> {
-    inner: M,
+struct Accounted {
+    inner: Box<dyn rebuild_d3d12x::Memory>,
     /// our address -> the title's
     title: std::sync::Mutex<std::collections::HashMap<u64, u64>>,
     /// the title's own allocations, opened for the GPU in place (an address `inner` does not hold)
     own: Option<crate::titlemem::TitleMemory>,
 }
 
-impl<M: rebuild_d3d12x::Memory> rebuild_d3d12x::Memory for Accounted<M> {
+impl rebuild_d3d12x::Memory for Accounted {
     fn allocate(&self, bytes: u64, alignment: u64, heap: &rebuild_d3d12x::format::HeapProperties) -> Option<u64> {
         let at = self.inner.allocate(bytes, alignment, heap)?;
         let t = crate::exports::XMemAlloc(bytes as usize, D3D_ATTRIBUTES) as u64;
@@ -747,10 +756,20 @@ impl<M: rebuild_d3d12x::Memory> rebuild_d3d12x::Memory for Accounted<M> {
         self.inner.free(address, bytes);
     }
     fn range(&self, va: u64) -> Option<rebuild_d3d12x::MemoryRange> {
+        // the card's copy of the title's watched memory first (crate::memory), else the title's memory in place
+        self.inner.range(va).or_else(|| crate::memory::range(va)).or_else(|| self.own.as_ref()?.range(va))
+    }
+    fn visible(&self, va: u64) -> Option<rebuild_d3d12x::MemoryRange> {
+        // labels and timestamps the title polls: its own (CPU) bytes, never the card's copy (under the model the
+        // arena's ranges are card pages; the stand-in's upload heap is CPU memory)
+        if crate::memory::get().is_some() {
+            return self.own.as_ref()?.range(va);
+        }
         self.inner.range(va).or_else(|| self.own.as_ref()?.range(va))
     }
     fn buffer(&self, address: u64, bytes: u64) -> Option<windows::Win32::Graphics::Direct3D12::ID3D12Resource> {
-        self.inner.buffer(address, bytes)
+        // a resource the title placed in its own watched memory shares those card pages too
+        self.inner.buffer(address, bytes).or_else(|| crate::memory::buffer(address, bytes))
     }
     fn texture(&self, address: u64, desc: &windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_DESC) -> Option<windows::Win32::Graphics::Direct3D12::ID3D12Resource> {
         self.inner.texture(address, desc)

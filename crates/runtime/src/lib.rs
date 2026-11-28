@@ -38,6 +38,8 @@ pub mod overlay;
 pub mod present;
 pub mod sandbox;
 pub mod titlemem;
+#[cfg(windows)]
+pub mod memory;
 #[cfg(all(test, windows))]
 mod present_card;
 #[cfg(windows)]

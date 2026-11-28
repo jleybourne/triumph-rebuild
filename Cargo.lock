@@ -2225,6 +2225,7 @@ dependencies = [
  "rebuild-overlay",
  "rebuild-pipelines",
  "rebuild-shader",
+ "rebuild-uma",
  "rebuild-vfs",
  "rebuild-winfiles",
  "rebuild-xg",

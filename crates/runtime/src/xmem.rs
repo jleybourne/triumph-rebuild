@@ -87,6 +87,8 @@ impl Region {
 #[derive(Default)]
 pub struct Xmem {
     regions: BTreeMap<u64, Region>,
+    /// bases of the reservations made with write-watch (the memory model's CPU-written memory)
+    watched: std::collections::BTreeSet<u64>,
 }
 
 impl Xmem {
@@ -95,7 +97,13 @@ impl Xmem {
     }
 
     pub fn forget(&mut self, base: u64) -> Option<Region> {
+        self.watched.remove(&base);
         self.regions.remove(&base)
+    }
+
+    /// Write-watched reservations: (base, size).
+    pub fn watched(&self) -> Vec<(u64, u64)> {
+        self.watched.iter().filter_map(|b| self.regions.get(b)).map(|r| (r.base, r.size)).collect()
     }
 
     /// The region holding `addr`.
@@ -182,6 +190,14 @@ pub mod host {
         if kind & MEM_RESERVE.0 != 0 {
             x.record(Region { base: at, size, flags, protect });
         }
+        // the memory model (`crate::memory`): watched memory gets tiles where it is committed, and the ring
+        if kind & MEM_WRITE_WATCH != 0 {
+            x.watched.insert(at);
+            crate::memory::reserved(at, size);
+        }
+        if kind & MEM_COMMIT.0 != 0 {
+            crate::memory::committed(at, size);
+        }
         at
     }
 
@@ -212,7 +228,8 @@ pub mod host {
     }
 
     pub fn virtual_free(x: &mut Xmem, base: u64, size: u64, kind: u32) -> bool {
-        let r = unsafe { VirtualFree(base as *mut c_void, size as usize, VIRTUAL_FREE_TYPE(kind)) };
+        // the memory model stops reading (and unmaps) what is freed first
+        let r = crate::memory::freeing(base, size, kind, || unsafe { VirtualFree(base as *mut c_void, size as usize, VIRTUAL_FREE_TYPE(kind)) });
         if let Err(e) = &r {
             static FAILED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             if FAILED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {

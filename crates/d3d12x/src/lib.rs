@@ -140,6 +140,9 @@ pub struct Inner {
     pub(crate) placed_views: Mutex<std::collections::HashMap<(bool, u64, [u32; 14], [u32; 10]), Record>>,
     /// CPU-only descriptors for UAV clears of shader-visible slots (made on first use)
     pub(crate) transient: std::sync::OnceLock<Option<heap::Transient>>,
+    /// window views placed ([`Resources::place_window`]): sub-window index and its buffer (held), written into
+    /// every shader-visible view heap, those made later included
+    pub(crate) windows: Mutex<Vec<(u32, ID3D12Resource)>>,
     pub(crate) counters: Counters,
 }
 
@@ -177,6 +180,7 @@ impl Resources {
                 placed: Mutex::default(),
                 placed_views: Mutex::default(),
                 transient: std::sync::OnceLock::new(),
+                windows: Mutex::new(Vec::new()),
                 counters: Counters::default(),
             }),
         }

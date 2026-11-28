@@ -33,6 +33,9 @@ pub mod ring;
 #[cfg(windows)]
 pub mod labels;
 
+#[cfg(windows)]
+pub mod space;
+
 pub const PAGE: usize = 64 << 10;
 pub const WINDOW: usize = 4 << 30;
 
@@ -66,7 +69,8 @@ pub struct Backed {
 
 pub struct Uma {
     windows: usize,
-    pages: Vec<Page>,
+    /// one page table per 4 GiB window, made on first use (a 16 TiB space costs nothing until placed)
+    tables: Vec<Option<Box<[Page]>>>,
     card_pages: usize,
     used_card_pages: usize,
     next_backing: u32,
@@ -77,21 +81,26 @@ pub struct Uma {
 impl Uma {
     pub fn new(windows: usize, card_bytes: usize) -> Uma {
         assert!(windows > 0);
-        let pages = windows * (WINDOW / PAGE);
         Uma {
             windows,
-            pages: (0..pages)
-                .map(|_| Page {
-                    backing: None,
-                    users: 0,
-                })
-                .collect(),
+            tables: (0..windows).map(|_| None).collect(),
             card_pages: card_bytes / PAGE,
             used_card_pages: 0,
             next_backing: 0,
             free: Vec::new(),
             placements: Vec::new(),
         }
+    }
+
+    fn page(&self, page: usize) -> Option<&Page> {
+        let per = WINDOW / PAGE;
+        self.tables.get(page / per)?.as_ref().map(|t| &t[page % per])
+    }
+
+    fn page_mut(&mut self, page: usize) -> &mut Page {
+        let per = WINDOW / PAGE;
+        let t = self.tables[page / per].get_or_insert_with(|| (0..per).map(|_| Page { backing: None, users: 0 }).collect());
+        &mut t[page % per]
     }
 
     pub fn bytes(&self) -> usize {
@@ -121,14 +130,14 @@ impl Uma {
         let first = address as usize / PAGE;
         let count = len / PAGE;
         let fresh = (first..first + count)
-            .filter(|page| self.pages[*page].backing.is_none())
+            .filter(|page| self.page(*page).is_none_or(|p| p.backing.is_none()))
             .count();
         if self.used_card_pages + fresh > self.card_pages {
             return Err(Refused::NoCardMemory);
         }
         let mut mapped = Vec::with_capacity(fresh);
         for page in first..first + count {
-            if self.pages[page].backing.is_none() {
+            if self.page_mut(page).backing.is_none() {
                 let card = match self.free.pop() {
                     Some(c) => c,
                     None => {
@@ -136,11 +145,11 @@ impl Uma {
                         self.next_backing - 1
                     }
                 };
-                self.pages[page].backing = Some(card);
+                self.page_mut(page).backing = Some(card);
                 self.used_card_pages += 1;
                 mapped.push(Backed { page, card });
             }
-            self.pages[page].users += 1;
+            self.page_mut(page).users += 1;
         }
         let id = PlacementId(self.placements.len() as u32);
         self.placements.push(Some(Placement { first, len: count }));
@@ -157,7 +166,7 @@ impl Uma {
             .ok_or(Refused::UnknownPlacement)?;
         let mut released = Vec::new();
         for page in placement.first..placement.first + placement.len {
-            let slot = &mut self.pages[page];
+            let slot = self.page_mut(page);
             slot.users -= 1;
             if slot.users == 0 {
                 let card = slot.backing.take().expect("a used page is backed");
@@ -171,7 +180,7 @@ impl Uma {
 
     /// The card page backing the page that covers `address`, if any.
     pub fn backing(&self, address: u64) -> Option<u32> {
-        self.pages.get(address as usize / PAGE).and_then(|p| p.backing)
+        self.page(address as usize / PAGE).and_then(|p| p.backing)
     }
 
     /// The most card pages ever in use at once (how far the GPU side's heaps must reach).
