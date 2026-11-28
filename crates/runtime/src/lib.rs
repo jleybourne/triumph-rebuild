@@ -21,6 +21,8 @@ pub mod cpu;
 #[cfg(windows)]
 pub mod cputex;
 #[cfg(windows)]
+pub mod detile;
+#[cfg(windows)]
 pub mod bink;
 pub mod pagemap;
 pub mod drives;
