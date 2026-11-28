@@ -15,6 +15,8 @@ mod crash;
 mod launch;
 #[path = "../patch.rs"]
 mod patch;
+#[path = "../profile.rs"]
+mod profile;
 #[path = "../sampler.rs"]
 mod sampler;
 #[path = "../watch.rs"]

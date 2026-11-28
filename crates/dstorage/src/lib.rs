@@ -38,7 +38,7 @@ pub use bcpack::Decoder;
 pub use capture::Capture;
 pub use cache::Cache;
 pub use com::{install, stats, DStorageGetFactory, OwnedFactory};
-pub use engine::{BcPack, Config, Engine, Pages, Stats, StatusArray};
+pub use engine::{BcPack, Config, Engine, Pages, Stats, StatusArray, Times};
 
 /// `HRESULT`.
 pub type Hresult = i32;

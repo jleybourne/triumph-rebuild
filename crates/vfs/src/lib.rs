@@ -170,6 +170,8 @@ struct Drive {
 struct OpenFile {
     file: File,
     write: bool,
+    /// Opened for overlapped I/O ([`Vfs::open_concurrent`]): reads at an offset run side by side.
+    concurrent: bool,
 }
 
 #[derive(Default)]
@@ -421,8 +423,12 @@ impl Vfs {
     }
 
     fn add_handle(&self, file: File, write: bool) -> Handle {
+        self.add_open(OpenFile { file, write, concurrent: false })
+    }
+
+    fn add_open(&self, open: OpenFile) -> Handle {
         let mut h = self.handles.lock().unwrap_or_else(|e| e.into_inner());
-        let open = Some(Arc::new(OpenFile { file, write }));
+        let open = Some(Arc::new(open));
         let index = match h.free.pop() {
             Some(i) => {
                 let slot = &mut h.slots[i as usize];
@@ -516,11 +522,43 @@ impl Vfs {
         Ok(self.add_handle(file, opts.write))
     }
 
+    /// Opens an existing file for reading by many threads at once (DirectStorage's workers).
+    ///
+    /// A handle from [`Vfs::open`] is synchronous, and Windows runs the reads of one synchronous file object one
+    /// at a time (each holds the file object's lock), so workers sharing it wait on each other. This one is
+    /// opened for overlapped I/O: each [`Vfs::read_at`] on it is its own request, waited for by the calling
+    /// thread alone. Read only.
+    pub fn open_concurrent(&self, path: &str) -> Result<Handle> {
+        self.settle();
+        let (d, cp) = self.parse(path)?;
+        let ov = read_lock(d);
+        let found = Self::find(d, &ov, &cp).ok_or_else(|| Self::missing(d, &ov, &cp))?;
+        if found.is_dir {
+            return Err(Error::IsADirectory);
+        }
+        let mut o = fs::OpenOptions::new();
+        o.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            o.custom_flags(concurrent::FILE_FLAG_OVERLAPPED);
+        }
+        let file = o.open(&found.host)?;
+        Ok(self.add_open(OpenFile { file, write: false, concurrent: cfg!(windows) }))
+    }
+
     /// Reads at `offset` until `buf` is full or the file ends; returns the bytes read.
     pub fn read_at(&self, handle: Handle, offset: u64, buf: &mut [u8]) -> Result<usize> {
         let f = self.get(handle)?;
         let mut done = 0;
         while done < buf.len() {
+            #[cfg(windows)]
+            let n = if f.concurrent {
+                concurrent::read(&f.file, &mut buf[done..], offset + done as u64)?
+            } else {
+                pread(&f.file, &mut buf[done..], offset + done as u64)?
+            };
+            #[cfg(not(windows))]
             let n = pread(&f.file, &mut buf[done..], offset + done as u64)?;
             if n == 0 {
                 break;
@@ -901,6 +939,79 @@ fn copy_writable(from: &Path, to: &Path) -> io::Result<()> {
 #[cfg(windows)]
 fn pread(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
     std::os::windows::fs::FileExt::seek_read(file, buf, offset)
+}
+
+/// Overlapped reads on a handle opened with `FILE_FLAG_OVERLAPPED` (no crate needed: kernel32 is always there).
+#[cfg(windows)]
+mod concurrent {
+    use std::ffi::c_void;
+    use std::fs::File;
+    use std::io;
+    use std::os::windows::io::AsRawHandle;
+
+    pub const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
+    const ERROR_IO_PENDING: i32 = 997;
+    const ERROR_HANDLE_EOF: i32 = 38;
+
+    #[repr(C)]
+    struct Overlapped {
+        internal: usize,
+        internal_high: usize,
+        offset: u32,
+        offset_high: u32,
+        event: *mut c_void,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn ReadFile(file: *mut c_void, buf: *mut u8, len: u32, read: *mut u32, ov: *mut Overlapped) -> i32;
+        fn GetOverlappedResult(file: *mut c_void, ov: *mut Overlapped, read: *mut u32, wait: i32) -> i32;
+        fn CreateEventW(attrs: *mut c_void, manual: i32, initial: i32, name: *const u16) -> *mut c_void;
+        fn CloseHandle(h: *mut c_void) -> i32;
+    }
+
+    /// One event per thread, reused: a thread has one read outstanding at a time.
+    struct Event(*mut c_void);
+    impl Drop for Event {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { CloseHandle(self.0) };
+            }
+        }
+    }
+    thread_local! {
+        static EVENT: Event = Event(unsafe { CreateEventW(std::ptr::null_mut(), 1, 0, std::ptr::null()) });
+    }
+
+    /// One read of up to `buf.len()` bytes at `offset`; 0 at the end of the file.
+    pub fn read(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        let len = buf.len().min(1 << 30) as u32;
+        EVENT.with(|e| {
+            if e.0.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            // the low bit of the event tells the system not to queue a completion packet to a port
+            let mut ov = Overlapped { internal: 0, internal_high: 0, offset: offset as u32, offset_high: (offset >> 32) as u32, event: e.0 };
+            let h = file.as_raw_handle() as *mut c_void;
+            let mut got = 0u32;
+            // SAFETY: `buf` and `ov` outlive the request: it is waited for below before either goes away.
+            unsafe {
+                if ReadFile(h, buf.as_mut_ptr(), len, &mut got, &mut ov) == 0 {
+                    let err = io::Error::last_os_error();
+                    match err.raw_os_error() {
+                        Some(ERROR_IO_PENDING) => {}
+                        Some(ERROR_HANDLE_EOF) => return Ok(0),
+                        _ => return Err(err),
+                    }
+                }
+                if GetOverlappedResult(h, &mut ov, &mut got, 1) == 0 {
+                    let err = io::Error::last_os_error();
+                    return if err.raw_os_error() == Some(ERROR_HANDLE_EOF) { Ok(0) } else { Err(err) };
+                }
+            }
+            Ok(got as usize)
+        })
+    }
 }
 
 #[cfg(windows)]

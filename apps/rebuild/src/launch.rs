@@ -13,7 +13,7 @@
 //! The session folder is `REBUILD_SESSION_DIR` (read at start): the crash report (`crash-<pid>.txt`) and
 //! `summary.toml` go there.
 
-use crate::{crash, patch, sampler, watch};
+use crate::{crash, patch, profile, sampler, watch};
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -58,6 +58,11 @@ fn report(started: Instant) {
 }
 
 static mut STARTED: Option<Instant> = None;
+
+/// Seconds since the title started (0 before).
+pub fn seconds_in() -> f64 {
+    unsafe { STARTED }.map_or(0.0, |s| s.elapsed().as_secs_f64())
+}
 
 fn toml_str(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
@@ -110,6 +115,25 @@ fn device_report() {
             d.reads, d.failed, d.bytes_in >> 20, d.bytes_out >> 20, d.zlib_reads, d.bcpack_refused, d.staging_waits
         ),
         None => println!("dstorage  the title has not asked for DirectStorage"),
+    }
+    if let Some(d) = rebuild_dstorage::stats() {
+        let t = d.times;
+        let per = |ns: u64| if d.reads == 0 { 0.0 } else { ns as f64 / d.reads as f64 / 1e6 };
+        println!(
+            "dstorage  per read ms: latency {:.2} (max {:.1}) = unsubmitted {:.2} + ready {:.2} + read {:.2} + decode {:.2} + pages {:.2}; {} statuses avg {:.2} ms (max {:.1}); page frame waits {}, misses {}",
+            per(t.latency_ns),
+            t.latency_max_ns as f64 / 1e6,
+            per(t.unsubmitted_ns),
+            per(t.ready_ns),
+            per(t.read_ns),
+            per(t.decode_ns),
+            per(t.pages_ns),
+            t.statuses,
+            if t.statuses == 0 { 0.0 } else { t.status_ns as f64 / t.statuses as f64 / 1e6 },
+            t.status_max_ns as f64 / 1e6,
+            rebuild_runtime::drives::FRAME_WAITS.load(std::sync::atomic::Ordering::Relaxed),
+            rebuild_runtime::drives::FRAME_MISSES.load(std::sync::atomic::Ordering::Relaxed),
+        );
     }
     if let Some(dred) = rebuild_runtime::device::dred_report() {
         print!("{dred}");
@@ -489,6 +513,8 @@ pub fn run(o: Options) -> ! {
         })
         .expect("title thread");
     let images: Vec<(String, u64, u64)> = title.images.iter().map(|l| (l.name.clone(), l.base, l.image.size_of_image as u64)).collect();
+    // REBUILD_PROFILE=<ms>: every thread sampled, and DirectStorage throughput once a second
+    profile::start();
     let handle = windows::Win32::Foundation::HANDLE(main_thread.as_raw_handle());
     let deadline = seconds.map(|s| Instant::now() + Duration::from_secs(s));
     let mut last: Vec<u64> = Vec::new();
@@ -547,6 +573,7 @@ pub fn run(o: Options) -> ! {
         }
     }
     device_report();
+    profile::report(&images);
     if sample.is_some() {
         println!("threads   every thread of the process, innermost frames first:");
         for (id, h) in sampler::threads() {

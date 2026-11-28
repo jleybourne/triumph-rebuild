@@ -117,5 +117,38 @@ fn main() {
         assert!(out[i * chunk..(i + 1) * chunk] == data(i as u64, chunk)[..], "chunk {i}");
     }
     println!("output checked (every 97th chunk)");
+
+    // 3. file reads alone, as the workers make them: one synchronous handle shared by every thread (Windows runs
+    // its reads one at a time) against one overlapped handle (`Vfs::open_concurrent`, what the engine uses).
+    let vfs = VfsBuilder::new(dir.join("overlay")).package('G', dir.join("base"), &ModSet::default()).build().unwrap();
+    for threads in [1usize, 8] {
+        for concurrent in [false, true] {
+            let h = if concurrent {
+                vfs.open_concurrent("G:\\pack.z").unwrap()
+            } else {
+                vfs.open("G:\\pack.z", rebuild_vfs::OpenOptions::read()).unwrap()
+            };
+            let t = Instant::now();
+            std::thread::scope(|s| {
+                for k in 0..threads {
+                    let (vfs, index) = (&vfs, &index);
+                    s.spawn(move || {
+                        let mut buf = vec![0u8; chunk];
+                        for &(off, len) in index.iter().skip(k).step_by(threads) {
+                            assert_eq!(vfs.read_at(h, off, &mut buf[..len]).unwrap(), len);
+                        }
+                    });
+                }
+            });
+            let s = t.elapsed().as_secs_f64();
+            println!(
+                "reads {threads} thread(s)  {} handle  {n} reads  {:>7.0} MB/s  {:>6.1} us/read",
+                if concurrent { "overlapped " } else { "synchronous" },
+                packed.len() as f64 / s / 1e6,
+                s * 1e6 / n as f64
+            );
+            vfs.close(h).unwrap();
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
