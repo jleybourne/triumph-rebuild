@@ -43,7 +43,7 @@ enabled = true
 | group | what it holds | examples |
 |:--|:--|:--|
 | `game` | where the title is | `game.dir` |
-| `display` | output size, window mode, vsync, frame cap | `display.width`, `display.window`, `display.vsync` |
+| `display` | output size, window mode (windowed, windowed fullscreen, fullscreen) and window size (720p by default), vsync, frame cap | `display.width`, `display.window`, `display.window_size`, `display.vsync` |
 | `upscaler` | backend and mode (Build 7) | `upscaler.backend` = auto/dlss/fsr/native, `upscaler.mode` |
 | `title` | edits to the title's own `settings.xml`, applied at launch to a copy in the write overlay (the original is never touched) | `title.fsr_quality` (render scale; 4 is refused: it was black in the fork) |
 | `memory` | Build 1-2 switches | `memory.upload_workers`, `memory.labels` = gpu/relay |

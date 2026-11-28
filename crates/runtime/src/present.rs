@@ -1011,7 +1011,8 @@ pub fn window_mode() -> WindowMode {
 }
 
 fn parse_window_mode(mode: Option<&str>, size: Option<&str>) -> WindowMode {
-    if mode.is_some_and(|m| m.trim().eq_ignore_ascii_case("borderless") || m.trim().eq_ignore_ascii_case("fullscreen")) {
+    // borderless = the launcher's "windowed fullscreen"; fullscreen runs the same until exclusive mode is built
+    if mode.is_some_and(|m| ["borderless", "fullscreen", "windowed fullscreen", "windowed_fullscreen"].iter().any(|k| m.trim().eq_ignore_ascii_case(k))) {
         return WindowMode::Borderless;
     }
     let (w, h) = size
