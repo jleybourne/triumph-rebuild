@@ -15,7 +15,7 @@ and becomes the number that counts.
 |---|---|--:|---|
 | **Build 5 · first frame** | `████████████████████` | 98 % | the title's menus on the card at 30 fps, readable, intro video playing; next: swizzled CPU-written textures (detile) |
 | shaders compiled (every class) | `██████████░░░░░░░░░░` | 12,981 / 25,694 | pixel 9,965 · vertex 1,672 · compute 1,344 · of them wave-wide 4,182 ([wave64](runs/build4-wave64.md)) · agnostic 8,799 / 9,128 ([v1](runs/build4-v1.md)) |
-| shaders counted | `████░░░░░░░░░░░░░░░░` | 5,195 / 25,694 | bit-exact vs the oracle on WARP ([exec](runs/build4-exec.md)) |
+| shaders counted | `█████░░░░░░░░░░░░░░░` | 5,994 / 25,694 | bit-exact vs the oracle on WARP ([exec](runs/build4-exec.md)) |
 | runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
 | launcher | `████████████████████` | 7 / 7 | C2 (Play runs the title) and L5 (in-game F10 menu) done · not part of the 64 % |
 
@@ -32,7 +32,7 @@ and becomes the number that counts.
 | 1 | tiled VRAM at console addresses | `████████████████████` | 100 % | 10 | closed |
 | 2 | CPU-written memory ring; GPU→CPU | `████████████████████` | 100 % | 8 | closed |
 | 3 | PE loader + console runtime | `████████████████████` | 100 % | 15 | closed: the title's code runs |
-| 4 | shader recompiler RDNA2 → DXIL | `███████████████░░░░░` | 75 % | 15 | 9,415 compile, 5,195 bit-exact; wave64 built |
+| 4 | shader recompiler RDNA2 → DXIL | `███████████████░░░░░` | 75 % | 15 | 9,415 compile, 5,994 bit-exact; wave64 built |
 | 5 | device, lists, descriptors, present | `██████████████░░░░░░` | 70 % | 12 | 60 s on the card, no hang; loading screen black (draw 1 missing) |
 | 6 | list translation | `██░░░░░░░░░░░░░░░░░░` | 10 % | 8 | translator core measured |
 | 7 | upscaler: DLSS + FSR | `██████░░░░░░░░░░░░░░` | 30 % | 10 | both standalone; wiring to the title open |

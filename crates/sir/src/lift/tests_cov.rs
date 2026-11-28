@@ -318,12 +318,13 @@ fn a_typed_access_with_no_index_and_no_offset_is_element_0() {
 #[test]
 fn data_embedded_in_the_code_is_read_from_the_programs_own_words() {
     // s[10:11] = pc; s10 += 8 (two words on, the table); s12 = index * 4; s14 = s10 + s12; s_load_dwordx2 from s[14:15]
+    // into s[14:15] (the destination is the address: both dwords come from the address as it was)
     let parts = [
         sop1("s_getpc_b64", 10, 0),
         sop2("s_add_u32", 10, 10, 128 + 16),
         sop2("s_lshl_b32", 12, 2, 128 + 2),
         sop2("s_add_u32", 14, 10, 12),
-        smem("s_load_dwordx2", 16, 14, 4),
+        smem("s_load_dwordx2", 14, 14, 4),
         vec![0xBF81_0000], // s_endpgm, then the table
         vec![0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444],
     ];
@@ -336,7 +337,8 @@ fn data_embedded_in_the_code_is_read_from_the_programs_own_words() {
     assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
     let b = &l.body;
     assert!(b.contains("s10 = 4u;"), "{b}");
-    assert!(b.contains("s16 = sir_code[min(((uint)((int)s14 + 4) >> 2) + 0u,"), "{b}");
+    assert!(b.contains("{ uint sir_at = (uint)((int)s14 + 4) >> 2;\n    s14 = sir_code[min(sir_at + 0u,"), "{b}");
+    assert!(b.contains("s15 = sir_code[min(sir_at + 1u,"), "{b}");
     assert!(l.code.contains(&0x3333_3333), "{:?}", l.code);
 }
 
@@ -351,6 +353,23 @@ fn a_wave32_mask_survives_a_mask_written_to_the_next_sgpr() {
     let l = lift_program(&p, Stage::None, None, false);
     assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
     assert!(l.body.contains("m3 = m1 || m2;"), "{}", l.body);
+}
+
+#[test]
+fn f32_to_f16_rounds_to_nearest_and_keeps_the_other_half() {
+    // GFX10 keeps the destination's other half on every 16-bit result, v_cvt_f16_f32 included; the rounding is
+    // the console's (nearest even), not the device's f32tof16 (WARP truncates)
+    let p = program(&[
+        vop1("v_cvt_f16_f32", 1, V + 0),
+        build(&e::VOP3A, Encoding::Vop3, "v_cvt_f16_f32", &[("vdst", 2), ("src0", V), ("opsel", 0b1000), ("clamp", 1)]),
+    ]);
+    let l = lift(&p);
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let b = &l.body;
+    assert!(b.contains("v1 = (v1 & 0xffff0000u) | sir_f16(asfloat(v0));"), "{b}");
+    assert!(b.contains("v2 = (v2 & 0xffffu) | (sir_f16(saturate(asfloat(v0))) << 16);"), "{b}");
+    assert!(!b.contains("f32tof16"), "{b}");
+    compile(&l, "cov_cvt_f16");
 }
 
 #[test]
