@@ -199,8 +199,11 @@ pub fn plan(p: &Prog, record: bool) -> Result<Plan, String> {
     Ok(pl)
 }
 
+/// One kind of view for a filled dynamic region. A plain and an array texture are not: an index from the data
+/// over both is left to the recording pass, which keeps index words in the heap (`index_words`).
 fn same_kind(a: View, b: View) -> bool {
-    merge(a, b).is_ok()
+    let two_ways = matches!((a, b), (View::Tex(1), View::Tex(5)) | (View::Tex(5), View::Tex(1)) | (View::Tex(0), View::Tex(4)) | (View::Tex(4), View::Tex(0)));
+    merge(a, b).is_ok() && !two_ways
 }
 
 /// Two reads of one descriptor: a load and a store of the same raw buffer are one UAV.
@@ -209,6 +212,10 @@ pub fn merge(a: View, b: View) -> Result<View, String> {
         _ if a == b => a,
         (View::Raw, View::RwRaw) | (View::RwRaw, View::Raw) => View::RwRaw,
         (View::Typed, View::RwTyped) | (View::RwTyped, View::Typed) => View::RwTyped,
+        // one texture sampled as 2D and as 2D array (or 1D and 1D array): one array view of an array texture, which
+        // both declarations read, the same descriptor for ours and the oracle
+        (View::Tex(1), View::Tex(5)) | (View::Tex(5), View::Tex(1)) => View::Tex(5),
+        (View::Tex(0), View::Tex(4)) | (View::Tex(4), View::Tex(0)) => View::Tex(4),
         (View::Sampler, View::SamplerCmp) | (View::SamplerCmp, View::Sampler) => return Err("one sampler read as plain and comparison".into()),
         _ => return Err(format!("one descriptor read as {a:?} and {b:?}")),
     })

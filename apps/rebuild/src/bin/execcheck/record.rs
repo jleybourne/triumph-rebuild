@@ -159,6 +159,13 @@ pub fn known(pl: &Plan) -> Vec<u8> {
         }
         if *v == View::RwTyped {
             m |= 1 << bit(View::Typed);
+        }
+        // an array view is read as the plain dimension too (`run::merge`)
+        if *v == View::Tex(5) {
+            m |= 1 << bit(View::Tex(1));
+        }
+        if *v == View::Tex(4) {
+            m |= 1 << bit(View::Tex(0));
         }        w[*s as usize] = m;
     }
     for (s, v) in &pl.sampler_slots {
