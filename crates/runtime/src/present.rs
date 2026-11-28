@@ -357,6 +357,16 @@ pub unsafe extern "system" fn PresentX(this: *mut c_void, planes: u32, plane: *c
         return E_INVALIDARG;
     }
     let console = unsafe { *p.resources };
+    // REBUILD_TRACE_PLANES: the first presents' planes, as raw qwords (planes past the first are not shown yet)
+    if std::env::var_os("REBUILD_TRACE_PLANES").is_some() && n <= 3 {
+        let words = unsafe { std::slice::from_raw_parts(plane as *const u64, (planes as usize).min(4) * 12) };
+        eprintln!("present   {n}: {planes} planes, plane 0 count {} resources {:?}; qwords {:x?}", p.count, unsafe { std::slice::from_raw_parts(p.resources, p.count.min(4) as usize) }, words);
+        for (k, w) in words.iter().enumerate() {
+            if let Some(h) = crate::device::list_host().and_then(|h| h.resource(*w as *mut c_void)) {
+                eprintln!("present   qword {k} {w:#x} is a resource (host {h:p})");
+            }
+        }
+    }
     let Some(raw) = crate::device::list_host().and_then(|h| h.resource(console)) else {
         static ONCE: AtomicBool = AtomicBool::new(false);
         if !ONCE.swap(true, Ordering::Relaxed) {
