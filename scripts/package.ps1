@@ -415,6 +415,16 @@ foreach ($rel in ($Expected | Where-Object { $_ -ne "FILES.txt" })) {
 Test-Stage $Stage $Expected $Pinned
 Write-Host ("stage        {0} files: the package list exactly, no game data, no shader containers" -f $Expected.Count)
 
+# The exes are built with their source paths remapped, but the linker still records this machine's folders in
+# the PDB. Say so on a personal machine: a public release should come from the workflow's clean runner.
+if (-not $env:GITHUB_ACTIONS -and $env:USERPROFILE) {
+    foreach ($f in "rebuild-launcher.exe", "rebuild.exe", "rebuild.pdb") {
+        if ($Latin1.GetString([System.IO.File]::ReadAllBytes((Join-Path $Stage $f))).IndexOf($env:USERPROFILE, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            Write-Warning "$f names this machine's user folder ($env:USERPROFILE): publish the workflow's build, not this one"
+        }
+    }
+}
+
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $ZipPath = Join-Path $OutDir "$Name.zip"
 if (Test-Path $ZipPath) { Remove-Item -Force $ZipPath }

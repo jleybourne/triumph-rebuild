@@ -149,6 +149,9 @@ uncommitted changes). The zip holds the launcher, `rebuild.exe` and its PDB, DXC
 `dxil.dll`, from Microsoft's GitHub release, pinned by SHA-256), `LICENSE.txt`, `CREDITS.md`, a `README.txt`,
 `FILES.txt` (every file's size and SHA-256) and `licenses\` (DXC's three licences, Inter's OFL, and every
 linked crate's licence files). Each bundled file's licence is in [CREDITS.md](../CREDITS.md#the-release-zip).
+Its own build remaps the source paths compiled into the exes, but the linker still writes the build machine's
+folders into the PDB. The script warns when that is your user folder, so publish the workflow's build, never a
+local one.
 
 **The game-data guard.** Before it builds anything, the script checks every tracked and untracked
 (not ignored) file in the repository. It refuses, and exits 1, on any of these:
