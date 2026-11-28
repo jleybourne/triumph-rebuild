@@ -27,7 +27,7 @@ launcher, with one folder per game. The game's own files are never part of it. T
     overlay\                        the write overlay: G\ (writes over the package), T\ (emptied every run),
                                     title\settings.xml (the launcher's copy of the title's settings)
     backups\before-import-*.zip     taken automatically before an import replaces anything
-    cache\<build>\shaders\          translated shaders and the pipeline library (regenerable)
+    cache\<build>\shaders\          the shader library the launcher builds on first Play (shader-library.md)
     cache\<build>\pipelines\        driver pipeline cache, session record, on-demand translations, rect GS
     cache\<build>\images\           prepared copies of the title's images (relocated, patched)
     cache\bcpack\                   decoded BCPack textures (content-keyed, so kept across builds)
@@ -192,8 +192,4 @@ Removing a game with "delete its data" also clears its cache and logs, whose roo
 
 ## What is not here yet
 
-- The owner's decision (2026-11-28) that the launcher builds the shader library on first run:
-  `GameStore::shaders_dir()` is its place (`cache\<build>\shaders\`). The `D:\victory-data` defaults in
-  `crates/pipelines` and `crates/runtime` stay until the portable-install work replaces them. Dev env vars keep
-  working.
 - `T:` is still under `overlay\T` (emptied every run). It could move to the cache root if it ever grows large.

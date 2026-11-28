@@ -55,6 +55,10 @@ impl App {
             });
             ui.add_space(2.0);
             ui.label(egui::RichText::new(self.profile_line()).font(th::regular(13.5)).color(c.text_2));
+            if !first_run {
+                ui.add_space(4.0);
+                self.shader_band(ui);
+            }
             ui.add_space(th::S2);
             ui.horizontal(|ui| {
                 if w::primary_button(ui, icon::PLAY, "Launch", Vec2::new(200.0, 48.0), !first_run && self.running.is_none()).on_hover_text("Ctrl+Enter").clicked() {

@@ -4,7 +4,7 @@
 //! ([`SystemProbe`]) queries the adapter through DXGI, and creates a D3D12 device for the tiled tier,
 //! shader model and upload-heap (ReBAR) checks **only when the measurement lock is absent**.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// The adapter, as DXGI reports it.
 #[derive(Debug, Clone, PartialEq)]
@@ -162,31 +162,15 @@ pub fn run(p: &dyn Probe) -> Vec<Check> {
 
     out.push(match p.dxc() {
         Some(d) => check("DXC", true, d.display().to_string(), ""),
-        None => check("DXC", false, "no dxc.exe found".into(), "Install the Windows SDK, or set REBUILD_DXC to dxc.exe."),
+        None => check("DXC", false, "no DXC found".into(), "Put dxc.exe, dxcompiler.dll and dxil.dll in the dxc folder beside the launcher (a release has them), install the Windows SDK, or set REBUILD_DXC to dxc.exe."),
     });
     out
 }
 
-/// DXC: `REBUILD_DXC`, beside the launcher, or the newest `dxc.exe` in the Windows SDK.
+/// DXC (`rebuild_pipelines::dxc::locate`): `REBUILD_DXC`, the bundled copy beside the launcher
+/// (`dxc\dxc.exe` with its two DLLs), or the newest `dxc.exe` in the Windows SDK.
 pub fn find_dxc() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("REBUILD_DXC") {
-        let p = PathBuf::from(p);
-        return p.is_file().then_some(p);
-    }
-    if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
-        let p = d.join("dxc.exe");
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    let root = std::env::var_os("ProgramFiles(x86)").map(PathBuf::from)?.join("Windows Kits").join("10").join("bin");
-    let mut v: Vec<PathBuf> = std::fs::read_dir(root)
-        .ok()?
-        .filter_map(|e| e.ok().map(|e| e.path().join("x64").join("dxc.exe")))
-        .filter(|p| p.is_file())
-        .collect();
-    v.sort();
-    v.pop()
+    rebuild_pipelines::dxc::locate().ok().map(|d| d.exe)
 }
 
 /// The real machine. `lock` is the measurement lock file: while it exists no device is created.

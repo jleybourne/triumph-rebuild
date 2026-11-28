@@ -9,6 +9,12 @@ rebuild-storage = { path = "../storage" }
 rebuild-shader = { path = "../shader" }
 rebuild-sir = { path = "../sir" }
 rebuild-cardlock = { path = "../cardlock" }
+# the shader library's manifest (MIT / Apache-2.0; already in the workspace)
+toml = "0.8"
+
+[dev-dependencies]
+# tests write small SGD5 corpora (Zlib; already in the workspace through rebuild-shader)
+zlib-rs = { version = "0.6.8", default-features = false, features = ["std"] }
 
 [target.'cfg(windows)'.dependencies]
 rebuild-xlist = { path = "../xlist" }

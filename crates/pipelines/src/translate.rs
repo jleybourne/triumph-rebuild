@@ -27,15 +27,10 @@ use crate::Stage;
 /// The DXC arguments every translated program is compiled with (after `-T <stage>_6_6`).
 pub const DXC_ARGS: [&str; 5] = ["-E", "main", "-O3", "-enable-16bit-types", "-Fo"];
 
-/// `dxc.exe`: `REBUILD_DXC`, else the newest in the Windows SDK.
+/// `dxc.exe`: `REBUILD_DXC`, else a bundled copy beside the running exe, else the newest in the Windows SDK
+/// ([`crate::dxc::locate`]).
 pub fn dxc_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("REBUILD_DXC") {
-        return Some(p.into());
-    }
-    let root = PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\bin");
-    let mut v: Vec<_> = std::fs::read_dir(root).ok()?.filter_map(|e| e.ok().map(|e| e.path().join("x64").join("dxc.exe"))).filter(|p| p.exists()).collect();
-    v.sort();
-    v.pop()
+    crate::dxc::locate().ok().map(|d| d.exe)
 }
 
 /// The program hash of a console container: the first 8 bytes (big-endian) of the BLAKE3 of the container
@@ -133,19 +128,35 @@ pub fn lift_hlsl(p: &NativeProgram, isg1: &[u8], osg1: &[u8], v1: bool) -> Resul
     Ok(Hlsl { stage, src, samplers: Samplers { words: l.immediate_samplers, compare, top_dword: None }, top_dword, uses: l.desc_uses })
 }
 
-/// DXC processes this process runs at once, at most (the owner's rule: the machine stays responsive).
+/// DXC processes this process runs at once, at most, by default (the owner's rule: the machine stays
+/// responsive). The shader library build raises it to its worker count ([`set_dxc_limit`]).
 pub const MAX_DXC: usize = 4;
 
 static DXC_RUNNING: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
 static DXC_FREE: std::sync::Condvar = std::sync::Condvar::new();
+static DXC_LIMIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(MAX_DXC);
+static DXC_BELOW_NORMAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// One of the [`MAX_DXC`] slots, given back on drop.
+/// DXC processes at once from now on (at least 1); returns the old limit.
+pub fn set_dxc_limit(n: usize) -> usize {
+    let old = DXC_LIMIT.swap(n.max(1), std::sync::atomic::Ordering::Relaxed);
+    DXC_FREE.notify_all();
+    old
+}
+
+/// Start DXC processes at below-normal priority (a background build: the desktop and a running game come
+/// first). The output is the same.
+pub fn set_dxc_below_normal(on: bool) {
+    DXC_BELOW_NORMAL.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// One DXC slot, given back on drop.
 struct DxcSlot;
 
 impl DxcSlot {
     fn take() -> DxcSlot {
         let mut n = DXC_RUNNING.lock().unwrap_or_else(|e| e.into_inner());
-        while *n >= MAX_DXC {
+        while *n >= DXC_LIMIT.load(std::sync::atomic::Ordering::Relaxed) {
             n = DXC_FREE.wait(n).unwrap_or_else(|e| e.into_inner());
         }
         *n += 1;
@@ -167,13 +178,16 @@ pub fn compile_file(dxc: &Path, stage: Stage, hlsl: &Path, out: &Path) -> Result
     let _slot = DxcSlot::take();
     let mut last = String::new();
     for _ in 0..2 {
-        let r = std::process::Command::new(dxc)
-            .args(["-T", &format!("{}_6_6", stage.name())])
-            .args(DXC_ARGS)
-            .arg(out)
-            .arg(hlsl)
-            .output()
-            .map_err(|e| format!("run {}: {e}", dxc.display()))?;
+        let mut cmd = std::process::Command::new(dxc);
+        cmd.args(["-T", &format!("{}_6_6", stage.name())]).args(DXC_ARGS).arg(out).arg(hlsl);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // CREATE_NO_WINDOW (a launcher has no console to share), and BELOW_NORMAL_PRIORITY_CLASS when asked
+            let below = if DXC_BELOW_NORMAL.load(std::sync::atomic::Ordering::Relaxed) { 0x4000 } else { 0 };
+            cmd.creation_flags(0x0800_0000 | below);
+        }
+        let r = cmd.output().map_err(|e| format!("run {}: {e}", dxc.display()))?;
         if r.status.success() {
             return Ok(());
         }

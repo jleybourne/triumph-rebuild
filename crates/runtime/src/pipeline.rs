@@ -123,26 +123,41 @@ impl Memory for Capture {
     }
 }
 
-/// The program library: `REBUILD_PIPELINES_LIB`, else `library.bin` in `REBUILD_PIPELINES_OUT` (the
-/// `pipelines build` output, default `D:\victory-data\pipelines`).
-fn library_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("REBUILD_PIPELINES_LIB") {
-        return p.into();
+/// The program library (`rebuild_pipelines::shaderlib::choose`): `REBUILD_PIPELINES_LIB`, else `library.bin`
+/// in `REBUILD_PIPELINES_OUT`, else the one the launcher built in this game's cache (`GameStore::shaders_dir()`),
+/// when complete and of this translator, else the dev machine's `D:\victory-data\pipelines\library.bin`. Without one the pool runs
+/// on an empty library: every program is translated on demand, so a missing library never blocks a launch.
+fn library() -> Library {
+    use rebuild_pipelines::shaderlib::{self, Choice};
+    let choice = shaderlib::choose_for_process();
+    let path: Option<PathBuf> = match &choice {
+        Choice::Explicit(p) | Choice::Storage(p) | Choice::Dev(p) => Some(p.clone()),
+        Choice::None(why) => {
+            eprintln!("pipelines: {why}; every program is translated on demand");
+            None
+        }
+    };
+    if let Some(path) = path {
+        match Library::load(&path, 4, true) {
+            Ok((lib, _)) => {
+                let from = match choice {
+                    Choice::Storage(_) => "the shader library",
+                    Choice::Dev(_) => "the dev library",
+                    _ => "a dev override",
+                };
+                eprintln!("pipelines: {} programs from {from} ({})", lib.len(), path.display());
+                return lib;
+            }
+            Err(e) => eprintln!("pipelines: no program library at {}: {e}; every program is translated on demand", path.display()),
+        }
     }
-    std::env::var_os("REBUILD_PIPELINES_OUT").map_or_else(|| PathBuf::from(r"D:\victory-data\pipelines"), PathBuf::from).join("library.bin")
+    Library::empty(rebuild_pipelines::layout::USER_DATA_DWORDS)
 }
 
-/// The pool, made at device creation on the host device. Without a library every pipeline is missing.
+/// The pool, made at device creation on the host device.
 pub fn start(device: &windows::Win32::Graphics::Direct3D12::ID3D12Device) {
     POOL.get_or_init(|| {
-        let path = library_path();
-        let lib = match Library::load(&path, 4, true) {
-            Ok((lib, _)) => lib,
-            Err(e) => {
-                eprintln!("pipelines: no program library at {}: {e}", path.display());
-                return None;
-            }
-        };
+        let lib = library();
         // the cache file is the library's own: a new library starts a fresh one
         let cache = match PsoCache::open(device, &rebuild_pipelines::pso::cache_path_for(&lib.identity())) {
             Ok(c) => Some(c),

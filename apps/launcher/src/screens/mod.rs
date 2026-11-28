@@ -9,6 +9,7 @@ mod profiles;
 mod runs;
 mod saves;
 mod settings;
+mod shaders;
 mod storage;
 
 pub use saves::SavesUi;
@@ -281,6 +282,10 @@ impl App {
                 self.detections.insert(id, detection.clone());
                 self.load_game(ctx);
                 self.toast(Tone::Ok, "Added to the library");
+                // its shader library starts building now, in the background (Play shows the progress)
+                if !self.fixture && matches!(self.shader_need(), Some(rebuild_launcher::shaders::Need::Build(_))) && self.running.is_none() && self.start_shaders() {
+                    self.toast(Tone::Accent, "Preparing shaders in the background");
+                }
                 true
             }
             Err(e) => {
@@ -292,6 +297,9 @@ impl App {
 
     pub fn confirm_remove(&mut self, ctx: &egui::Context, id: &str, name: &str, delete_data: bool) -> bool {
         let was_selected = self.library.selected.as_deref() == Some(id);
+        if self.shader_job.as_ref().is_some_and(|j| j.game == id) {
+            self.stop_shaders();
+        }
         if was_selected && self.dirty() {
             self.save();
         }

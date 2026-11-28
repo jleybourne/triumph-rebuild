@@ -1,10 +1,20 @@
 //! Build 4: the pipeline library.
 //!
 //! ```text
-//! pipelines build    the library from the translator's DXIL (REBUILD_PIPELINES_IN, default
-//!                    D:\victory-data\pipelines-in) and the immediate sampler words, lifted again from the
-//!                    corpus (REBUILD_SHADERS, a copy of shaders.rpf); written to REBUILD_PIPELINES_OUT
-//!                    (default D:\victory-data\pipelines)\library.bin. Every program's own root signature is
+//! pipelines library  the shader library for a game, as the launcher builds it on first Play
+//!                    (rebuild_pipelines::shaderlib): REBUILD_GAME_DIR\shaders.rpf (read only) -> translate ->
+//!                    DXC -> the game's cache (GameStore::shaders_dir(), or --out DIR). Resumable (Ctrl+C,
+//!                    then run again), versioned, incremental. --workers N (default: logical processors
+//!                    less two) · --status (only say where the library stands) · --corpus FILE
+//!                    · --background (DXC at below-normal priority, as the launcher runs it)
+//! pipelines corpus-subset IN OUT N   the start of a shader archive holding its first N programs (a scratch
+//!                    file for timing `pipelines library` on a subset; never shipped)
+//! pipelines bundle-dxc DIR   copy the DXC this machine has (dxc.exe, dxcompiler.dll, dxil.dll) into DIR\dxc,
+//!                    where the launcher looks for its bundled copy
+//! pipelines build    the library from the translator's DXIL (REBUILD_PIPELINES_IN: a `translate` output
+//!                    folder, dev: D:\victory-data\pipelines-in) and the immediate sampler words, lifted again from
+//!                    the corpus (REBUILD_SHADERS, a copy of shaders.rpf); written to REBUILD_PIPELINES_OUT
+//!                    (dev: D:\victory-data\pipelines)\library.bin. Every program's own root signature is
 //!                    serialized and checked.
 //! pipelines load     load times (threads 1-8, verified or not) and lookup cost
 //! pipelines check    GPU: every root signature in the library created on the device, a compute pipeline for
@@ -47,12 +57,22 @@ use rebuild_shader::signature::Element;
 
 const LOCK: &str = r"D:\Developer\triumph-rebuild\agents\MEASURING";
 
-fn env_path(k: &str, default: &str) -> PathBuf {
-    std::env::var_os(k).map(PathBuf::from).unwrap_or_else(|| default.into())
+/// `library.bin` in `REBUILD_PIPELINES_OUT`, else the current game's shader library, else the dev machine's
+/// (`rebuild_pipelines::shaderlib::choose`).
+fn library_path() -> PathBuf {
+    use rebuild_pipelines::shaderlib::{self, Choice};
+    let dev = Path::new(shaderlib::DEV_LIBRARY);
+    match shaderlib::choose(None, std::env::var_os("REBUILD_PIPELINES_OUT").map(PathBuf::from), rebuild_storage_shaders().as_deref(), Some(dev)) {
+        Choice::Explicit(p) | Choice::Storage(p) | Choice::Dev(p) => p,
+        Choice::None(why) => {
+            eprintln!("pipelines: {why}; set REBUILD_PIPELINES_OUT to a library folder (dev: D:\\victory-data\\pipelines)");
+            std::process::exit(2);
+        }
+    }
 }
 
-fn library_path() -> PathBuf {
-    env_path("REBUILD_PIPELINES_OUT", r"D:\victory-data\pipelines").join("library.bin")
+fn rebuild_storage_shaders() -> Option<PathBuf> {
+    rebuild_storage::current().map(|g| g.shaders_dir())
 }
 
 fn ms(d: Duration) -> f64 {
@@ -62,13 +82,16 @@ fn ms(d: Duration) -> f64 {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("library") => shader_library(&args[1..]),
+        Some("bundle-dxc") => bundle_dxc(&args[1..]),
+        Some("corpus-subset") => corpus_subset(&args[1..]),
         Some("build") => build(),
         Some("load") => load(),
         Some("check") => check(args.iter().any(|a| a == "--debug")),
         Some("async") => run_async(&args[1..]),
         Some("ondemand") => run_ondemand(&args[1..]),
         _ => {
-            eprintln!("pipelines build [--lift-all] | load | check [--debug] | async [--threads N] [--fresh] [--no-cache] [--cold] [--prewarm] [--title-delay MS] | ondemand [--count N] [--threads N]");
+            eprintln!("pipelines library [--workers N] [--out DIR] [--corpus FILE] [--status] | bundle-dxc DIR | corpus-subset IN OUT N | build [--lift-all] | load | check [--debug] | async [--threads N] [--fresh] [--no-cache] [--cold] [--prewarm] [--title-delay MS] | ondemand [--count N] [--threads N]");
             std::process::exit(2);
         }
     }
@@ -144,7 +167,8 @@ fn sampler_words(want: &BTreeMap<(u64, Stage), PathBuf>) -> HashMap<(u64, Stage)
 }
 
 fn build() {
-    let dir = env_path("REBUILD_PIPELINES_IN", r"D:\victory-data\pipelines-in");
+    // dev defaults: the D:\victory-data working copies (the launcher builds users' libraries with `pipelines library`)
+    let dir = std::env::var_os("REBUILD_PIPELINES_IN").map_or_else(|| PathBuf::from(r"D:\victory-data\pipelines-in"), PathBuf::from);
     let want = inputs(&dir);
     println!("pipelines build — {} translated programs in {}", want.len(), dir.display());
 
@@ -722,4 +746,142 @@ fn run_ondemand(args: &[String]) {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn flag(args: &[String], name: &str) -> Option<String> {
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
+}
+
+/// `pipelines library`: the launcher's shader library build, from a console.
+fn shader_library(args: &[String]) {
+    use rebuild_pipelines::shaderlib::{self, Config, Control, Phase};
+    let Some(game) = std::env::var_os("REBUILD_GAME_DIR").map(PathBuf::from) else {
+        eprintln!("pipelines library: set REBUILD_GAME_DIR to the game's folder (read only: only shaders.rpf is read)");
+        std::process::exit(2);
+    };
+    let store = rebuild_storage::game_for(&game);
+    let corpus = flag(args, "--corpus").map_or_else(|| game.join(shaderlib::CORPUS), PathBuf::from);
+    let dir = flag(args, "--out").map_or_else(|| store.shaders_dir(), PathBuf::from);
+    println!("game        {} · build {}", store.id, if store.build.is_empty() { "unknown" } else { &store.build });
+    println!("library     {}", dir.display());
+    let st = shaderlib::status(&dir, &corpus, &store.build, shaderlib::VERSION);
+    println!("status      {}", st.label());
+    if args.iter().any(|a| a == "--status") {
+        return;
+    }
+    let dxc = match rebuild_pipelines::dxc::locate() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("pipelines library: {e}");
+            std::process::exit(2);
+        }
+    };
+    let mut cfg = Config::new(corpus, dir, &store.build, dxc.exe.clone());
+    if let Some(n) = flag(args, "--workers").and_then(|v| v.parse().ok()) {
+        cfg.workers = n;
+    }
+    // a console build is the developer's foreground work (the launcher's runs at below-normal priority)
+    cfg.background = args.iter().any(|a| a == "--background");
+    println!("dxc         {} ({}) · {} workers · translator {}", dxc.exe.display(), dxc.source.label(), cfg.workers, shaderlib::VERSION);
+    let ctl = std::sync::Arc::new(Control::new());
+    let watch = {
+        let ctl = ctl.clone();
+        std::thread::spawn(move || {
+            let mut last = Instant::now();
+            loop {
+                std::thread::sleep(Duration::from_millis(250));
+                let p = ctl.progress();
+                if matches!(p.phase, Phase::Done | Phase::Paused | Phase::Failed) {
+                    break;
+                }
+                if last.elapsed() >= Duration::from_secs(10) {
+                    last = Instant::now();
+                    let eta = p.eta.map_or_else(|| "-".into(), |e| format!("{:.0} s", e.as_secs_f64()));
+                    println!("  {:>6.1} s  {:?}  {} / {}  compiled {} · kept {} · refused {} · failed {} · eta {eta}", p.elapsed.as_secs_f64(), p.phase, p.done, p.total, p.compiled, p.reused, p.refused, p.failed);
+                }
+            }
+        })
+    };
+    let r = shaderlib::build(&cfg, &ctl);
+    let _ = watch.join();
+    match r {
+        Ok(r) => {
+            println!("{}", if r.complete { "complete" } else { "paused (run again to resume)" });
+            println!("programs    {} · in the library {} · compiled {} · kept {} · refused {} · failed {}", r.programs, r.in_library, r.compiled, r.reused, r.refused, r.failed);
+            println!("time        {:.1} s (read + walk {:.1} s · translate {:.1} s · library {:.1} s) · lift {:.1} s and dxc {:.1} s summed over workers", r.total.as_secs_f64(), r.read.as_secs_f64(), r.translate.as_secs_f64(), r.write.as_secs_f64(), r.lift_cpu.as_secs_f64(), r.dxc_cpu.as_secs_f64());
+            if r.complete {
+                println!("library     {:.1} MB", r.library_bytes as f64 / 1e6);
+            }
+            for (k, e) in r.failures.iter().take(10) {
+                println!("  dxc  {k}  {e}");
+            }
+        }
+        Err(e) => {
+            eprintln!("pipelines library: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `pipelines bundle-dxc DIR`: the DXC the launcher bundles, from this machine's.
+fn bundle_dxc(args: &[String]) {
+    let Some(to) = args.first().map(PathBuf::from) else {
+        eprintln!("pipelines bundle-dxc DIR (the release folder: the files go in DIR\\dxc)");
+        std::process::exit(2);
+    };
+    let from = match rebuild_pipelines::dxc::locate() {
+        Ok(d) => d.exe,
+        Err(e) => {
+            eprintln!("pipelines bundle-dxc: {e}");
+            std::process::exit(2);
+        }
+    };
+    match rebuild_pipelines::dxc::bundle(&from, &to) {
+        Ok(exe) => println!("bundled {} -> {}", from.display(), exe.display()),
+        Err(e) => {
+            eprintln!("pipelines bundle-dxc: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `pipelines corpus-subset IN OUT N`: the start of a shader archive holding its first N host-stage programs
+/// (as `pipelines library` counts them), for timing a library build on a subset. OUT is a scratch file: it
+/// holds the game's own shaders, so it is never shipped or committed.
+fn corpus_subset(args: &[String]) {
+    use rebuild_pipelines::translate;
+    let (Some(src), Some(out), Some(n)) = (args.first(), args.get(1), args.get(2).and_then(|v| v.parse::<usize>().ok())) else {
+        eprintln!("pipelines corpus-subset IN OUT N");
+        std::process::exit(2);
+    };
+    let data = std::fs::read(src).unwrap_or_else(|e| {
+        eprintln!("{src}: {e}");
+        std::process::exit(1);
+    });
+    // each record ends `n` bytes after its marker (`rebuild_shader::sgd5`)
+    let ends: Vec<usize> = rebuild_shader::sgd5::records(&data)
+        .filter_map(|r| data.get(r.offset - 4..r.offset).map(|b| r.offset + u32::from_le_bytes(b.try_into().unwrap()) as usize))
+        .collect();
+    let count = |k: usize| -> usize {
+        let end = if k == 0 { 0 } else { ends[k - 1].min(data.len()) };
+        let walk = rebuild_shader::census::walk(&data[..end], 8);
+        let mut seen = HashSet::new();
+        walk.programs.iter().filter(|p| translate::host_stage(&p.native).is_some_and(|s| rebuild_pipelines::parse_hash(&p.hash).is_some_and(|h| seen.insert((h, s))))).count()
+    };
+    // the fewest records whose prefix holds N programs
+    let (mut lo, mut hi) = (0usize, ends.len());
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if count(mid) >= n {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    let end = if lo == 0 { 0 } else { ends[lo - 1].min(data.len()) };
+    std::fs::write(out, &data[..end]).unwrap_or_else(|e| {
+        eprintln!("{out}: {e}");
+        std::process::exit(1);
+    });
+    println!("{out}: {} programs in the first {lo} of {} records ({:.1} MB)", count(lo), ends.len(), end as f64 / 1e6);
 }
