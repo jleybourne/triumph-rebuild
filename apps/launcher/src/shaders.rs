@@ -205,4 +205,38 @@ mod tests {
             assert_eq!(need(&game, &store, &Ok(dxc.clone())), Need::Build(Status::Missing), "round {round}: cleared");
         }
     }
+
+    /// A library left by another translator version is stale and the launcher rebuilds it; a part-built one
+    /// (the launcher closed mid-build) is finished. Either way the game is then ready, of this translator.
+    #[test]
+    fn a_stale_or_part_built_library_is_built_again_by_the_launcher() {
+        use rebuild_pipelines::shaderlib::{Manifest, MANIFEST, VERSION};
+        let d = crate::temp_dir("shaders-stale");
+        let st = rebuild_storage::Storage::resolve_with(&rebuild_storage::Env { data_dir: Some(d.join("data")), temp: d.clone(), ..Default::default() });
+        let store = st.game("some.game").with_build("1.0");
+        let game = d.join("game");
+        std::fs::create_dir_all(&game).unwrap();
+        let corpus = game.join("shaders.rpf");
+        std::fs::write(&corpus, b"no programs in here").unwrap();
+        let dxc = d.join("dxc.exe");
+        std::fs::write(&dxc, b"x").unwrap();
+        let (corpus_size, corpus_modified) = rebuild_pipelines::shaderlib::corpus_stat(&corpus).unwrap();
+        let dir = store.shaders_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        for (translator, state, want) in [("an older translator", "complete", "translator"), (VERSION, "building", "paused")] {
+            let m = Manifest { format: 1, translator: translator.into(), game_build: "1.0".into(), corpus_size, corpus_modified, state: state.into(), programs: 3, ..Manifest::default() };
+            std::fs::write(dir.join(MANIFEST), m.to_toml()).unwrap();
+            std::fs::write(dir.join("library.bin"), b"an old library").unwrap();
+            let n = need(&game, &store, &Ok(dxc.clone()));
+            assert!(matches!(&n, Need::Build(Status::Stale(_)) | Need::Build(Status::Partial { .. })), "{translator}/{state}: {n:?}");
+            assert!(status_line(&n, None).contains(if want == "paused" { "paused" } else { "translator" }), "{}", status_line(&n, None));
+            let mut job = Job::start("some.game", &game, &store, dxc.clone(), 2);
+            while !job.finished() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(job.take_result().unwrap().unwrap().complete);
+            assert!(matches!(need(&game, &store, &Ok(dxc.clone())), Need::Ready(_)), "{translator}/{state}: rebuilt");
+            assert_eq!(Manifest::read(&dir).unwrap().translator, VERSION);
+        }
+    }
 }

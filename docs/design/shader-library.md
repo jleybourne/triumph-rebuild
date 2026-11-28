@@ -136,5 +136,16 @@ binaries. DXC runs as a separate program, invoked by path; nothing of it is link
 
 ## Measured
 
-See `agents/shaderlib.md` for the full-build measurement on the dev machine (corpus read from the game folder,
-scratch cache, 4 workers while other lanes run) and the card run with the runtime on that library.
+**A 200-program subset (2026-11-29, dev machine, other lanes running).** `pipelines corpus-subset` cut the
+first 200 programs (681 of 26,503 records, 3.7 MB) out of the `D:\victory-data` corpus copy into a scratch game
+folder; `pipelines library --workers 4` built them into a scratch `REBUILD_DATA_DIR` with the Windows SDK DXC:
+
+| run | wall | compiled | kept | result |
+|:--|--:|--:|--:|:--|
+| from nothing | 3.8 s (19 ms a program) | 182 (DXC 80 ms each, CPU) | 0 | 166 in the library, 34 refused by the translator, 0 DXC failures, 0.9 MB |
+| translator version changed in the manifest | 0.1 s | 0 | 200 | stale, rebuilt, ready (no DXC: no HLSL changed) |
+| killed (SIGKILL) at 2 s, then run again | 3.9 s | 105 | 94 | the library byte-identical to the one built in one go |
+
+Lift is 0.3 s summed over the 200 (1.5 ms each). These are the corpus's first programs, which may be smaller
+than average, so the full ~25,700-program build is not extrapolated from them; the full build is not run on
+developer machines (an hour of CPU).

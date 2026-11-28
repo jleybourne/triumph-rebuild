@@ -128,7 +128,7 @@ impl App {
                 p.failed,
                 crate::mmss(p.elapsed.as_secs()),
                 self.shader_job.as_ref().map_or(workers, |j| j.workers),
-                if workers == 1 { "" } else { "s" }
+                if self.shader_job.as_ref().map_or(workers, |j| j.workers) == 1 { "" } else { "s" }
             ));
             ui.add_space(th::S2);
             ui.horizontal(|ui| {
