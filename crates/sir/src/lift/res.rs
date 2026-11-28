@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use rebuild_shader::gfx10::enc::{self, Decoded, Src};
 use rebuild_shader::native::{HwStage, ResourceType, RootParam, RootType, UsedResource};
 
-use super::Lifter;
+use super::{Lifter, NullKind};
 
 /// The program's root parameters, as the lifter needs them.
 #[derive(Clone, Copy)]
@@ -267,7 +267,7 @@ impl Lifter<'_> {
         }
         self.out.uses_shadow = true;
         // a UAV is read through its own view (the alternate: a raw UAV over the same 16-byte aligned start)
-        let (rw, at) = if uav { ("RW", alternate(base)) } else { ("", format!("s{base}")) };
+        let (rw, at) = if uav { ("RW", super::alt_index(&alternate(base), NullKind::RwRaw)) } else { ("", vi(base, NullKind::Raw)) };
         let _ = writeln!(self.out.body, "        {rw}ByteAddressBuffer c = ResourceDescriptorHeap[{at}]; uint sir_ld = {};", lead(base));
         for k in 0..n {
             let s = dst + k;
@@ -376,7 +376,7 @@ impl Lifter<'_> {
         let vdata = d.get("vdata")? as u16;
         let load = ["Load", "Load2", "Load3", "Load4"][n as usize - 1];
         let ty = if n == 1 { String::new() } else { n.to_string() };
-        let sh = format!(" uint4 sh = sir_shadow.Load4(s{rsrc} * 16u);");
+        let sh = format!(" uint4 sh = sir_shadow.Load4(sir_sh(s{rsrc}));");
         if store {
             // out of range writes are dropped on both
             let vals: Vec<String> = (0..n).map(|k| {
@@ -390,14 +390,14 @@ impl Lifter<'_> {
             }
             let st = ["Store", "Store2", "Store3", "Store4"][n as usize - 1];
             // the UAV is the alternate view
-            let _ = writeln!(self.out.body, "    {{{sh} RWByteAddressBuffer b = ResourceDescriptorHeap[sh.z]; if ({cond}) b.{st}({addr}, {value}); }}");
+            let _ = writeln!(self.out.body, "    {{{sh} RWByteAddressBuffer b = ResourceDescriptorHeap[sir_va(sh.z, 1u)]; if ({cond}) b.{st}({addr}, {value}); }}");
             return Some(());
         }
         // a UAV is read through its own view, the alternate
         if uav {
-            let _ = writeln!(self.out.body, "    {{{sh} RWByteAddressBuffer b = ResourceDescriptorHeap[sh.z]; uint{ty} r = b.{load}({addr});{guard}");
+            let _ = writeln!(self.out.body, "    {{{sh} RWByteAddressBuffer b = ResourceDescriptorHeap[sir_va(sh.z, 1u)]; uint{ty} r = b.{load}({addr});{guard}");
         } else {
-            let _ = writeln!(self.out.body, "    {{ ByteAddressBuffer b = ResourceDescriptorHeap[s{rsrc}];{sh} uint{ty} r = b.{load}({addr});{guard}");
+            let _ = writeln!(self.out.body, "    {{ ByteAddressBuffer b = ResourceDescriptorHeap[sir_vi(s{rsrc}, 0u)];{sh} uint{ty} r = b.{load}({addr});{guard}");
         }
         for k in 0..n {
             let e = if n == 1 { "r".to_string() } else { format!("r.{}", ["x", "y", "z", "w"][k as usize]) };
@@ -531,7 +531,7 @@ impl Lifter<'_> {
                 let st = if idxen { "sh.x" } else { "0u" };
                 // the UAV is the alternate view, from the 16-byte aligned address `lead` bytes below
                 (
-                    format!("uint4 sh = sir_shadow.Load4(s{rsrc} * 16u); RWByteAddressBuffer w = ResourceDescriptorHeap[sh.z]; uint sir_i = {idx}, sir_o = {voff}; uint a = sh.w + sir_i * {st} + sir_o + {soff};"),
+                    format!("uint4 sh = sir_shadow.Load4(sir_sh(s{rsrc})); RWByteAddressBuffer w = ResourceDescriptorHeap[sir_va(sh.z, 1u)]; uint sir_i = {idx}, sir_o = {voff}; uint a = sh.w + sir_i * {st} + sir_o + {soff};"),
                     check.to_string(),
                 )
             }
@@ -660,14 +660,15 @@ impl Lifter<'_> {
             let _ = writeln!(
                 self.out.body,
                 "    {{ RWBuffer<float4> b = ResourceDescriptorHeap[{}]; {guard}{{ float4 o = b[{el}]; {} b[{el}] = o; }} }}",
-                alternate(rsrc),
+                super::alt_index(&alternate(rsrc), NullKind::RwTyped),
                 merge.join(" ")
             );
             return Some(());
         }
         // the typed view (RW for a UAV) is the alternate
         let rw = if uav { "RW" } else { "" };
-        let _ = writeln!(self.out.body, "    {{ {rw}Buffer<float4> b = ResourceDescriptorHeap[{}]; float4 r = b[{el}];", alternate(rsrc));
+        let at = super::alt_index(&alternate(rsrc), if uav { NullKind::RwTyped } else { NullKind::Typed });
+        let _ = writeln!(self.out.body, "    {{ {rw}Buffer<float4> b = ResourceDescriptorHeap[{at}]; float4 r = b[{el}];");
         if d16 {
             // a register with one half loaded keeps its other half (as the console's d16 loads do)
             for r in 0..n.div_ceil(2) {
@@ -889,9 +890,10 @@ impl Lifter<'_> {
                     None => String::new(),
                 };
                 self.use_desc(rsrc, View::Tex(d.get("dim")? as u8), 0);
+                let ix = vi(rsrc, NullKind::Tex(d.get("dim")? as u8));
                 let _ = writeln!(
                     self.out.body,
-                    "    {{ {ty}<float4> t = ResourceDescriptorHeap[s{rsrc}];{decl} float4 r = t.Gather{ch}({s}, {c}{offset});"
+                    "    {{ {ty}<float4> t = ResourceDescriptorHeap[{ix}];{decl} float4 r = t.Gather{ch}({s}, {c}{offset});"
                 );
                 // only active lanes write their result (inactive lanes keep their registers, as on the console)
                 let guard = if self.out.exec_narrowed { "if (ex) " } else { "" };
@@ -938,7 +940,8 @@ impl Lifter<'_> {
                 }).collect();
                 let guard = if self.f.narrowed { "if (ex) " } else { "" };
                 self.use_desc(rsrc, View::RwTex(d.get("dim")? as u8), 0);
-                let _ = writeln!(self.out.body, "    {{ {rw}<float4> t = ResourceDescriptorHeap[s{rsrc}]; {guard}t[{c}] = float4({}); }}", vals.join(", "));
+                let ix = vi(rsrc, NullKind::RwTex(d.get("dim")? as u8));
+                let _ = writeln!(self.out.body, "    {{ {rw}<float4> t = ResourceDescriptorHeap[{ix}]; {guard}t[{c}] = float4({}); }}", vals.join(", "));
                 return Some(());
             }
             _ => return None,
@@ -962,7 +965,8 @@ impl Lifter<'_> {
         };
         let dim = d.get("dim")? as u8;
         self.use_desc(rsrc, if ty.starts_with("RW") { View::RwTex(dim) } else { View::Tex(dim) }, 0);
-        let _ = writeln!(self.out.body, "    {{ {ty}<float4> t = ResourceDescriptorHeap[s{rsrc}];{smp} float4 r = {result};");
+        let ix = vi(rsrc, if ty.starts_with("RW") { NullKind::RwTex(dim) } else { NullKind::Tex(dim) });
+        let _ = writeln!(self.out.body, "    {{ {ty}<float4> t = ResourceDescriptorHeap[{ix}];{smp} float4 r = {result};");
         let guard = if self.f.narrowed { "if (ex) " } else { "" };
         let chans: Vec<&str> = (0..4usize).filter(|c| dmask >> c & 1 == 1).map(|c| ["x", "y", "z", "w"][c]).collect();
         if d16 {
@@ -1053,9 +1057,10 @@ impl Lifter<'_> {
         };
         // an exchange must name the original; the others only when it is returned
         let orig = if glc || matches!(op, "swap" | "cmpswap") { ", o" } else { "" };
+        let ix = vi(rsrc, NullKind::RwTexUint(d.get("dim")? as u8));
         let _ = writeln!(
             self.out.body,
-            "    {{ {rw}<{ty}> t = ResourceDescriptorHeap[s{rsrc}]; {guard}{{ {ty} o; {f}(t[{c}], {src}{orig});{ret} }} }}"
+            "    {{ {rw}<{ty}> t = ResourceDescriptorHeap[{ix}]; {guard}{{ {ty} o; {f}(t[{c}], {src}{orig});{ret} }} }}"
         );
         Some(())
     }
@@ -1116,12 +1121,17 @@ impl Lifter<'_> {
 /// The host heap index of a buffer descriptor's own view (CBV, UAV, typed view): the shadow entry's alternate
 /// (`crates/d3d12x` heap layout: the console index itself holds a raw SRV of the buffer's bytes).
 fn alternate(index_sgpr: u8) -> String {
-    format!("sir_shadow.Load(s{index_sgpr} * 16u + 8u)")
+    format!("sir_shadow.Load(sir_sh(s{index_sgpr}) + 8u)")
+}
+
+/// The console index in SGPR `s` as the host heap index to read as `kind` ([`super::CONSOLE_VIEWS`]).
+fn vi(s: u8, kind: NullKind) -> String {
+    super::view_index(&format!("s{s}"), kind)
 }
 
 /// The shadow entry's lead: bytes from the 16-byte aligned start of the raw views to the buffer's first byte.
 fn lead(index_sgpr: u8) -> String {
-    format!("sir_shadow.Load(s{index_sgpr} * 16u + 12u)")
+    format!("sir_shadow.Load(sir_sh(s{index_sgpr}) + 12u)")
 }
 
 /// The 21-bit signed SMEM offset.

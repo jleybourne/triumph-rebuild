@@ -154,7 +154,7 @@ impl Lifter<'_> {
                 self.out.uses_shadow = true;
                 let _ = write!(
                     head,
-                    "    {{ ByteAddressBuffer w = ResourceDescriptorHeap[s{rsrc}]; uint4 sh = sir_shadow.Load4(s{rsrc} * 16u); uint sir_st = sh.x, sir_nr = sh.y, sir_i = {idx}, sir_o = {voff}; uint a = sh.w + {soff} + sir_i * sir_st + sir_o;"
+                    "    {{ ByteAddressBuffer w = ResourceDescriptorHeap[sir_vi(s{rsrc}, 0u)]; uint4 sh = sir_shadow.Load4(sir_sh(s{rsrc})); uint sir_st = sh.x, sir_nr = sh.y, sir_i = {idx}, sir_o = {voff}; uint a = sh.w + {soff} + sir_i * sir_st + sir_o;"
                 );
                 // a heap view's channel order is the view's: identity here
                 w3 = Some(format!("{}u", 4 | 5 << 3 | 6 << 6 | 7 << 9));
