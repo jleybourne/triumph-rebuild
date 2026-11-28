@@ -357,6 +357,30 @@ pub unsafe extern "system" fn PresentX(this: *mut c_void, planes: u32, plane: *c
         return E_INVALIDARG;
     }
     let console = unsafe { *p.resources };
+    // every change of the plane count or of plane 0's image is noted with its present number (the title's video and
+    // attract screens may present differently; only plane 0 is shown today)
+    {
+        // the plane count and plane 0's resource count (the title double-buffers its image: that alternation is not
+        // logged, only an image not seen before)
+        static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static IMAGES: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+        let shape = (u64::from(planes) << 32) | u64::from(p.count);
+        let new_shape = LAST.swap(shape, Ordering::Relaxed) != shape;
+        let new_image = {
+            let mut seen = IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+            let fresh = !seen.contains(&(console as usize));
+            if fresh && seen.len() < 64 {
+                seen.push(console as usize);
+            }
+            fresh
+        };
+        if new_shape || new_image {
+            static CHANGES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if CHANGES.fetch_add(1, Ordering::Relaxed) < 64 {
+                eprintln!("present   {n}: {planes} planes, plane 0 has {} resources, image {console:p}{}", p.count, if new_image { " (new)" } else { "" });
+            }
+        }
+    }
     // REBUILD_TRACE_PLANES: the first presents' planes, as raw qwords (planes past the first are not shown yet)
     if std::env::var_os("REBUILD_TRACE_PLANES").is_some() && n <= 3 {
         let words = unsafe { std::slice::from_raw_parts(plane as *const u64, (planes as usize).min(4) * 12) };
