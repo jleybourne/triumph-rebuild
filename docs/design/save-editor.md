@@ -75,8 +75,37 @@ and the title's checks.
 lane lands. `store::export_all` / `import_all` are the thin wrappers that become `storage::export` /
 `storage::import` (one archive of all saves and settings).
 
+## Typed fields (second pass, from real saves)
+
+There is a **Settings** / **Profile entries** card under Edit for the two kinds real saves use
+(research §4):
+
+- **`SettingsProfileSettings` (kind 2, JSON):**
+  - one row per value, named where the member's hash is known and `#hash` where it isn't, with a
+    filter box;
+  - booleans are checkboxes; numbers are text fields checked against their type, and floats keep
+    their decimals;
+  - `$v`, the version words and `$data` are read-only;
+  - the body keeps its length: a shorter value is padded with spaces, and a longer one takes its room
+    from its line's indentation or is refused.
+- **Player profile (kind 3):** one row per (id, value) entry. The value is edited in place and the
+  entry hash recomputed.
+
+Every field edit reseals the save (ASAV hash, data hash, header hash) and stays in the editor until
+**Write**.
+
+## Import from Triumph
+
+**Import from Triumph** (under "Every save at once") reads the owner's older build's save folders:
+`…\victory\data\<title>` or its `saves` folder, the newest committed `v<N>` of each container
+(research §7).
+
+- It writes nothing there.
+- Every container is checked first (the folder hash, names our runtime uses, `store::refuse`).
+- Then each one is written through `store::write_container`: backup first, refused while the title
+  runs.
+
 ## Not yet
 
-- typed fields for the body of any kind, `SettingsProfileSettings` first: needs a real save (the
-  research names exactly what to read from it);
+- names for the profile's ids and for the 166 hash-only settings members;
 - fields of the ASAV header with unknown meaning are shown, not editable.

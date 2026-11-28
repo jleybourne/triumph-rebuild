@@ -15,7 +15,8 @@ use eframe::egui::{self, Align, Layout};
 use rebuild_gdk::areas::xgamesave::Stored;
 use rebuild_saves::format::{Editable, Save};
 use rebuild_saves::store::{self, Entry};
-use rebuild_saves::{json, section};
+use rebuild_saves::body::{self, Body, Kind};
+use rebuild_saves::{json, section, triumph};
 use std::path::{Path, PathBuf};
 
 const ROWS: usize = 24;
@@ -45,6 +46,10 @@ pub struct Opened {
     pub blob: usize,
     pub page: usize,
     pub backups: Vec<PathBuf>,
+    /// The fields card: a filter, and one input per field (made from the body they show).
+    pub filter: String,
+    pub inputs: Vec<String>,
+    pub inputs_of: Vec<u8>,
 }
 
 enum Act {
@@ -62,6 +67,9 @@ enum Act {
     ImportSection,
     ExportAll,
     ImportAll,
+    /// A decoded body field (its index) set from text.
+    SetField(usize, String),
+    ImportTriumph,
 }
 
 fn when(t: i64) -> String {
@@ -89,7 +97,7 @@ fn open(path: &Path, root: &Path) -> Result<Opened, String> {
         _ => String::new(),
     };
     let blob = stored.blobs.iter().position(|b| b.0 == rebuild_saves::format::DATA_BLOB).unwrap_or(0);
-    Ok(Opened { path: path.into(), backups: store::backups(root, path), stored, save, edited: None, name, patch_at: "0".into(), patch_hex: String::new(), blob, page: 0 })
+    Ok(Opened { path: path.into(), backups: store::backups(root, path), stored, save, edited: None, name, patch_at: "0".into(), patch_hex: String::new(), blob, page: 0, filter: String::new(), inputs: Vec::new(), inputs_of: Vec::new() })
 }
 
 impl App {
@@ -174,6 +182,11 @@ impl App {
                             act = Some(Act::ImportAll);
                         }
                     });
+                    ui.add_space(4.0);
+                    w::muted(ui, "Saves from the older Triumph build: its folders are read, never changed; every container is checked first.");
+                    if w::button(ui, icon::DOWNLOAD_SIMPLE, "Import from Triumph", !running).on_hover_text("Pick the old build's title data folder (…\\victory\\data\\<title>) or its saves folder").clicked() {
+                        act = Some(Act::ImportTriumph);
+                    }
                 });
             },
             |ui| {
@@ -303,6 +316,24 @@ fn run(st: &mut SavesUi, a: Act, root: &Path, guard: &dyn Fn() -> bool) -> Resul
                 let Some(src) = rfd::FileDialog::new().set_title("A folder made by Export all").pick_folder() else { return Ok(None) };
                 let w = store::import_all(root, &src, guard)?;
                 Ok(Some(format!("Imported {} containers; each one replaced is backed up", w.len())))
+            }
+            Act::ImportTriumph => {
+                let mut d = rfd::FileDialog::new().set_title("The older Triumph build's title data or saves folder");
+                if let Some(l) = std::env::var_os("LOCALAPPDATA") {
+                    d = d.set_directory(PathBuf::from(l).join("victory").join("data"));
+                }
+                let Some(src) = d.pick_folder() else { return Ok(None) };
+                let w = triumph::import(root, &src, guard)?;
+                let backed = w.iter().filter(|w| w.backup.is_some()).count();
+                Ok(Some(format!("Imported {} containers from Triumph ({backed} replaced, each backed up first)", w.len())))
+            }
+            Act::SetField(i, text) => {
+                let o = st.open.as_mut().ok_or("nothing open")?;
+                let mut s = o.edited.clone().or_else(|| o.save.clone()?.ok()).ok_or("no save to edit")?;
+                let new = set_field(&s, i, &text)?;
+                s.patch_body(0, &new).map_err(|e| e.0)?;
+                o.edited = Some(s);
+                Ok(Some("Field set; checksums recomputed; not written yet".into()))
             }
         }
     }
@@ -460,6 +491,85 @@ fn save_view(ui: &mut egui::Ui, o: &mut Opened, s: Save, running: bool, act: &mu
             });
         });
     });
+    ui.add_space(th::S2);
+    fields_view(ui, o, &s, matches!(editable, Editable::Yes) && !running, act);
+}
+
+/// The new body after field `i` is set from `text`.
+fn set_field(s: &Save, i: usize, text: &str) -> Result<Vec<u8>, String> {
+    match body::decode(s.inner.kind, &s.body) {
+        Body::Settings(mut st) => {
+            st.set(i, text).map_err(|e| e.0)?;
+            Ok(st.to_body())
+        }
+        Body::Profile(mut p) => {
+            let id = p.entries.get(i).ok_or("no such field")?.0;
+            let t = text.trim();
+            let v = match t.strip_prefix("0x") {
+                Some(h) => u32::from_str_radix(h, 16).map_err(|_| format!("{t:?}: a number"))?,
+                None => t.parse::<u32>().or_else(|_| t.parse::<i32>().map(|v| v as u32)).map_err(|_| format!("{t:?}: a whole number"))?,
+            };
+            p.set(id, v).map_err(|e| e.0)?;
+            p.to_body().map_err(|e| e.0)
+        }
+        Body::Raw => Err("this save's body is not decoded".into()),
+    }
+}
+
+/// The decoded body as typed fields: the settings by name (unknown members as #hash), or the profile's
+/// entries by id; each editable one with its own control.
+fn fields_view(ui: &mut egui::Ui, o: &mut Opened, s: &Save, can: bool, act: &mut Option<Act>) {
+    let c = th::p();
+    let decoded = body::decode(s.inner.kind, &s.body);
+    let (title, rows): (&str, Vec<(String, String, Option<Kind>, bool)>) = match &decoded {
+        Body::Settings(st) => ("Settings", st.leaves.iter().enumerate().map(|(i, l)| (l.name(), st.value(i).to_string(), Some(l.kind), l.editable())).collect()),
+        Body::Profile(p) => ("Profile entries", p.entries.iter().map(|(id, v)| (format!("{id:#06x}"), v.to_string(), Some(Kind::Int), true)).collect()),
+        Body::Raw => return,
+    };
+    if o.inputs_of != s.body || o.inputs.len() != rows.len() {
+        o.inputs = rows.iter().map(|r| r.1.clone()).collect();
+        o.inputs_of = s.body.clone();
+    }
+    w::card(ui, Some(title), |ui| {
+        w::muted(ui, if matches!(decoded, Body::Settings(_)) {
+            "Named where the member's hash matches a name; #hash where it does not yet. Values keep their type; the body keeps its length."
+        } else {
+            "The profile's (id, value) entries; ids are not named yet. Its entry hash and every checksum are recomputed."
+        });
+        ui.horizontal(|ui| {
+            w::fixed(ui, 150.0, egui::RichText::new("filter").font(th::small()).color(c.muted));
+            ui.add(egui::TextEdit::singleline(&mut o.filter).hint_text("e.g. audio, hud, invert").desired_width(240.0));
+        });
+        let f = o.filter.to_lowercase();
+        egui::ScrollArea::vertical().id_salt("saves-fields").max_height(360.0).show(ui, |ui| {
+            for (i, (name, value, kind, editable)) in rows.iter().enumerate() {
+                if !f.is_empty() && !name.to_lowercase().contains(&f) {
+                    continue;
+                }
+                ui.horizontal(|ui| {
+                    w::fixed(ui, 300.0, egui::RichText::new(name).font(th::mono(11.5)).color(if name.contains('#') { c.muted } else { c.text }));
+                    let on = can && *editable;
+                    match kind {
+                        Some(Kind::Bool) => {
+                            let mut b = value == "true";
+                            if ui.add_enabled(on, egui::Checkbox::without_text(&mut b)).changed() {
+                                *act = Some(Act::SetField(i, b.to_string()));
+                            }
+                        }
+                        _ => {
+                            ui.add_enabled(on, egui::TextEdit::singleline(&mut o.inputs[i]).desired_width(110.0).font(th::mono(11.5)));
+                            if w::button(ui, icon::CHECK, "", on && o.inputs[i].trim() != value.trim()).on_hover_text("Set").clicked() {
+                                *act = Some(Act::SetField(i, o.inputs[i].clone()));
+                            }
+                        }
+                    }
+                    if !*editable {
+                        ui.label(egui::RichText::new("read-only").font(th::small()).color(c.muted));
+                    }
+                });
+            }
+        });
+    });
 }
 
 fn hex_view(ui: &mut egui::Ui, o: &mut Opened) {
@@ -549,6 +659,43 @@ mod tests {
         assert_eq!(backups.len(), 1);
         run(&mut st, Act::Restore(backups[0].clone()), &root, &idle).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A settings save in the real one's form (synthetic values): a typed field set through the screen,
+    /// written, and read back by the title's checks.
+    #[test]
+    fn a_settings_field_through_the_screen() {
+        let base = std::env::temp_dir().join(format!("rebuild-launcher-fields-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("GameSave");
+        let dir = root.join("0009000000000001").join("default");
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = "{\r\n\t\"$0x8c1c3948\": {\r\n\t\t\"$0xb80c6ae8\": {\r\n\t\t\t\"$v\": 2.0,\r\n\t\t\t\"$0x3300c23e\": 10,\r\n\t\t\t\"$0xc89952df\": false\r\n\t\t}\r\n\t}\r\n}";
+        let s = build(2, "Profile Settings", 0x6b07_786d, "SettingsProfileSettings", text.as_bytes()).unwrap();
+        let c = Stored {
+            name: "SettingsProfileSettings".into(),
+            display: "SettingsProfileSettings".into(),
+            modified: 1,
+            blobs: vec![(DATA_BLOB.into(), s.data()), (HEADER_BLOB.into(), s.header.to_bytes())],
+        };
+        let path = file::path(&dir, &c.name);
+        file::write(&path, &c).unwrap();
+        let idle = || false;
+        let mut st = SavesUi { root: Some(root.clone()), ..SavesUi::default() };
+        run(&mut st, Act::Select(path.clone()), &root, &idle).unwrap();
+        let cur = st.open.as_ref().unwrap().save.clone().unwrap().unwrap();
+        let Body::Settings(set) = body::decode(2, &cur.body) else { panic!("not decoded") };
+        let music = set.find("#8c1c3948.audio.musicLevel").unwrap();
+        let version = set.find("#8c1c3948.audio.$v").unwrap();
+        assert!(run(&mut st, Act::SetField(version, "3.0".into()), &root, &idle).is_err());
+        run(&mut st, Act::SetField(music, "4".into()), &root, &idle).unwrap();
+        run(&mut st, Act::Write, &root, &idle).unwrap();
+        let back = st.open.as_ref().unwrap().save.clone().unwrap().unwrap();
+        assert!(back.problems().is_empty());
+        assert_eq!(back.body.len(), cur.body.len());
+        let Body::Settings(set) = body::decode(2, &back.body) else { panic!("not decoded") };
+        assert_eq!(set.value(music), "4");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -536,3 +536,19 @@ fn v2_game_folder_unchanged() {
     eprintln!("game folder: {} entries, {} touched files, hash {before:016x} before, {after:016x} after", all.len(), touched.len());
     assert_eq!(before, after, "the game folder changed");
 }
+
+#[test]
+fn a_writable_drive_can_live_in_a_folder_of_its_own() {
+    let w = World::new("writable-at");
+    let game = w.scratch.0.join("game");
+    let storage = game.join("storage");
+    let v = VfsBuilder::new(game.join("overlay")).writable('T').writable_at('s', &storage).build().unwrap();
+    v.create_dir(r"S:\save0").unwrap();
+    write_file(&v, r"S:\save0\Profile.dat", Disposition::CreateNew, "kept");
+    write_file(&v, r"T:\scratch.bin", Disposition::CreateNew, "temp");
+    let host = v.resolve(r"S:\save0\Profile.dat").unwrap().host;
+    assert!(host.to_string_lossy().replace('/', "\\").contains("\\game\\storage\\"), "{}", host.display());
+    assert_eq!(fs::read_to_string(&host).unwrap(), "kept");
+    assert!(game.join("overlay").join("T").join("files").join("scratch.bin").is_file());
+    assert!(!game.join("overlay").join("S").exists(), "S: is not under the overlay");
+}

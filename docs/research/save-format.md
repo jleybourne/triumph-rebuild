@@ -8,10 +8,13 @@ constants below are the few numbers the format needs, each cited.
 
 **Status.** The container layout, both headers, all three checksums and which saves are encrypted
 and signed are decoded from the code and implemented in `crates/saves` (tests build saves the way
-the writer does and check them the way the reader does). **Not decoded:** the body after the ASAV
-header (the game state itself), the meaning of five ASAV words, the stamp's clock, and which kind
-`SettingsProfileSettings` uses. All of these need a real save, and no card run has written one yet
-(first-run setup never finished in a 120 s run; `agents/gdk.md`).
+the writer does and check them the way the reader does).
+
+**Confirmed on real saves** (second pass, 2026-11-28). The owner's older build (the fork) wrote two
+real containers, `Player` (kind 3) and `SettingsProfileSettings` (kind 2). The parser takes both: all
+three checksums and every load check pass, and both blobs and both bodies serialize back to identical
+bytes (`savedump`, §4). Both bodies are now decoded (§4) and their fields are editable. Copies of the
+owner's files are not in git; tests use synthetic saves of the same form.
 
 ## 1. Containers and blobs
 
@@ -61,8 +64,10 @@ Built on the stack at `rsp+0x28` in `0x1428d1ea0`, after `0x1428d17b0` and a 0x1
 | 0x124 | 4 bytes | 0 | the memset |
 
 The stamp's function pointer is filled at run time behind a protected call (`and rcx, ~0xf` before an
-indirect call); its unit is unknown until a real save is read. The same value goes into ASAV +0x20
-(`0x1428d204b`).
+indirect call). **The stamp is seconds since 1970, UTC** (real saves): `Player` holds `0x6b077c94` =
+2026-11-26 00:25:56 UTC. Its `v7` folder in the old build was written at 10:55:56 +10:30, the same
+second. `SettingsProfileSettings` holds `0x6b07786d` = 00:08:13 UTC, the same second as its folder.
+The same value goes into ASAV +0x20 (`0x1428d204b`). Both real saves have it equal in both places.
 
 **Header hash** (`0x1428d1930`): Jenkins one-at-a-time, chained, each call finalised (`0x144dd1900`),
 over the header's own bytes in this order:
@@ -159,13 +164,144 @@ The slot listing (`0x1428d18e0`) checks only size 0x128, the header hash and ver
 `crates/saves` (`Save::problems`) implements every check except the buffer capacity; the editor never
 grows a save, so that one cannot start failing because of an edit.
 
-## 4. SettingsProfileSettings
+## 4. The real saves: `Player` and `SettingsProfileSettings`
 
-Read the way section 1 describes (by name, both blobs). Its kind, and so whether it is signed, is not
-fixed in the code we read: it comes from the request object that names the container. **Needs a real
-save**: open it in the Saves screen, which shows the kind. If it is 2-8, the display name and every body
-byte are editable now (checksums recomputed); decoding the body into named settings needs that real
-file. If it is 1 or 9 it stays read-only.
+The owner's older build wrote two containers. Read with `savedump` (`crates/saves/src/bin/savedump.rs`,
+which only reads):
+
+| | `Player` | `SettingsProfileSettings` |
+|:--|:--|:--|
+| data / header blobs | 2012 / 0x128 bytes | 7344 / 0x128 bytes |
+| header | v6, data hash `0xaca14687`, header hash `0xf0514e8a`, name "Player" | v6, `0x02a2bdc3`, `0x9031fdb2`, "Profile Settings" |
+| ASAV | format 2, **kind 3** (word 1), flags 0, header size 0x170, text "Player" | format 2, **kind 2** (word 1), flags 0, text "SettingsProfileSettings" |
+| load checks (§3) | all pass | all pass |
+| parse → serialize | both blobs byte-identical; body byte-identical | both blobs byte-identical; body byte-identical |
+
+Both are unsigned kinds, so both are editable.
+
+**Open items resolved by these saves:**
+
+- **The five undecoded ASAV words:** ASAV +0x154, +0x158, +0x15c and +0x164 are 0 in both saves. They
+  are set only by the kind-1 caller (`0x1428d03da`). The editor shows them and does not edit them.
+- **ASAV +0x18 and +0x1c:** +0x18 is 0, and +0x1c is 0 on the way in, so the writer stores the data
+  size (`0x1428d206c`).
+- **The header's copies match.** Outer +0x18 = ASAV +0x154 = 0, outer +0x1c = ASAV +0x18 = 0, outer
+  +0x20 = ASAV +0x1c = the data size. The names and stamps match too. The editor's warnings are empty
+  for both.
+- **The ASAV text** (+0x128) is the container's name. For `Player`, the gamertag: the container is
+  named after the gamertag ("Player" is the default gamertag).
+
+### Kind 3: the player profile (`Player`)
+
+The body (2012 − 0x170 = 1644 bytes) has a 12-byte head, then (id, value) pairs, then zeros:
+
+| offset | type | meaning |
+|:--|:--|:--|
+| +0 | u32 | entry count (10) |
+| +4 | u32 | 3 in the real save. Meaning unknown; kept as it is |
+| +8 | u32 | `joaat(entries, seed 0)`: the hash over the `count × 8` entry bytes. Reproduced exactly from the real save (`0x09b132df`) |
+| +12 | (u32 id, u32 value) × count | the entries |
+| then | zeros | to the end of the body |
+
+The image has one joaat over `count × 8` bytes of 8-byte entries with a 16-bit id in front: `0x1453610f3`
+in `0x145361030`. That is probably this hash's producer, but I have not confirmed it.
+
+The ids are not named: they are a numeric enum and no name for them is in the image. Entries in the
+real save:
+
+| id | value |
+|:--|--:|
+| `0x00be` | 28 |
+| `0x00c8` | 3072 |
+| `0x00bf` | 28 |
+| `0x00e6` | 32 |
+| `0x04b0` | 1 |
+| `0x0460` | 0 |
+| `0x0461` | 3 |
+| `0x0462` | 0 |
+| `0x0463` | 0 |
+| `0x0464` | 0 |
+
+`body::Profile` parses this strictly: the count must fit, the hash must match and the tail must be zero.
+It edits values in place and recomputes the entry hash. Entries are never added, so the body keeps its
+length.
+
+### Kind 2: `SettingsProfileSettings`
+
+The body is **JSON text that fills the body exactly** (6976 bytes, no terminator). It is written by the
+engine's parser-tree JSON writer, `0x1440692c0`:
+
+- member keys are written as `"$0x%08x":` with the member's name hash (`0x14406946a`, string
+  `0x146788bb3`) when names are stripped (flag 8 at +0x25, `0x144069439`); otherwise as `"%s":`;
+- a space follows the colon (`0x14406949b`), and `,` separates members (`0x144069392`);
+- each member starts a new line with CR LF (`0x144069317`, `0x144069343`) and tab indentation
+  (`0x144067160`);
+- other keys are literal: `"$v"` (a section's version: 2.0 for audio, 5.0 for controls), `"$x"`/`"$y"`
+  (a 2-vector) and `"$data":` (a hashed string, `0x146788c08`, written by `0x14406c3d0`);
+- floats are written with 6 decimals (`1.000000`), the `$v` versions with one (`2.0`).
+
+The name hash is joaat (§2), so names can be checked one by one. 53 of the 219 distinct keys have a
+name. Each name was found as a word in the image's strings, in `settings.xml`, or in a list of plausible
+setting words (camelCase combinations), and confirmed by its 32-bit joaat. About 2.5 million candidates were tried against
+219 hashes, so about 0.1 accidental matches are expected in total. Every match is a setting word that
+fits its section (`musicLevel` under `audio`, `invertLook` beside `invertMove`, …).
+
+The file has 260 values: 19 under `audio`, 48 under `camera`, 79 under `controls`, 95 under `display`,
+17 under `general`, plus the root's two version words. Each section carries `versionMajor` 6 and
+`versionMinor` 0. The values named in full:
+
+| field | type | real save |
+|:--|:--|:--|
+| `audio.sfxLevel` · `uiSfxLevel` · `dialogueLevel` · `musicLevel` | int | 10 each |
+| `audio.gpsAudio` | int | 3 |
+| `camera.thirdPerson.cameraBob` | int | 10 |
+| `camera.firstPerson.fov` | int | 13 |
+| `camera.firstPerson.vehiclefov` | int | 10 |
+| `camera.firstPerson.autoLevel` | bool | true |
+| `controls.{thirdPerson,firstPerson}.lookAcceleration` · `aimAcceleration` | int | 7 each |
+| `controls.#e8c91000.invertLook` · `invertMove` · `invertMap` | int | 0 each |
+| `controls.#65b0928e.vibration` | int | 10 |
+| `controls.accessibility.holdAssist` · `aimMode` | int | 0 · 0 |
+| `display.sharpenIntensity` | float | 1.000000 (`settings.xml` `advancedGraphics/sharpenIntensity` is also 1.000000) |
+| `display.colorblindMode` · `radarBlipSize` · `mapBlipSize` | int | 0 each |
+| `display.#3588d43d.money` | bool | true |
+| `display.#b8462278.radarMode` · `compassMode` · `radarSize` | int | 1 · 2 · 0 |
+| `display.#b8462278.gps` · `altimeter` | bool | true · true |
+| `display.hud.subtitles` · `subtitlesBackground` | int | 0 · 0 |
+| `display.hud.ammo` · `tickerFeed` · `help` · `tips` · `objective` · `reticleMessages` | bool | true each |
+| `display.hud.aimReticleOpacity` | float | 10.000000 |
+| `display.prompts.vehiclePromptMode` | int | 0 |
+| `general.language` | `{ "$data": "0x08659ed8" }` | a hashed language name, read-only |
+
+The section names `audio`, `camera`, `controls`, `display`, `general`, `hud`, `prompts`, `targeting`,
+`accessibility`, `cinematic`, `controlPresets`, `firstPerson` and `thirdPerson` are named too. The root
+(`#8c1c3948`) and 166 members are hash-only, shown as `#hash` with their type and value. Apart from
+`sharpenIntensity`, no names overlap with `settings.xml`, which is a different file: the graphics
+settings on `S:`.
+
+**Editing.** `body::Settings` records every value's byte range. An edit:
+
+- checks the value against its type (bool, integer, finite float written with the original's number of
+  decimals);
+- writes it in place. A shorter value is followed by spaces; a longer one takes its room from that
+  line's tab indentation, or is refused;
+- re-parses the whole body as strict JSON and requires the same keys and types.
+
+`$v`, the version words and `$data` are read-only. The body never changes length, because the load
+buffer is sized by the caller (`0x1428d3310` takes it in r9d; `0x1428d3564` refuses a bigger save). The
+writer itself emits whitespace between tokens, so the edited text is still the JSON it writes.
+
+## 7. The old build's folders (Import from Triumph)
+
+The owner's fork keeps one folder per container:
+`<saves>\<xuid>\<scid>\<name, made safe>~<FNV-1a 64 of the name>\v<N>\`.
+
+- In each version folder, blob *i* is file *i*, and `manifest` holds length-prefixed (u32 LE) strings:
+  the container name, the display name, then the blob names (data first, then header).
+- The highest `v<N>` is committed; `v<N>.new` is an update that never finished.
+- `triumph::import` reads only. It checks the folder hash against the name, takes the time from the
+  save's stamp (a copied file's time is wrong), checks every container, then writes each one as our
+  `.gsc` through `store::write_container`: backup first, refused while the title runs.
 
 ## 5. Online state
 
@@ -174,11 +310,14 @@ the kind shared online; it is not one of the save containers above and the edito
 None of the containers we know is online state. The editor refuses to write any container whose name
 looks online-related (`store::looks_online`).
 
-## 6. What needs a real save
+## 6. Still open
 
-- the body layout of each kind (game state, settings) and the five undecoded ASAV words;
-- the stamp's unit;
-- `SettingsProfileSettings`' and `Player`'s kinds;
-- that the outer header's +0x18 / +0x1c / +0x20 equal the ASAV copies in a real file (warned, not
-  required, by the editor);
-- the manager's buffer size `[mgr+0x758]`.
+- **Resolved by the real saves (§4):** the stamp's unit, the two kinds, the copies in the header, the
+  layout of both bodies, and the ASAV words (0 for these kinds).
+- **Still open:**
+  - names for the profile's ids and for 166 settings members;
+  - the profile's word +4 (3);
+  - the `general.language` hash's string;
+  - a game-progress save of kinds 1 / 9 (signed, read-only), when one exists;
+  - the callers' buffer sizes (`0x14289dcf7`, `0x14289f89a` read them from globals), which the editor
+    sidesteps by never growing a body.

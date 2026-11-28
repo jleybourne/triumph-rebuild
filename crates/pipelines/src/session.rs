@@ -24,14 +24,13 @@ const HEADER: usize = 8 + 4 + 4 + 4 + 32;
 /// Sessions a pipeline is kept without the title asking for it.
 pub const MAX_AGE: u8 = 8;
 
-/// The default folder for the pipeline cache and the session record: `%LOCALAPPDATA%\triumph-rebuild\pipelines`,
-/// or `REBUILD_PSO_CACHE_DIR` when set.
+/// The default folder for the pipeline cache and the session record: the game's per-build `pipelines` cache
+/// (`rebuild_storage`, `docs/design/storage.md`; the shared one without a game), or `REBUILD_PSO_CACHE_DIR` when set.
 pub fn default_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("REBUILD_PSO_CACHE_DIR") {
         return d.into();
     }
-    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    base.join("triumph-rebuild").join("pipelines")
+    rebuild_storage::cache_dir(rebuild_storage::CacheKind::Pipelines)
 }
 
 /// One remembered pipeline.

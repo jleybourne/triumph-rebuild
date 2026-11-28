@@ -159,8 +159,7 @@ mod tests {
     /// Against the image copy, when it is on this machine: every handler and the natives named so far.
     #[test]
     fn scan_the_image_copy() {
-        let Some(dir) = std::env::var_os("LOCALAPPDATA") else { return };
-        let path = std::path::Path::new(&dir).join(r"triumph-rebuild\images\game_scarlett_master-59e9b414471e3e6d.dll");
+        let Some(path) = rebuild_storage::find_cached_image("game_scarlett_master-59e9b414471e3e6d.dll") else { return };
         let Ok(data) = std::fs::read(&path) else { return };
         let pe = Pe::parse(&data, false).expect("a PE32+ image");
         assert_eq!(pe.image_base, crate::addr::IMAGE_BASE);
