@@ -541,6 +541,13 @@ impl ListState {
                             // SAFETY: inside the heap's bytes (the lookup above), which are the title's memory or ours
                             let w = unsafe { std::slice::from_raw_parts(a.console as *const u32, 16) };
                             tr!("  table words {:08x?}", w);
+                            // a buffer record (CBV 1, SRV 2): its first bytes as the title's memory holds them now
+                            if matches!(w[0], 0x5844_0001 | 0x5844_0002) && w[2] != 0 {
+                                let va = u64::from(w[2]) | u64::from(w[3]) << 32;
+                                // SAFETY: trace only; the record names title memory the list reads
+                                let b = unsafe { std::slice::from_raw_parts(va as *const u32, 16) };
+                                tr!("  buffer {va:#x} words {:08x?}", b);
+                            }
                         }
                         (a.console - h.console_base) as u32
                     }

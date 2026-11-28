@@ -45,6 +45,12 @@ static FIRST: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
 static REFS: AtomicU32 = AtomicU32::new(1);
 /// What the command lists see: resources and descriptors from crates/d3d12x, pipelines from [`Pipelines`].
 static LIST_HOST: OnceLock<std::sync::Arc<dyn rebuild_xlist::console::ListHost>> = OnceLock::new();
+static RESOURCES: OnceLock<rebuild_d3d12x::Resources> = OnceLock::new();
+
+/// The device's resources (diagnostics: `REBUILD_PRESENT_ENTRY`).
+pub fn resources() -> Option<&'static rebuild_d3d12x::Resources> {
+    RESOURCES.get()
+}
 
 /// Events from the resources crate and the lists, printed as they happen (first traps, unknown interfaces,
 /// first occurrences of things worth a line).
@@ -695,6 +701,7 @@ pub fn create(riid: *const [u8; 16], out: *mut *mut c_void) -> i32 {
         rebuild_ffx::host::install_xbox(resources.clone(), &host);
         // pipelines: the program library and the creation pool (workers start now)
         crate::pipeline::start(&host);
+        let _ = RESOURCES.set(resources.clone());
         let _ = LIST_HOST.set(std::sync::Arc::new(rebuild_d3d12x::Host { resources: resources.clone(), pipelines: Pipelines }));
         rebuild_d3d12x::thunks::install(resources);
         // the console object: method table first, byte +0x18 = 1 (calls, not inline work)
