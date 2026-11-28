@@ -21,9 +21,12 @@ This replaces the old layer's ~40 `VICTORY_*` environment variables, which were 
 in the binary, and silently ignored when misspelt. Here an unknown key is reported, a bad value is refused
 with its reason, and the default is always the measured best.
 
-## `rebuild.toml`
+## `rebuild.toml` (a game's `settings.toml`)
 
-Lives beside the launcher, or in `%APPDATA%\triumph-rebuild\`. Never in the game folder.
+Each game's file is `<data>\games\<game-id>\settings.toml` (named `rebuild.toml` before 2026-11-28, and renamed
+once at start). `<data>` is beside the launcher (`<exe dir>\data`, portable) when that folder is writable, else
+`%APPDATA%\triumph-rebuild\` (per-user). It is never in the game folder. Where every file lives, and why:
+[storage.md](storage.md).
 
 ```toml
 profile = "default"
@@ -92,13 +95,14 @@ Test matrix; cards Last run · Target · GPU · System check) and the Running vi
 draws and dropped, internal → output resolution; the frame-time graph with the budget line dashed; where the frame
 goes; the frame line; Capture frame; Stop); Profiles; Settings (search, group pills, Live / Restart / Experimental,
 the save bar); Runs & test matrix; Mods; Diagnostics. The game library is reached from Play ("Change game"). Both
-themes are the approved palettes; `launcher.theme` is saved launcher-wide in `<app home>/launcher.toml`, not per
-game. A value nothing has measured shows "—". The launcher still requests no frame while idle.
+themes are the approved palettes; `launcher.theme` is saved launcher-wide in `<data>/launcher.toml`, not per
+game (so is `storage.cache_dir`, [storage.md](storage.md)). A value nothing has measured shows "—". The launcher still requests no frame while idle.
 
-**The session folder** (`apps/launcher/src/session.rs`). One per launch, under the game's own launcher folder:
+**The session folder** (`apps/launcher/src/session.rs`). One per launch, under the game's logs (the local root,
+[storage.md](storage.md); before 2026-11-28 `<app home>/games/<id>/sessions/`, moved once at start):
 
 ```text
-<app home>/games/<id>/sessions/<UTC stamp>-<profile>/      e.g. 20261127T153012Z-series-x  (-2, -3 if taken)
+<local>/logs/<game-id>/<UTC stamp>-<profile>/      e.g. 20261127T153012Z-series-x  (-2, -3 if taken)
   session.toml      LAUNCHER: [session] at launch, [end] when the child exits (see below)
   rebuild.toml      LAUNCHER, matrix runs only: the configuration that run used (--config points here)
   frame-line.log    LAYER: the frame line, one line a second (REBUILD_FRAME_LOG points here)
@@ -113,6 +117,8 @@ Environment the launcher gives the child (on top of `--config <path>` and the `R
 | variable | when | meaning |
 |:--|:--|:--|
 | `REBUILD_SESSION_DIR` | every launch (and proof runs) | the session folder, absolute; it exists and holds only `session.toml` (and `rebuild.toml` for a matrix run) |
+| `REBUILD_DATA_DIR`, `REBUILD_LOCAL_DIR`, `REBUILD_CACHE_DIR` | every launch | the launcher's resolved roots ([storage.md](storage.md)), so the layer uses exactly the folders the launcher shows |
+| `REBUILD_GAME_ID`, `REBUILD_GAME_BUILD` | every launch with a game selected | the library's id for the game and its build: the layer's saves, storage, overlay and caches are that game's |
 | `REBUILD_FRAME_LOG` | every launch | `<session>/frame-line.log`, unless `diagnostics.frame_log_path` is set (then that path, which the launcher tails instead) |
 | `REBUILD_RUN_SECONDS` | test matrix runs | the run length; the layer should write `summary.toml` and exit after it. The launcher stops the process 20 s later if it hasn't |
 | `REBUILD_MEASURE_FROM` | test matrix runs | `title_start` or `after_loading`: where the summary's measuring window starts |
@@ -262,6 +268,18 @@ and keeps the rest, first run only once and never over a choice, detection on th
 `a_new_game_gets_the_recommendation_once_and_the_users_choice_stays` (a new game set up and saved; the user's 1080p
 kept through new specs and a restart; a built-in chosen first is kept; Apply restores it unsaved; Play and
 Diagnostics draw).
+
+## Storage: saves, caches, export and import (2026-11-28)
+
+The owner asked whether there should be a games folder in the launcher's own folder for saves, caches and the files
+that are compiled on disk. Yes, decided and built in `crates/storage` ([storage.md](storage.md)). Everything is in
+one data root, portable beside the launcher by default and per-user when that folder is read-only. Each game has
+one folder (`games\<game-id>\`, keyed by its package identity, so a moved game keeps its saves). Saves and caches
+are strictly apart: clearing caches never touches a save. Existing files are migrated once; saves are copied,
+verified, and the old files kept. **Diagnostics → Storage** shows portable or per-user, the folders and each part's
+size, Open folder, Clear old builds and Clear cache, and **Export / Import** of saves and settings: a `.zip` with a
+manifest, checked before anything changes, refused while the title runs or for another game, and the current saves
+backed up automatically first.
 
 ## Mods
 

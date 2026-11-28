@@ -22,6 +22,16 @@ fn err<E: std::fmt::Display>(what: &'static str) -> impl Fn(E) -> String {
     move |e| format!("{what}: {e}")
 }
 
+/// One tile of a reserved texture: its subresource, its tile coordinate there, its index in the subresource's tile
+/// order (X, then Y, then Z), and the card page it goes onto (`None`: unmapped).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TexTile {
+    pub sub: u32,
+    pub coord: [u32; 3],
+    pub index: u32,
+    pub card: Option<u32>,
+}
+
 pub struct Space {
     pub device: ID3D12Device,
     pub queue: ID3D12CommandQueue,
@@ -158,6 +168,83 @@ impl Space {
             self.update(resource, &group, Some(h))?;
         }
         Ok(())
+    }
+
+    /// Map a reserved texture's tiles, each onto a card page or unmapped (`None`: reads zero). `tiles` in the
+    /// texture's tile order; consecutive tiles of one subresource onto consecutive card pages of one heap go as one
+    /// range.
+    pub fn map_tiles(&mut self, resource: &ID3D12Resource, tiles: &[TexTile]) -> Result<(), String> {
+        // runs: (first tile, count, card of the first or none)
+        let mut runs: Vec<(TexTile, u32)> = Vec::new();
+        for t in tiles {
+            if let Some((r, n)) = runs.last_mut() {
+                let next = r.index + *n == t.index && r.sub == t.sub;
+                let cards = match (r.card, t.card) {
+                    (Some(a), Some(b)) => a / HEAP_TILES == b / HEAP_TILES && a + *n == b,
+                    (None, None) => true,
+                    _ => false,
+                };
+                if next && cards {
+                    *n += 1;
+                    continue;
+                }
+            }
+            runs.push((*t, 1));
+        }
+        if let Some(max) = runs.iter().filter_map(|(r, _)| r.card).map(|c| c / HEAP_TILES).max() {
+            self.ensure_heap(max)?;
+        }
+        let coord = |t: &TexTile| D3D12_TILED_RESOURCE_COORDINATE { X: t.coord[0], Y: t.coord[1], Z: t.coord[2], Subresource: t.sub };
+        let size = |n: u32| D3D12_TILE_REGION_SIZE { NumTiles: n, UseBox: false.into(), Width: 0, Height: 0, Depth: 0 };
+        // unmapped runs: one call
+        let nulls: Vec<&(TexTile, u32)> = runs.iter().filter(|(r, _)| r.card.is_none()).collect();
+        if !nulls.is_empty() {
+            let coords: Vec<_> = nulls.iter().map(|(r, _)| coord(r)).collect();
+            let sizes: Vec<_> = nulls.iter().map(|(_, n)| size(*n)).collect();
+            let flags = vec![D3D12_TILE_RANGE_FLAG_NULL; nulls.len()];
+            let counts: Vec<u32> = nulls.iter().map(|(_, n)| *n).collect();
+            unsafe {
+                self.queue.UpdateTileMappings(
+                    resource,
+                    coords.len() as u32,
+                    Some(coords.as_ptr()),
+                    Some(sizes.as_ptr()),
+                    None::<&ID3D12Heap>,
+                    flags.len() as u32,
+                    Some(flags.as_ptr()),
+                    None,
+                    Some(counts.as_ptr()),
+                    D3D12_TILE_MAPPING_FLAG_NONE,
+                )
+            };
+        }
+        // mapped runs: one call per heap
+        let mut heaps: Vec<u32> = runs.iter().filter_map(|(r, _)| r.card).map(|c| c / HEAP_TILES).collect();
+        heaps.sort_unstable();
+        heaps.dedup();
+        for h in heaps {
+            let group: Vec<&(TexTile, u32)> = runs.iter().filter(|(r, _)| r.card.is_some_and(|c| c / HEAP_TILES == h)).collect();
+            let coords: Vec<_> = group.iter().map(|(r, _)| coord(r)).collect();
+            let sizes: Vec<_> = group.iter().map(|(_, n)| size(*n)).collect();
+            let flags = vec![D3D12_TILE_RANGE_FLAG_NONE; group.len()];
+            let offsets: Vec<u32> = group.iter().map(|(r, _)| r.card.unwrap_or(0) % HEAP_TILES).collect();
+            let counts: Vec<u32> = group.iter().map(|(_, n)| *n).collect();
+            unsafe {
+                self.queue.UpdateTileMappings(
+                    resource,
+                    coords.len() as u32,
+                    Some(coords.as_ptr()),
+                    Some(sizes.as_ptr()),
+                    &self.heaps[h as usize],
+                    flags.len() as u32,
+                    Some(flags.as_ptr()),
+                    Some(offsets.as_ptr()),
+                    Some(counts.as_ptr()),
+                    D3D12_TILE_MAPPING_FLAG_NONE,
+                )
+            };
+        }
+        unsafe { self.device.GetDeviceRemovedReason() }.map_err(err("device removed after mapping texture tiles"))
     }
 
     fn update(&self, resource: &ID3D12Resource, group: &[Run], heap: Option<u32>) -> Result<(), String> {

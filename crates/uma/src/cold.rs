@@ -523,6 +523,33 @@ pub fn enabled() -> bool {
     ENABLED.load(SeqCst)
 }
 
+/// The slice table outlives the memory it covers (a slice freed and made again at one address keeps its
+/// `hot_until` and `last_dirty`), and its tests pick free addresses to allocate at: the tests that make slices
+/// cold (here and in `ring`) run one at a time.
+#[cfg(test)]
+pub(crate) static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
+/// Tests: `VirtualAlloc(kind, protect)` of `len` bytes at a [`SLICE`]-aligned address, so the memory owns its
+/// slices (nothing another test allocates shares them). The free address found may be taken by another thread
+/// before the allocation lands: then it looks again.
+#[cfg(test)]
+pub(crate) fn alloc_aligned(len: usize, kind: VIRTUAL_ALLOCATION_TYPE, protect: PAGE_PROTECTION_FLAGS) -> u64 {
+    for _ in 0..1000 {
+        let r = unsafe { VirtualAlloc(None, len + SLICE, MEM_RESERVE, PAGE_NOACCESS) } as u64;
+        assert_ne!(r, 0, "reserve {} MiB", (len + SLICE) >> 20);
+        unsafe { VirtualFree(r as *mut c_void, 0, MEM_RELEASE).unwrap() };
+        let at = r.div_ceil(SLICE as u64) * SLICE as u64;
+        let p = unsafe { VirtualAlloc(Some(at as *const c_void), len, kind, protect) } as u64;
+        if p == at {
+            return p;
+        }
+        if p != 0 {
+            unsafe { VirtualFree(p as *mut c_void, 0, MEM_RELEASE).unwrap() };
+        }
+    }
+    panic!("no {SLICE:#x}-aligned room for {len:#x} bytes in 1000 tries");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,16 +566,16 @@ mod tests {
 
     /// Aligned watched memory of two slices.
     fn region() -> u64 {
-        let r = unsafe { VirtualAlloc(None, 3 * SLICE, MEM_RESERVE, PAGE_NOACCESS) } as u64;
-        unsafe { VirtualFree(r as *mut c_void, 0, MEM_RELEASE).unwrap() };
-        let at = r.div_ceil(SLICE as u64) * SLICE as u64;
-        let p = unsafe { VirtualAlloc(Some(at as *const c_void), 2 * SLICE, MEM_RESERVE | MEM_COMMIT | WW, PAGE_READWRITE) } as u64;
-        assert_eq!(p, at);
-        p
+        alloc_aligned(2 * SLICE, MEM_RESERVE | MEM_COMMIT | WW, PAGE_READWRITE)
+    }
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     #[test]
     fn a_write_into_a_cold_slice_faults_once_and_is_seen_by_write_watch() {
+        let _g = serial();
         enable();
         let p = region();
         let s = slice(p, true).unwrap();
@@ -573,6 +600,7 @@ mod tests {
 
     #[test]
     fn a_kernel_write_into_a_cold_slice_succeeds_after_the_guard() {
+        let _g = serial();
         enable();
         let p = region();
         let s = slice(p + SLICE as u64, true).unwrap();
@@ -599,11 +627,9 @@ mod tests {
 
     #[test]
     fn a_commit_into_a_cold_slice_turns_it_hot() {
+        let _g = serial();
         enable();
-        let r = unsafe { VirtualAlloc(None, 3 * SLICE, MEM_RESERVE, PAGE_NOACCESS) } as u64;
-        unsafe { VirtualFree(r as *mut c_void, 0, MEM_RELEASE).unwrap() };
-        let p = r.div_ceil(SLICE as u64) * SLICE as u64;
-        assert_eq!(unsafe { VirtualAlloc(Some(p as *const c_void), SLICE, MEM_RESERVE | WW, PAGE_READWRITE) } as u64, p);
+        let p = alloc_aligned(SLICE, MEM_RESERVE | WW, PAGE_READWRITE);
         unsafe { VirtualAlloc(Some(p as *const c_void), BLOCK, MEM_COMMIT, PAGE_READWRITE) };
         let s = slice(p, true).unwrap();
         assert!(s.go_cold(&[(p, p + SLICE as u64)], |_, _| {}), "a partly committed slice goes cold");
@@ -616,12 +642,10 @@ mod tests {
 
     #[test]
     fn write_copy_or_odd_protection_is_never_made_cold() {
+        let _g = serial();
         enable();
-        let r = unsafe { VirtualAlloc(None, 2 * SLICE, MEM_RESERVE, PAGE_NOACCESS) } as u64;
-        unsafe { VirtualFree(r as *mut c_void, 0, MEM_RELEASE).unwrap() };
-        let p = r.div_ceil(SLICE as u64) * SLICE as u64;
         // reserved no-access, committed read-write: not answered from the descriptor (VirtualQuery's way)
-        assert_eq!(unsafe { VirtualAlloc(Some(p as *const c_void), BLOCK, MEM_RESERVE, PAGE_NOACCESS) } as u64, p);
+        let p = alloc_aligned(BLOCK, MEM_RESERVE, PAGE_NOACCESS);
         unsafe { VirtualAlloc(Some(p as *const c_void), BLOCK, MEM_COMMIT, PAGE_READWRITE) };
         let mut old = PAGE_PROTECTION_FLAGS(0);
         // a 4 KiB writable page in a read-only block: not whole blocks

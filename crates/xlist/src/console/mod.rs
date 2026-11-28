@@ -13,14 +13,20 @@
 //! bytes are the console layout (`agents/d3d12x-object-layouts.csv`): the vtable at +0x00, the
 //! list type at +0x10, the put pointer and the four packet limits at +0x18..+0x40 **all zero**, so
 //! the title's inline packet writer always falls back to a call, and the title's own fields (root
-//! headers, the pipeline shadow at +0x544) are left to it. Our recording state starts at +0x960.
+//! headers, the pipeline shadow at +0x544) are left to it. Our recording state starts at the next 64-byte line (+0x980).
 //!
-//! **Every call is translated as it arrives**, on the thread that records (plan decision 3), into a
-//! host `ID3D12GraphicsCommandList`: console objects become host objects through [`ListHost`] (the
-//! lead's resources, heaps and pipelines), console addresses become host GPU addresses through
-//! [`MemoryRange`]s (one cached range, so the common case is a subtract and a compare), and a set
-//! that repeats what is bound is dropped, as in [`crate::translate`]. Arguments that point into the
-//! title's stack (barrier arrays, viewports) are consumed during the call, so nothing is copied.
+//! **Each list is translated at Close, on the thread that records it** (plan decision 3; Build 6,
+//! [`mode`]), into a host `ID3D12GraphicsCommandList`. The calls that set state, draw or dispatch are
+//! kept as 32-byte records as they arrive (what their arguments point to, in the title's stack, copied
+//! beside them); Close translates the list in one pass, so the translator and the driver run back to
+//! back instead of between the title's own work (`runs/build6-lists.md`: 13-36 % less on the card).
+//! Every other call (targets, clears, copies, labels, waits) translates what is kept first and then
+//! runs as it arrives, so every call sees the list as the title recorded it. `REBUILD_XLATE=call`
+//! translates every call as it arrives instead. Console objects become host objects through
+//! [`ListHost`] (the lead's resources, heaps and pipelines), console addresses become host GPU
+//! addresses through [`MemoryRange`]s (one cached range, so the common case is a subtract and a
+//! compare), and a set that repeats what is bound is dropped, as in [`crate::translate`]. The cost on
+//! the recording threads is measured inside the list functions ([`cost`]) for the frame line.
 //!
 //! **Every slot of the 160 exists.** Slots we implement call into the translator; every other
 //! slot is a trap that counts calls, records the first call's time and tells
@@ -36,6 +42,7 @@
 #![cfg(windows)]
 
 mod alloc;
+pub mod bench;
 pub mod indirect;
 mod list;
 pub mod pages;
@@ -56,7 +63,7 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
 
 pub use alloc::{create_allocator, host_allocator, upload_range};
-pub use list::{create_list, TWIN_COPIES, CLOSE_FAILED, INDIRECT, INDIRECT_REFUSED, NO_HEAP_TABLES, NO_SHADOW, RECTS_EXPANDED, RECTS_DROPPED, STAMP_LABELS, forget_bound_state, host_list, segments, skip, stats, sync_descriptors, trace, HostList, ListStats, Segment};
+pub use list::{by_slot, cost, create_list, mix, mode, TWIN_COPIES, CLOSE_FAILED, INDIRECT, INDIRECT_REFUSED, NO_HEAP_TABLES, NO_SHADOW, RECTS_EXPANDED, RECTS_DROPPED, STAMP_LABELS, forget_bound_state, host_list, segments, skip, stats, sync_descriptors, trace, HostList, ListStats, Segment};
 pub use twin::UavTwin;
 pub use slots::{allocator_slots, list_slots, traps, Returns, SlotInfo, SlotKind, Trap, ALLOCATOR_SLOTS, LIST_SLOTS};
 
@@ -447,6 +454,11 @@ pub trait ListHost: PipelineSource + Send + Sync {
     /// A console texture whose host resource lost the unordered access the console gave it (a depth target):
     /// its host depth texture and the twin its UAVs write ([`twin`]). `None` for every other resource.
     fn uav_twin(&self, _console: Raw) -> Option<UavTwin> {
+        None
+    }
+    /// The host resource the UAV at console CPU handle `cpu` views, when it is not `console`'s own host resource
+    /// (a twin, [`twin`]): a UAV clear must name it. `None`: the resource's own.
+    fn uav_resource(&self, _console: Raw, _cpu: usize) -> Option<Raw> {
         None
     }
     /// A console descriptor heap (device 0x70) bound by `SetDescriptorHeaps`.

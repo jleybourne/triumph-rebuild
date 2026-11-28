@@ -4,7 +4,7 @@
 built around the right memory model from the first line, aiming at 30 frames a second.</b></p>
 
 <p align="center">
-  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-70%25-yellow?style=for-the-badge"></a>
+  <a href="progress.md"><img alt="progress" src="https://img.shields.io/badge/progress-71%25-yellow?style=for-the-badge"></a>
   <a href="progress.md"><img alt="frame" src="https://img.shields.io/badge/frame%202-presented-blue?style=for-the-badge"></a>
   <a href="tasks.md"><img alt="shaders" src="https://img.shields.io/badge/shaders-5%2C195%20%2F%2025%2C694-yellow?style=for-the-badge"></a>
   <a href="plan.md"><img alt="target" src="https://img.shields.io/badge/target-30%20fps-blue?style=for-the-badge"></a>
@@ -14,17 +14,18 @@ built around the right memory model from the first line, aiming at 30 frames a s
   <a href="https://www.rust-lang.org"><img alt="Rust" src="https://img.shields.io/badge/Rust-1.100-000000?logo=rust"></a>
   <a href="https://learn.microsoft.com/windows/win32/direct3d12/directx-12-programming-guide"><img alt="Direct3D 12" src="https://img.shields.io/badge/Direct3D-12-0078D4"></a>
   <a href="HANDOFF.md"><img alt="GPU" src="https://img.shields.io/badge/tested%20on-RTX%204070%20Ti-76B900?logo=nvidia"></a>
-  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-669%20green-brightgreen"></a>
+  <a href="runs/README.md"><img alt="tests" src="https://img.shields.io/badge/tests-800%20green-brightgreen"></a>
   <a href="LICENSE"><img alt="licence" src="https://img.shields.io/badge/licence-GPL--3.0--only-blue"></a>
 </p>
 
-<p align="center"><a href="progress.md"><b>Progress <code>██████████████░░░░░░</code> 70 %</b></a><br>
-<sub>work toward 30 fps, weighted by build step · Build 5 (first frame) <code>███████████████████░</code> 95 % · the title's menus on the card</sub></p>
+<p align="center"><a href="progress.md"><b>Progress <code>██████████████░░░░░░</code> 71 %</b></a><br>
+<sub>work toward 30 fps, weighted by build step · Build 5 (first frame) <code>████████████████████</code> 98 % · the title's menus readable at 30 fps, intro video playing</sub></p>
 
 <table align="center">
   <tr>
+    <td align="center"><a href="FEATURES.md"><b>✨ Features</b></a><br><sub>what works, what's being built</sub></td>
     <td align="center"><a href="progress.md"><b>📈 Progress</b></a><br><sub>done, not done, one entry per upload</sub></td>
-    <td align="center"><a href="plan.md"><b>🗺️ The plan</b></a><br><sub>nine decisions, Builds 0-9</sub></td>
+    <td align="center"><a href="plan.md"><b>🗺️ The plan</b></a><br><sub>the decisions, Builds 0-9</sub></td>
     <td align="center"><a href="tasks.md"><b>✅ Tasks</b></a><br><sub>every task and the number that closes it</sub></td>
     <td align="center"><a href="runs/README.md"><b>📊 Runs</b></a><br><sub>every measurement, raw output beside it</sub></td>
     <td align="center"><a href="HANDOFF.md"><b>🔍 Review brief</b></a><br><sub>for an independent reviewer</sub></td>
@@ -50,13 +51,13 @@ Measured on one machine: i7-10700KF, RTX 4070 Ti 12 GB, 64 GB RAM, PCIe 3.0, Win
 
 | | now | target |
 |:--|:--|:--|
-| **Title frame** | not yet, but **the title's own code runs**: 16/16 DLL entry points, its exe entry for 60 s, no crash ([run](runs/build3-startup.md)); it waits before its first render call | **30 fps · 33.3 ms** at ~4,500 draws, stated resolution and upscaler mode |
+| **Title frame** | ✅ the intro video and first-run menus, readable, at the title's 30 fps cap (~260 unlimited); gameplay not reached yet | **30 fps · 33.3 ms** at ~4,500 draws, stated resolution and upscaler mode |
 | **Memory** | ✅ tiles at console addresses, sharing by address, 10 GiB committed with 0 wrong ([Build 1](runs/build1-tiles.md)) | no copy-back, ever |
 | **CPU → GPU upload** | ✅ the ring: submit thread 32 µs a frame; 34 MB lands in 19 ms on workers, verified ([Build 2](runs/build2-ring.md)) | inside a frame, overlapped |
 | **List translation** | ✅ 0.43 µs a draw with the driver, 1.9 ms a frame ([Build 0 b](runs/build0b-lists.md)) | ≤ 7.4 µs a draw |
 | **Descriptors** | ✅ 12,027 a frame from a dirty list: 2.0 ms | no scan |
-| **Shaders** | 0 / 25,694; core proven on the card: IR → HLSL → DXC → GPU exact, wave64 on wave32 exact ([run](runs/build4-sirtest.md)) | 25,694, wave32, 0 refused |
-| **Launcher** | settings registry built (30 options, validated); desktop launcher in progress ([design](docs/design/launcher.md)) | launcher, mods, profiles, in-game menu |
+| **Shaders** | 12,981 / 25,694 compile, 5,195 checked bit-exact on WARP ([exec](runs/build4-exec.md)) | 25,694, wave32, 0 refused |
+| **Launcher** | ✅ library, recommended settings for the PC, profiles, mods, save editor, storage with export/import, in-game menu ([features](FEATURES.md)) | launcher, mods, profiles, in-game menu |
 | **Upscaler** | ✅ DLSS runs standalone through Streamline on a synthetic scene; FSR next; wiring to the title in Build 7 | DLSS on NVIDIA, FSR on AMD |
 | **Tests** | 637 green, 14 ignored (`runtime` 68, `launcher` 60, `sir` 58, `pipelines` 54, `gdk` 49, `shader` 42, `d3d12x` 30, `uma` 28, `xlist` 28, `overlay` 27, `config` 23, `dstorage` 22, `vfs` 19, `audio` 18, `input` 18, `loader` 18, `xg` 15, `cardlock` 11, `upscale` 11, `winfiles` 11, `devmenu` 10, `ffx` 9, `rebuild` 8) | |
 
@@ -181,7 +182,7 @@ Full status with outcomes: **[tasks](tasks.md)** · **[progress](progress.md)**.
 Requirements: Windows 10/11 x64, a Direct3D 12 GPU with tiled resources tier 2 or higher, and Rust.
 
 ```powershell
-cargo test --release                                  # 669 tests, no game data needed (GPU tests use WARP or skip)
+cargo test --release                                  # 800 tests, no game data needed (GPU tests use WARP or skip)
 cargo run --release --bin gputest                     # the GPU writes, the CPU reads, no copy
 cargo run --release --bin gputest -- --bare           # control: never blame the machine
 cargo run --release --bin gputest -- --tiled          # Build 1: tiles, console addresses, sharing

@@ -11,7 +11,8 @@
 //! - **Size cap:** oldest first by last use (a hit refreshes the file's time) once the total passes the cap.
 //! - **Small outputs are not cached:** below [`Cache::min_bytes`] decoding is cheaper than opening a file.
 //!
-//! Location: `REBUILD_BCPACK_CACHE`, default `%LOCALAPPDATA%\triumph-rebuild\bcpack-cache` (outside git);
+//! Location: `REBUILD_BCPACK_CACHE`, default the game's `cache\bcpack` (`rebuild_storage`; content-keyed, so kept
+//! across game builds) or the shared cache without a game (outside git);
 //! `off` disables it. Cap: `REBUILD_BCPACK_CACHE_MB` (default 8192).
 
 use std::collections::HashMap;
@@ -154,7 +155,7 @@ impl Cache {
         let dir = match std::env::var_os("REBUILD_BCPACK_CACHE") {
             Some(v) if v == "off" => return None,
             Some(v) if !v.is_empty() => PathBuf::from(v),
-            _ => PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("triumph-rebuild").join("bcpack-cache"),
+            _ => rebuild_storage::cache_dir(rebuild_storage::CacheKind::BcPack),
         };
         let cap = std::env::var("REBUILD_BCPACK_CACHE_MB").ok().and_then(|v| v.parse::<u64>().ok()).map_or(DEFAULT_CAP, |mb| mb << 20);
         match Cache::open(&dir, cap) {

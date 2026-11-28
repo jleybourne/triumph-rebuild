@@ -720,6 +720,7 @@ type Dispatch3 = unsafe extern "system" fn(Raw, u32, u32, u32);
 
 /// The root-constant writes a host list received since `from`: (host slot, parameter, words).
 fn words_since(f: &Fake, from: usize) -> Vec<(usize, u32, Vec<u32>)> {
+    f.sync();
     f.words.lock().unwrap()[from..].iter().map(|(s, p, w, o)| {
         assert_eq!(*o, 0, "written from dword 0");
         (*s, *p, w.clone())
@@ -795,11 +796,15 @@ fn a_titles_root_constants_and_tables_land_in_the_library_layout() {
     assert!(st.user_unset >= 4, "{st:?}");
     assert_eq!(gfx.slots, 0b11110, "the slots the map reads");
 
-    // before submission: the tables the programs read are synced (views 5..8 and 9..12 of the view heap, one
-    // sampler)
-    assert_eq!(sync_descriptors(l), 7 + 0);
+    // before submission: the tables the programs read are synced, each as it is (views 5..8 and 9..12 of the view
+    // heap, not the slot between them; one sampler)
+    assert_eq!(sync_descriptors(l), 6 + 0);
     let synced = h.synced.lock().unwrap().clone();
-    assert_eq!(synced, vec![(SEAM_BASE + 5 * 32, 7 * 32), (SAMPLER_BASE + 3 * 16, 16)]);
+    assert_eq!(synced, vec![(SEAM_BASE + 5 * 32, 3 * 32), (SEAM_BASE + 9 * 32, 3 * 32), (SAMPLER_BASE + 3 * 16, 16)]);
+    // a second submission of the same list syncs the same tables again
+    h.synced.lock().unwrap().clear();
+    assert_eq!(sync_descriptors(l), 6);
+    assert_eq!(h.synced.lock().unwrap().len(), 3);
     assert_eq!(release(l), 0);
     assert_eq!(release(a), 0);
 }
@@ -838,139 +843,13 @@ fn a_dispatch_writes_the_compute_layout_and_a_cut_writes_it_again() {
     assert_eq!(release(a), 0);
 }
 
-// ---- the frame of Build 0 (b) as console calls ----
+// ---- the frame of Build 0 (b) as console calls: `super::bench` ----
 
-/// Console tokens the bench host knows.
-const BENCH_HEAP: Raw = 0xD000 as Raw;
-const BENCH_ROOT: Raw = 0x5160 as Raw;
-const BENCH_RTV: usize = 0xC000;
-const BENCH_MEMORY: Raw = 0xE000 as Raw;
-const BENCH_SIGNATURE: Raw = 0xF000 as Raw;
-
-struct BenchHost {
-    pipelines: crate::PipelineTable,
-    pso: Vec<usize>,
-    root: usize,
-    heap: HeapBinding,
-    memory: MemoryRange,
-    targets: Vec<u64>,
-    target_raw: Vec<usize>,
-    rtv: usize,
-    indirect: usize,
-    user: Option<&'static UserMap>,
-}
-unsafe impl Send for BenchHost {}
-unsafe impl Sync for BenchHost {}
-
-impl BenchHost {
-    fn for_layout(lay: &crate::frame::Layout, setup: Option<&crate::d3d::Setup>) -> BenchHost {
-        let n = lay.pipeline_handles.len();
-        let slots = crate::frame::Shape::default().descriptor_slots;
-        BenchHost {
-            pipelines: crate::PipelineTable::new(&lay.pipeline_handles),
-            pso: (0..n).map(|i| setup.map_or(0x10_0000 + i, |s| s.pipeline_raw(i) as usize)).collect(),
-            root: setup.map_or(0x5161, |s| s.signature_raw() as usize),
-            heap: HeapBinding {
-                heap: setup.map_or(0x4EA9 as Raw, |s| s.heap_raw()),
-                console_base: lay.descriptor_base,
-                console_bytes: slots * crate::CONSOLE_DESCRIPTOR,
-                console_stride: 32,
-                host_base: setup.map_or(0x9_0000_0000, |s| s.heap_gpu_start()),
-                host_stride: setup.map_or(32, |s| s.view_increment()),
-                shadow_va: 0,
-                pages: None,
-            },
-            memory: MemoryRange {
-                console: lay.memory_base,
-                bytes: 64 << 20,
-                host_va: setup.map_or(0x7_0000_0000, |s| s.memory_va()),
-                resource: setup.map_or(0x77 as Raw, |s| s.memory_raw()),
-                resource_offset: 0,
-            },
-            targets: lay.barrier_targets.clone(),
-            target_raw: (0..lay.barrier_targets.len()).map(|i| setup.map_or(0x4000 + i, |s| s.target_raw(i) as usize)).collect(),
-            rtv: setup.map_or(0xC100, |s| s.rtv_cpu()),
-            indirect: setup.map_or(0x5160, |s| s.indirect_raw() as usize),
-            user: None,
-        }
-    }
-}
-
-impl PipelineSource for BenchHost {
-    fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
-        let i = self.pipelines.get(console as u64)?;
-        Some(HostPipeline { pso: self.pso[i as usize] as Raw, root_signature: self.root as Raw, compute: false, user: self.user, topology: 0, rects: false })
-    }
-}
-
-impl ListHost for BenchHost {
-    fn root_signature(&self, console: Raw) -> Option<Raw> {
-        (console == BENCH_ROOT).then_some(self.root as Raw)
-    }
-    fn resource(&self, console: Raw) -> Option<Raw> {
-        if console == BENCH_MEMORY {
-            return Some(self.memory.resource);
-        }
-        self.targets.binary_search(&(console as u64)).ok().map(|i| self.target_raw[i] as Raw)
-    }
-    fn descriptor_heap(&self, console: Raw) -> Option<HeapBinding> {
-        (console == BENCH_HEAP).then_some(self.heap)
-    }
-    fn cpu_descriptor(&self, console: usize) -> Option<usize> {
-        (console == BENCH_RTV).then_some(self.rtv)
-    }
-    fn command_signature(&self, console: Raw) -> Option<HostSignature> {
-        (console == BENCH_SIGNATURE).then_some(draw_signature(self.indirect as Raw))
-    }
-    fn memory(&self, va: u64) -> Option<MemoryRange> {
-        self.memory.map(va).map(|_| self.memory)
-    }
-}
+use super::bench::BenchHost;
 
 /// Reset `l` on `a` and record `cmds` through the console table, as the title would.
 unsafe fn record(l: Raw, a: Raw, cmds: &[crate::Cmd], lay: &crate::frame::Layout) {
-    use crate::Cmd;
-    unsafe {
-        let _ = method::<Hr0>(a, 0x40)(a);
-        let _ = method::<unsafe extern "system" fn(Raw, Raw, Raw) -> HRESULT>(l, 0x50)(l, a, std::ptr::null_mut());
-        method::<unsafe extern "system" fn(Raw, u32, *const Raw)>(l, 0x100)(l, 1, &BENCH_HEAP);
-        method::<unsafe extern "system" fn(Raw, Raw)>(l, 0x110)(l, BENCH_ROOT);
-        let rt = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: BENCH_RTV };
-        method::<unsafe extern "system" fn(Raw, u32, *const D3D12_CPU_DESCRIPTOR_HANDLE, BOOL, *const D3D12_CPU_DESCRIPTOR_HANDLE)>(l, 0x190)(l, 1, &rt, BOOL(0), std::ptr::null());
-        let vp = D3D12_VIEWPORT { Width: 64.0, Height: 64.0, MaxDepth: 1.0, ..Default::default() };
-        method::<unsafe extern "system" fn(Raw, u32, *const D3D12_VIEWPORT)>(l, 0xa8)(l, 1, &vp);
-        let sc = RECT { left: 0, top: 0, right: 64, bottom: 64 };
-        method::<unsafe extern "system" fn(Raw, u32, *const RECT)>(l, 0xb0)(l, 1, &sc);
-        method::<unsafe extern "system" fn(Raw, i32)>(l, 0xa0)(l, 4);
-
-        let set_pipeline = method::<unsafe extern "system" fn(Raw, Raw)>(l, 0xc8);
-        let table = method::<unsafe extern "system" fn(Raw, u32, u64)>(l, 0x120);
-        let cbv = method::<unsafe extern "system" fn(Raw, u32, u64)>(l, 0x150);
-        let consts = method::<unsafe extern "system" fn(Raw, u32, u32, *const u32, u32)>(l, 0x140);
-        let vb = method::<unsafe extern "system" fn(Raw, u32, u32, *const D3D12_VERTEX_BUFFER_VIEW)>(l, 0x180);
-        let ib = method::<unsafe extern "system" fn(Raw, *const D3D12_INDEX_BUFFER_VIEW)>(l, 0x178);
-        let barrier = method::<unsafe extern "system" fn(Raw, u32, *const ConsoleBarrier) -> u32>(l, 0xd0);
-        let draw = method::<unsafe extern "system" fn(Raw, u32, u32, u32, i32, u32)>(l, 0x68);
-        let indirect = method::<unsafe extern "system" fn(Raw, Raw, u32, Raw, u64, Raw, u64)>(l, 0x1e8);
-        for c in cmds {
-            match *c {
-                Cmd::SetPipeline(h) => set_pipeline(l, h as Raw),
-                Cmd::SetTable(slot, va) => table(l, slot as u32, va),
-                Cmd::SetCbv(_, va) => cbv(l, 2, va),
-                Cmd::SetConstants(v) => consts(l, 3, 4, v.as_ptr(), 0),
-                Cmd::SetVertexBuffer(va, bytes, stride) => {
-                    vb(l, 0, 1, &D3D12_VERTEX_BUFFER_VIEW { BufferLocation: va, SizeInBytes: bytes, StrideInBytes: stride })
-                }
-                Cmd::SetIndexBuffer(va, bytes) => ib(l, &D3D12_INDEX_BUFFER_VIEW { BufferLocation: va, SizeInBytes: bytes, Format: DXGI_FORMAT_R16_UINT }),
-                Cmd::Barrier(va) => {
-                    let _ = barrier(l, 1, &ConsoleBarrier { kind: 2, flags: 0, a: va as Raw, b: 0, c: 0 });
-                }
-                Cmd::Draw(n, i, f) => draw(l, n, i, f, 0, 0),
-                Cmd::DrawIndirect(va, count) => indirect(l, BENCH_SIGNATURE, count, BENCH_MEMORY, va - lay.memory_base, std::ptr::null_mut(), 0),
-            }
-        }
-        let _ = method::<Hr0>(l, 0x48)(l);
-    }
+    unsafe { super::bench::record(l, a, cmds, lay, &mut || {}) }
 }
 
 // ---- ExecuteIndirect: a signature runs only under the root it fits ----

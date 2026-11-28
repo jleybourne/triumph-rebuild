@@ -3,17 +3,18 @@
 //! game's own files at run time; nothing about any title is written in this code.
 //!
 //! ```text
-//! <app home>/library.toml              the list: id, folder, name, detector; which one is selected
-//! <app home>/games/<id>/rebuild.toml   that game's settings (game.dir = its folder)
-//! <app home>/games/<id>/profiles/      its profiles
-//! <app home>/games/<id>/mods/          its mods
-//! <app home>/games/<id>/overlay/       its write overlay (the title settings copy)
-//! <app home>/games/<id>/frame-line.log its frame line
+//! <data>/library.toml                  the list: id, folder, name, detector; which one is selected
+//! <data>/games/<id>/settings.toml      that game's settings (game.dir = its folder)
+//! <data>/games/<id>/profiles/          its profiles
+//! <data>/games/<id>/mods/              its mods
+//! <data>/games/<id>/overlay/           its write overlay (the title settings copy)
+//! <data>/games/<id>/saves/, storage/   its saves and the title's storage (docs/design/storage.md)
 //! ```
 //!
-//! The id is a hash of the folder's absolute path, so adding the same folder twice is refused. Removing
-//! a game removes its library entry and, when asked, its `games/<id>` folder; the game folder itself is
-//! only ever read.
+//! The id is the game's package identity (`rebuild_storage::identify`), so the same title is in the library
+//! once, and a game moved to another drive keeps its settings and saves; a folder without one is a hash
+//! of its absolute path. Removing a game removes its library entry and, when asked, its `games/<id>`
+//! folder; the game folder itself is only ever read.
 
 use crate::home::Home;
 use std::path::{Path, PathBuf};
@@ -120,31 +121,70 @@ pub struct Game {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Library {
-    /// the launcher's own app-data folder
+    /// the launcher's own data folder (the user data root)
     pub root: PathBuf,
     pub games: Vec<Game>,
     pub selected: Option<String>,
+    /// where each game's session folders go (`<logs>/<id>/`)
+    pub logs: PathBuf,
 }
 
-/// A stable id for a folder: FNV-1a 64 of its lower-cased absolute path, as 16 hex digits.
+/// A stable id for a game folder: its package identity, else a hash of its path (`rebuild_storage::identify`).
 pub fn game_id(dir: &Path) -> String {
-    let s = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf()).to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase();
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    format!("{h:016x}")
+    rebuild_storage::identify(dir).id
 }
 
 impl Library {
+    /// An empty library in a data root.
+    pub fn empty(st: &rebuild_storage::Storage) -> Library {
+        Library { root: st.user.clone(), games: Vec::new(), selected: None, logs: st.logs_dir() }
+    }
+
+    /// The library of a data root, its logs where the storage puts them.
+    pub fn load_in(st: &rebuild_storage::Storage) -> Result<Library, String> {
+        Library::load(&st.user).map(|l| Library { logs: st.logs_dir(), ..l })
+    }
+
+    /// The library in the current layout, once: each game under its package identity (folders merged, never
+    /// a file lost), `rebuild.toml` renamed `settings.toml`, sessions moved to the logs. One line per change.
+    pub fn migrate(&mut self, st: &rebuild_storage::Storage) -> Vec<String> {
+        use rebuild_storage::migrate;
+        let mut lines = Vec::new();
+        let mut changed = false;
+        for i in 0..self.games.len() {
+            let (old, dir) = (self.games[i].id.clone(), self.games[i].dir.clone());
+            if dir.is_dir() {
+                let new = game_id(&dir);
+                if new != old && !self.games.iter().any(|g| g.id == new) {
+                    let r = migrate::rename_game(st, &old, &new);
+                    lines.extend(r.lines);
+                    lines.extend(r.kept.iter().map(|(p, why)| format!("kept {}: {why}", p.display())));
+                    if self.selected.as_deref() == Some(old.as_str()) {
+                        self.selected = Some(new.clone());
+                    }
+                    self.games[i].id = new;
+                    changed = true;
+                }
+            }
+            let r = migrate::game_layout(&st.game(&self.games[i].id));
+            lines.extend(r.moved.iter().map(|(a, b)| format!("{} -> {}", a.display(), b.display())));
+            lines.extend(r.kept.iter().map(|(p, why)| format!("kept {}: {why}", p.display())));
+        }
+        if changed {
+            if let Err(e) = self.save() {
+                lines.push(format!("library: {e}"));
+            }
+        }
+        lines
+    }
+
     pub fn file(root: &Path) -> PathBuf {
         root.join("library.toml")
     }
 
     /// Load the library (a missing file is an empty library).
     pub fn load(root: &Path) -> Result<Library, String> {
-        let mut lib = Library { root: root.to_path_buf(), games: Vec::new(), selected: None };
+        let mut lib = Library { root: root.to_path_buf(), games: Vec::new(), selected: None, logs: root.join("logs") };
         let path = Library::file(root);
         let Ok(text) = std::fs::read_to_string(&path) else { return Ok(lib) };
         let doc: toml::Table = text.parse().map_err(|e| format!("{}: {e}", path.display()))?;
@@ -185,7 +225,7 @@ impl Library {
 
     /// A game's own data folder, as a `Home`.
     pub fn home(&self, id: &str) -> Home {
-        Home { dir: self.root.join("games").join(id) }
+        Home { dir: self.root.join("games").join(id), sessions: self.logs.join(id) }
     }
 
     pub fn selected_game(&self) -> Option<&Game> {
@@ -203,8 +243,8 @@ impl Library {
     /// otherwise they are moved aside to `games/<id>.previous-<unix seconds>`, never deleted.
     pub fn add(&mut self, dir: &Path, detectors: &[Box<dyn Detector>], restore: bool) -> Result<String, String> {
         let id = game_id(dir);
-        if self.games.iter().any(|g| g.id == id) {
-            return Err("this folder is already in the library".into());
+        if let Some(g) = self.games.iter().find(|g| g.id == id) {
+            return Err(if g.dir == dir { "this folder is already in the library".into() } else { format!("this game is already in the library (from {}): remove it first to use this folder", g.dir.display()) });
         }
         let (det, by) = detect(dir, detectors);
         let name = match det {
@@ -242,8 +282,7 @@ impl Library {
             let games_dir = self.root.join("games");
             // only ever a direct child of <root>/games, and never the game folder or anything above it
             let safe = data.parent() == Some(games_dir.as_path())
-                && id.len() == 16
-                && id.chars().all(|c| c.is_ascii_hexdigit())
+                && rebuild_storage::is_game_id(id)
                 && !std::path::absolute(&game.dir).unwrap_or(game.dir.clone()).starts_with(std::path::absolute(&data).unwrap_or(data.clone()));
             if !safe {
                 return Err("refused: the data folder is not the launcher's own".into());
@@ -409,7 +448,7 @@ mod tests {
         assert_eq!(crate::store::Store::load(&home.rebuild_toml()).unwrap().model.config.int("display.width"), 3840, "fresh");
         let aside: Vec<_> = std::fs::read_dir(root.join("app").join("games")).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains(".previous-")).collect();
         assert_eq!(aside.len(), 1);
-        assert!(std::fs::read_to_string(aside[0].path().join("rebuild.toml")).unwrap().contains("1920"));
+        assert!(std::fs::read_to_string(aside[0].path().join("settings.toml")).unwrap().contains("1920"));
         assert_eq!(tree_hash(&a), before);
         lib.remove(&id2, true).unwrap();
         assert!(!home.dir.exists(), "the launcher's own data is gone");

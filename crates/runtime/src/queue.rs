@@ -96,7 +96,7 @@ fn slot_name(off: usize) -> &'static str {
 }
 
 fn implemented(off: usize) -> bool {
-    matches!(off, 0x000..=0x038 | 0x050..=0x068 | 0x080 | 0x088 | 0x090 | 0x0e0 | 0x100 | 0x110 | 0x118)
+    matches!(off, 0x000..=0x038 | 0x050..=0x068 | 0x080 | 0x088 | 0x090 | 0x0e0 | 0x0f8 | 0x100 | 0x110 | 0x118)
 }
 
 /// Queue slots called but not written: (offset, name, calls, first call in ms after the device).
@@ -260,6 +260,7 @@ fn vtable() -> &'static [usize; SLOTS] {
         t[0x50 / 8] = crate::submit::ExecuteCommandLists as *const () as usize;
         t[0x118 / 8] = crate::submit::ExecuteCommandListsX as *const () as usize;
         t[0x100 / 8] = crate::present::PresentX as *const () as usize;
+        t[0xf8 / 8] = crate::pagemap::CopyPageMappingsBatchX as *const () as usize;
         t[0x80 / 8] = Signal as *const () as usize;
         t[0x88 / 8] = Wait as *const () as usize;
         t[0x110 / 8] = SignalX as *const () as usize;

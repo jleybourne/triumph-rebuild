@@ -2081,6 +2081,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 name = "rebuild"
 version = "0.1.0"
 dependencies = [
+ "png 0.17.16",
  "rebuild-cardlock",
  "rebuild-config",
  "rebuild-d3d12x",
@@ -2090,6 +2091,7 @@ dependencies = [
  "rebuild-runtime",
  "rebuild-shader",
  "rebuild-sir",
+ "rebuild-storage",
  "rebuild-uma",
  "rebuild-upscale",
  "rebuild-winfiles",
@@ -2131,6 +2133,9 @@ dependencies = [
 [[package]]
 name = "rebuild-devmenu"
 version = "0.1.0"
+dependencies = [
+ "rebuild-storage",
+]
 
 [[package]]
 name = "rebuild-dstorage"
@@ -2138,6 +2143,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "crc32fast",
+ "rebuild-storage",
  "rebuild-vfs",
  "zlib-rs",
 ]
@@ -2156,6 +2162,9 @@ dependencies = [
 [[package]]
 name = "rebuild-gdk"
 version = "0.1.0"
+dependencies = [
+ "rebuild-storage",
+]
 
 [[package]]
 name = "rebuild-input"
@@ -2173,6 +2182,9 @@ dependencies = [
  "embed-resource",
  "png 0.17.16",
  "rebuild-config",
+ "rebuild-gdk",
+ "rebuild-saves",
+ "rebuild-storage",
  "rebuild-vfs",
  "rfd",
  "toml 0.8.23",
@@ -2205,6 +2217,7 @@ dependencies = [
  "rebuild-cardlock",
  "rebuild-shader",
  "rebuild-sir",
+ "rebuild-storage",
  "rebuild-xlist",
  "windows",
 ]
@@ -2225,12 +2238,21 @@ dependencies = [
  "rebuild-overlay",
  "rebuild-pipelines",
  "rebuild-shader",
+ "rebuild-storage",
  "rebuild-uma",
  "rebuild-vfs",
  "rebuild-winfiles",
  "rebuild-xg",
  "rebuild-xlist",
  "windows",
+]
+
+[[package]]
+name = "rebuild-saves"
+version = "0.1.0"
+dependencies = [
+ "rebuild-gdk",
+ "rebuild-storage",
 ]
 
 [[package]]
@@ -2247,6 +2269,17 @@ name = "rebuild-sir"
 version = "0.1.0"
 dependencies = [
  "rebuild-shader",
+]
+
+[[package]]
+name = "rebuild-storage"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "crc32fast",
+ "flate2",
+ "toml 0.8.23",
+ "windows",
 ]
 
 [[package]]

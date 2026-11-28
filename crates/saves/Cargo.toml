@@ -1,0 +1,16 @@
+[package]
+name = "rebuild-saves"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+# The launcher's save editor (docs/design/save-editor.md): the title's save blobs (docs/research/save-format.md),
+# backups, import and export. Offline only: no network crate, ever.
+
+[dependencies]
+rebuild-gdk = { path = "../gdk" }
+rebuild-storage = { path = "../storage" }
+
+[[bin]]
+name = "savedump"
+path = "src/bin/savedump.rs"

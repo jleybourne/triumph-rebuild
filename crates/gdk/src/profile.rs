@@ -140,6 +140,13 @@ pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 mod tests {
     use super::*;
 
+    /// Imports land as this user (`rebuild_storage::DEFAULT_USER`), and saves sit in `<saves>\<xuid as 16 hex>`.
+    #[test]
+    fn the_offline_user_is_the_one_storage_imports_as() {
+        assert_eq!(Profile::default().xuid, rebuild_storage::DEFAULT_USER);
+        assert_eq!(format!("{:016x}", Profile::default().xuid), rebuild_storage::user_dir_name(rebuild_storage::DEFAULT_USER));
+    }
+
     #[test]
     fn checks() {
         assert!(Profile::default().check().is_ok());

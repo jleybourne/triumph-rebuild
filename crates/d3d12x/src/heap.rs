@@ -336,7 +336,9 @@ impl Inner {
             Some(Record::Null { uav, dimension }) => {
                 let v = if uav {
                     HostView::NullUav
-                } else if dimension <= 1 {
+                } else if !(2..=10).contains(&dimension) {
+                    // a buffer (1), no dimension (0), or a ray-tracing acceleration structure (11, whose host view
+                    // must have format UNKNOWN and a location: a texture-shaped null one removes the device)
                     HostView::NullBuffer
                 } else {
                     HostView::NullTexture(dimension as i32)
@@ -673,6 +675,21 @@ fn trace_entry(rec: &Record, what: &str, address: u64, d: &D3D12_RESOURCE_DESC, 
         d.Width, d.Height, d.DepthOrArraySize, d.Format.0, d.MipLevels, d.Dimension.0, d.Layout.0, d.Flags.0, nonzero(address, 64 << 10)
     );
     TRACED.lock().unwrap_or_else(|e| e.into_inner()).push((index, address));
+}
+
+/// `REBUILD_TRACE_TEXTURES=<min width>` (any value; a number is the smallest width shown, default 256): one line per
+/// host texture made for the title (a resource or a placed view), with its console address, description, console
+/// layout (`0x100 | swizzle mode`) and how much of its first 64 KiB of console memory holds bytes now.
+pub fn trace_texture(what: &str, address: u64, d: &D3D12_RESOURCE_DESC) {
+    static MIN: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let Some(min) = *MIN.get_or_init(|| std::env::var("REBUILD_TRACE_TEXTURES").ok().map(|v| v.trim().parse().unwrap_or(256))) else { return };
+    if d.Width < min {
+        return;
+    }
+    eprintln!(
+        "texture   {what}: at {address:#x}, {}x{}x{} format {} mips {} dimension {} layout {:#x} flags {:#x}; {}",
+        d.Width, d.Height, d.DepthOrArraySize, d.Format.0, d.MipLevels, d.Dimension.0, d.Layout.0, d.Flags.0, nonzero(address, 64 << 10)
+    );
 }
 
 static TRACED: Mutex<Vec<(u32, u64)>> = Mutex::new(Vec::new());
@@ -1123,7 +1140,7 @@ impl Resources {
             }
             // the host resource has no unordered access (the console allows it on any resource; the host strips it
             // from depth targets): a null view, never an invalid descriptor (WARP faults on one, then removes)
-            // (a depth texture's plane-0 UAVs are views of its twin instead: `docs/design/depth-uav.md`)
+            // (a depth texture's UAVs are views of its planes' twins instead: `docs/design/depth-uav.md`)
             Some(r) if crate::format::host_desc(&r.desc).0.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 && !crate::resource::twin_takes(r, desc) => {
                 if NO_UAV.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
                     self.inner.events.note("UAV of a resource without unordered access: a null view (counted)", r.desc.Flags.0 as u64);
@@ -1140,14 +1157,12 @@ impl Resources {
                     None => default_uav(r),
                 };
                 v.Format = view_format(v.Format.0, r, false);
-                if r.twin.is_some() {
-                    v.Format = DXGI_FORMAT(crate::format::twin_view_format(v.Format.0 as u32) as i32);
-                }
+                let target = crate::resource::uav_target(r, &mut v);
                 if let Some((mips, arrays)) = host_extent(r) {
                     fit_uav(&mut v, mips, arrays);
                 }
                 let k = uav_key(&v);
-                self.texture_entry(r, k, HostView::Uav { resource: r.uav_raw(), desc: v })
+                self.texture_entry(r, k, HostView::Uav { resource: target, desc: v })
             }
         };
         self.put(handle, &rec);
@@ -1306,7 +1321,18 @@ impl Resources {
             return t.clone();
         }
         let (hd, _) = format::host_desc(rd);
-        let t = ctx.memory.texture(address, &hd).or_else(|| ctx.host.resource(&hd, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_NONE, None).ok().flatten());
+        let model = ctx.memory.texture(address, rd, &hd, D3D12_BARRIER_LAYOUT_COMMON);
+        let from_model = model.is_some();
+        let t = model.or_else(|| ctx.host.resource(&hd, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_NONE, None).ok().flatten());
+        trace_texture("placed view", address, rd);
+        // no console resource names it, so no barrier of the title's: it stays in the common state it starts in
+        if let Some(h) = &t {
+            ctx.memory.texture_made(address, rd, h, D3D12_BARRIER_LAYOUT_COMMON);
+            let (b, c) = (if from_model { 0 } else { ctx.host.bytes(&hd) }, format::footprint(rd).map_or(0, |i| i.size));
+            crate::vram::made(crate::vram::Origin::PlacedView, b, c);
+            let gw = rd.Flags.0 & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL.0 | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0) != 0;
+            crate::vram::track(h.as_raw() as usize, crate::vram::Live { address, console: c, origin: crate::vram::Origin::PlacedView, bytes: b, gpu_written: gw });
+        }
         placed.insert((address, *rw), t.clone());
         t
     }

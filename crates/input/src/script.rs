@@ -13,6 +13,9 @@
 //!
 //! The press is added to what the title reads (the first connected pad, else the keyboard's stand-in pad);
 //! real devices keep working alongside. Each step runs once. Off (no variable): nothing changes.
+//!
+//! The live control channel (`REBUILD_INPUT_PIPE`, `crates/runtime/src/control.rs`) takes the same `<what>` text
+//! ([`parse_action`]) and adds it as a step due at once ([`Script::push`]).
 
 use crate::pad::{buttons as b, PadState};
 use crate::source::Frame;
@@ -134,6 +137,33 @@ fn number<T: std::str::FromStr>(s: &str, what: &str) -> Result<T, String> {
     s.trim().parse().map_err(|_| format!("{what} '{s}' is not a number"))
 }
 
+/// One step's `<what>`: buttons joined by `+` with an optional `/<n>ms` or `/<n>f` hold, or `cap`. The live control
+/// channel (`REBUILD_INPUT_PIPE`) takes the same text for its `press`.
+pub fn parse_action(what: &str) -> Result<Action, String> {
+    let (what, hold) = match what.split_once('/') {
+        None => (what.trim(), DEFAULT_HOLD),
+        Some((w, h)) => {
+            let h = h.trim().to_ascii_lowercase();
+            let hold = if let Some(ms) = h.strip_suffix("ms") {
+                Hold::Ms(number(ms, "hold")?)
+            } else if let Some(f) = h.strip_suffix('f') {
+                Hold::Frames(number(f, "hold")?)
+            } else {
+                return Err("the hold needs a unit, ms or f".into());
+            };
+            (w.trim(), hold)
+        }
+    };
+    if what.eq_ignore_ascii_case("cap") || what.eq_ignore_ascii_case("capture") {
+        return Ok(Action::Capture);
+    }
+    let mut pad = PadState::default();
+    for n in what.split('+').map(str::trim) {
+        pad = merge(pad, name(n).ok_or_else(|| format!("no button named '{n}'"))?);
+    }
+    Ok(Action::Press { pad, hold })
+}
+
 impl Script {
     /// Parse a script; an empty string gives an empty script.
     pub fn parse(text: &str) -> Result<Script, String> {
@@ -152,29 +182,7 @@ impl Script {
             } else {
                 return Err(format!("step '{raw}': the time needs a unit, s (seconds) or f (frame)"));
             };
-            let (what, hold) = match what.split_once('/') {
-                None => (what.trim(), DEFAULT_HOLD),
-                Some((w, h)) => {
-                    let h = h.trim().to_ascii_lowercase();
-                    let hold = if let Some(ms) = h.strip_suffix("ms") {
-                        Hold::Ms(number(ms, "hold")?)
-                    } else if let Some(f) = h.strip_suffix('f') {
-                        Hold::Frames(number(f, "hold")?)
-                    } else {
-                        return Err(format!("step '{raw}': the hold needs a unit, ms or f"));
-                    };
-                    (w.trim(), hold)
-                }
-            };
-            let action = if what.eq_ignore_ascii_case("cap") || what.eq_ignore_ascii_case("capture") {
-                Action::Capture
-            } else {
-                let mut pad = PadState::default();
-                for n in what.split('+').map(str::trim) {
-                    pad = merge(pad, name(n).ok_or_else(|| format!("step '{raw}': no button named '{n}'"))?);
-                }
-                Action::Press { pad, hold }
-            };
+            let action = parse_action(what).map_err(|e| format!("step '{raw}': {e}"))?;
             steps.push(Step { at, action, text: raw.to_string() });
         }
         let started = vec![None; steps.len()];
@@ -200,6 +208,27 @@ impl Script {
 
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
+    }
+
+    /// Add a step (the live control channel adds presses due at once: `At::Seconds(0.0)`).
+    pub fn push(&mut self, at: At, action: Action, text: &str) {
+        self.steps.push(Step { at, action, text: text.to_string() });
+        self.started.push(None);
+    }
+
+    /// Drop the steps that have started and are no longer held at `seconds` / `frame`.
+    pub fn prune(&mut self, seconds: f64, frame: u64) {
+        let done: Vec<bool> = self.steps.iter().zip(&self.started).map(|(s, st)| st.is_some_and(|st| !held(s, st, seconds, frame))).collect();
+        let mut i = 0;
+        self.steps.retain(|_| {
+            i += 1;
+            !done[i - 1]
+        });
+        let mut i = 0;
+        self.started.retain(|_| {
+            i += 1;
+            !done[i - 1]
+        });
     }
 
     /// Every step has started and no press is held at `seconds` / `frame`.
@@ -301,6 +330,25 @@ mod tests {
         assert!(!s.finished(2.0, 11));
         assert_eq!(s.poll(2.0, 12).pad, None, "two frames");
         assert!(s.finished(2.0, 12));
+    }
+
+    #[test]
+    fn live_presses_fire_at_once_and_finished_ones_are_dropped() {
+        let mut s = Script::default();
+        s.push(At::Seconds(0.0), parse_action("A/2f").unwrap(), "A/2f");
+        assert_eq!(parse_action("cap").unwrap(), Action::Capture);
+        assert!(parse_action("Nope").is_err() && parse_action("A/5").is_err());
+        let p = s.poll(30.0, 100);
+        assert_eq!(p.pad.unwrap().buttons, b::A);
+        assert_eq!(p.fired[0].text, "A/2f");
+        s.push(At::Seconds(0.0), parse_action("Down+LT/100ms").unwrap(), "Down+LT/100ms");
+        let p = s.poll(30.05, 101);
+        assert_eq!(p.pad.unwrap().buttons, b::A | b::DPAD_DOWN, "both held");
+        s.prune(30.05, 102);
+        assert_eq!(s.steps().len(), 1, "the A press ended at frame 102");
+        s.prune(30.2, 103);
+        assert!(s.is_empty());
+        assert_eq!(s.poll(30.3, 104), Poll::default());
     }
 
     #[test]

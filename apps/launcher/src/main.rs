@@ -74,9 +74,9 @@ fn main() {
             let _ = std::fs::write(dir.join("panic.txt"), format!("{info}"));
         }));
     }
-    let root = match &shots {
-        Some(_) => fixture_root(),
-        None => Home::locate().dir,
+    let storage = match &shots {
+        Some(_) => explicit_storage(fixture_root()),
+        None => launcher_storage(),
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -89,16 +89,33 @@ fn main() {
         ..Default::default()
     };
     let fixture = shots.is_some();
-    let r = eframe::run_native(TITLE, options, Box::new(move |cc| Ok(Box::new(App::new(&cc.egui_ctx, root, shots, fixture)))));
+    let r = eframe::run_native(TITLE, options, Box::new(move |cc| Ok(Box::new(App::with_storage(&cc.egui_ctx, storage, shots, fixture)))));
     if let Err(e) = r {
         eprintln!("launcher: {e}");
     }
 }
 
+/// Where the launcher keeps its files (`rebuild_storage`: portable, per-user or `REBUILD_DATA_DIR`), with the
+/// launcher's files from an older home copied in once (`migrate::launcher_home`; the old ones are kept).
+fn launcher_storage() -> rebuild_storage::Storage {
+    let st = rebuild_storage::Storage::resolve();
+    let legacy = rebuild_storage::migrate::Legacy::from_env(&rebuild_storage::Env::from_process());
+    let r = rebuild_storage::migrate::launcher_home(&st, &legacy);
+    for l in r.lines.iter().chain(st.notes.iter()) {
+        eprintln!("storage: {l}");
+    }
+    st
+}
+
+/// Every root in one folder (the screenshot fixture, tests).
+pub fn explicit_storage(root: PathBuf) -> rebuild_storage::Storage {
+    rebuild_storage::Storage::resolve_with(&rebuild_storage::Env { data_dir: Some(root), temp: std::env::temp_dir(), ..Default::default() })
+}
+
 fn print_check() -> i32 {
-    let root = Home::locate().dir;
-    let lib = Library::load(&root).unwrap_or(Library { root: root.clone(), games: Vec::new(), selected: None });
-    let home = lib.selected.as_deref().map(|id| lib.home(id)).unwrap_or(Home { dir: root });
+    let st = launcher_storage();
+    let lib = Library::load_in(&st).unwrap_or_else(|_| Library::empty(&st));
+    let home = lib.selected.as_deref().map(|id| lib.home(id)).unwrap_or(Home::at(st.user.clone()));
     let cfg = Store::load(&home.rebuild_toml()).map(|s| s.model.config).unwrap_or_else(|e| {
         eprintln!("{e}");
         Config::parse("").unwrap()
@@ -141,9 +158,9 @@ fn print_recommendation() {
 
 /// `--matrix <dir>`: the test matrix from the selected game's settings (`home::write_matrix`).
 fn print_matrix(dir: &Path, names: &str) -> i32 {
-    let root = Home::locate().dir;
-    let lib = Library::load(&root).unwrap_or(Library { root: root.clone(), games: Vec::new(), selected: None });
-    let home = lib.selected.as_deref().map(|id| lib.home(id)).unwrap_or(Home { dir: root });
+    let st = launcher_storage();
+    let lib = Library::load_in(&st).unwrap_or_else(|_| Library::empty(&st));
+    let home = lib.selected.as_deref().map(|id| lib.home(id)).unwrap_or(Home::at(st.user.clone()));
     let base = match Store::load(&home.rebuild_toml()) {
         Ok(s) => s.model.config,
         Err(e) => {
@@ -210,7 +227,7 @@ fn fixture_root() -> PathBuf {
     let second = fixture_package(&root, "second", "Second title", "Scarlett");
     fixture_package(&root, "third", "Third title", "Scarlett");
     fixture_package(&root, "older", "Older title", "XboxOne");
-    let mut lib = Library { root: root.clone(), games: Vec::new(), selected: None };
+    let mut lib = Library { root: root.clone(), games: Vec::new(), selected: None, logs: root.join("logs") };
     let first = std::env::var_os("REBUILD_GAME_DIR").map(PathBuf::from).unwrap_or_else(|| fixture_package(&root, "first", "Your title", "Scarlett"));
     for (dir, name) in [(first, "Your title"), (second, "Second title")] {
         let id = library::game_id(&dir);
@@ -333,6 +350,12 @@ pub enum Pick {
 
 pub struct App {
     root: PathBuf,
+    /// every root (`rebuild_storage`): the library lives in `storage.user`
+    storage: rebuild_storage::Storage,
+    /// Diagnostics → Storage: each game's sizes, read on demand
+    storage_sizes: Option<(rebuild_storage::GameStore, rebuild_storage::Sizes)>,
+    /// an import waiting for the user's confirmation: its file and plan
+    import_plan: Option<(PathBuf, rebuild_storage::Plan)>,
     library: Library,
     detectors: Vec<Box<dyn library::Detector>>,
     detections: HashMap<String, Detection>,
@@ -352,6 +375,8 @@ pub struct App {
     rec: Option<Recommendation>,
     mods: Vec<mods::Entry>,
     conflicts: Vec<mods::Conflict>,
+    /// Saves: the listed containers and the one open in the editor
+    saves: screens::SavesUi,
     profiles: Vec<String>,
     profile_name: String,
     import_problems: Vec<String>,
@@ -452,16 +477,30 @@ pub fn bytes(n: u64) -> String {
 }
 
 impl App {
+    #[cfg(test)]
     fn new(ctx: &egui::Context, root: PathBuf, shots: Option<PathBuf>, fixture: bool) -> App {
+        App::with_storage(ctx, explicit_storage(root), shots, fixture)
+    }
+
+    fn with_storage(ctx: &egui::Context, storage: rebuild_storage::Storage, shots: Option<PathBuf>, fixture: bool) -> App {
+        let root = storage.user.clone();
         th::install(ctx, prefs::theme(&root) != "light");
         let mut toasts = Vec::new();
-        let library = Library::load(&root).unwrap_or_else(|e| {
+        let mut library = Library::load_in(&storage).unwrap_or_else(|e| {
             toasts.push(Toast { text: format!("library: {e}"), tone: Tone::Danger, at: -1.0 });
-            Library { root: root.clone(), games: Vec::new(), selected: None }
+            Library::empty(&storage)
         });
+        if !fixture {
+            for l in library.migrate(&storage) {
+                eprintln!("storage: {l}");
+            }
+        }
         let mut app = App {
-            home: Home { dir: root.clone() },
+            home: Home::at(root.clone()),
             root,
+            storage,
+            storage_sizes: None,
+            import_plan: None,
             library,
             detectors: library::detectors(),
             detections: HashMap::new(),
@@ -478,6 +517,7 @@ impl App {
             rec: None,
             mods: Vec::new(),
             conflicts: Vec::new(),
+            saves: screens::SavesUi::default(),
             profiles: Vec::new(),
             profile_name: String::new(),
             import_problems: Vec::new(),
@@ -652,7 +692,7 @@ impl App {
         let sel = self.library.selected_game().cloned();
         self.home = match &sel {
             Some(g) => self.library.home(&g.id),
-            None => Home { dir: self.root.clone() },
+            None => Home::at(self.root.clone()),
         };
         match Store::load(&self.home.rebuild_toml()) {
             Ok(s) => {
@@ -667,9 +707,10 @@ impl App {
                 self.store = Store::new(Config::parse("").unwrap());
             }
         }
-        // the theme is launcher-wide (prefs), shown in every game's settings
+        // the theme and the cache folder are launcher-wide (prefs), shown in every game's settings
         let theme = if th::is_dark() { "dark" } else { "light" };
         let _ = self.store.model.config.set("launcher.theme", Value::Choice(theme.into()));
+        let _ = self.store.model.config.set(rebuild_storage::CACHE_DIR_KEY, Value::Path(prefs::cache_dir(&self.root)));
         self.saved = self.store.clone();
         self.profile_name = self.store.model.config.profile.clone();
         self.profiles = self.home.profiles();
@@ -760,6 +801,14 @@ impl App {
         match self.store.save(&self.home.rebuild_toml()) {
             Ok(()) => {
                 self.saved = self.store.clone();
+                // the cache folder is launcher-wide: kept in launcher.toml, where rebuild_storage reads it
+                let cache = self.store.model.config.get(rebuild_storage::CACHE_DIR_KEY).to_string();
+                if !self.fixture && cache != prefs::cache_dir(&self.root) {
+                    match prefs::save_cache_dir(&self.root, &cache) {
+                        Ok(()) => self.toast(Tone::Accent, "Cache folder saved: it applies when the launcher next starts"),
+                        Err(e) => self.toast(Tone::Danger, e),
+                    }
+                }
                 true
             }
             Err(e) => {
@@ -885,6 +934,14 @@ impl App {
         // settings file, paces the same way
         env.push(("REBUILD_FRAME_RATE".into(), rebuild_config::frame_rate_env(&config)));
         env.push(("REBUILD_VSYNC".into(), if config.bool("display.vsync") { "1" } else { "0" }.into()));
+        // the layer resolves exactly the launcher's folders, and this game under the library's id
+        for (k, v) in self.storage.child_env() {
+            env.push((k.into(), v.display().to_string()));
+        }
+        if let Some(g) = self.library.selected_game() {
+            env.push((rebuild_storage::ENV_GAME_ID.into(), g.id.clone()));
+            env.push((rebuild_storage::ENV_GAME_BUILD.into(), rebuild_storage::identify(&g.dir).build));
+        }
         let exe = if proof {
             PathBuf::from(self.proof_exe.trim())
         } else {
@@ -1186,6 +1243,7 @@ impl App {
                         Tab::Settings => self.settings_page(ui),
                         Tab::Runs => self.runs_page(ui),
                         Tab::Mods => self.mods_page(ui),
+                        Tab::Saves => self.saves_page(ui),
                         Tab::Diagnostics => self.diagnostics_page(ui),
                         Tab::Library => self.library_page(ui),
                     }
@@ -1205,7 +1263,7 @@ impl App {
     fn keys(&mut self, ctx: &egui::Context) {
         let (tab, save, launch, check) = ctx.input_mut(|i| {
             let mut tab = None;
-            let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6];
+            let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7];
             for (k, key) in nums.iter().enumerate() {
                 if i.consume_key(egui::Modifiers::COMMAND, *key) {
                     tab = Some(Tab::TOP[k]);

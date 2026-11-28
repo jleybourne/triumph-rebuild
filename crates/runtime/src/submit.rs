@@ -45,6 +45,8 @@ pub static WAITS_MET: AtomicU64 = AtomicU64::new(0);
 pub static WAITS_FENCE: AtomicU64 = AtomicU64::new(0);
 pub static WAITS_BRIDGED: AtomicU64 = AtomicU64::new(0);
 pub static WAITS_REFUSED: AtomicU64 = AtomicU64::new(0);
+/// TSC ticks in [`sync_descriptors`] on the submitting threads (the frame line's `xsync`).
+pub static SYNC_TICKS: AtomicU64 = AtomicU64::new(0);
 /// Console lists submitted, and those that were not ours (skipped).
 pub static LISTS: AtomicU64 = AtomicU64::new(0);
 pub static FOREIGN: AtomicU64 = AtomicU64::new(0);
@@ -76,6 +78,11 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
     if let Some(begin) = crate::present::frame_begin(q) {
         batch.push(begin);
     }
+    // textures the CPU writes (Bink's video frames): their new bytes, copied from the card's copy of their memory
+    // ahead of the lists that sample them (crate::cputex; nothing to do is one atomic load)
+    if let Some(copies) = crate::cputex::refresh(q, value) {
+        batch.push(copies);
+    }
     // the GPU time: an earlier frame's timing pairs resolved ahead of this submission's lists ([`crate::gputime`])
     let frame = crate::present::PRESENT_CALLS.load(Ordering::Relaxed);
     if let Some(r) = q.timer.begin(q, frame, value) {
@@ -89,7 +96,9 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
             continue;
         };
         // the descriptor tables its translated programs read, mirrored from the title's bytes (the root seam)
+        let t0 = rebuild_xlist::console::cost::now();
         sync_descriptors(list);
+        SYNC_TICKS.fetch_add(rebuild_xlist::console::cost::now().wrapping_sub(t0), Ordering::Relaxed);
         if let Some(s) = stats(list) {
             draws += u64::from(s.draws);
             dispatches += u64::from(s.dispatches);

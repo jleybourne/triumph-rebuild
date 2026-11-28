@@ -1,5 +1,5 @@
 //! XGameSave offline: the signed-in user's game saves (containers of named blobs), kept on the host
-//! in the profile's saves folder (`overlay\GameSave`, beside the storage drive's folder), one folder per
+//! in the profile's saves folder (the game's `saves\` from `rebuild_storage`, beside its storage folder), one folder per
 //! user and service configuration. Nothing goes to a cloud: every container is in sync, `needsSync` is
 //! always false, and no call ever conflicts or asks the user anything.
 //!
@@ -28,6 +28,20 @@ use crate::guid::Guid;
 use crate::hr::*;
 use crate::object::{put, text, InterfaceDef};
 use crate::profile;
+
+/// `REBUILD_TRACE_SAVES=1`: one line per save call that names a container or changes one (stderr).
+fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("REBUILD_TRACE_SAVES").is_ok_and(|v| v.trim() == "1"))
+}
+
+macro_rules! trace {
+    ($($t:tt)*) => {
+        if tracing() {
+            eprintln!("gamesave  {}", format!($($t)*));
+        }
+    };
+}
 use crate::xasync::{self, ProviderData, XAsyncBlock};
 
 pub const PROVIDER: Guid = Guid::parse("704c3f58-e629-4cc2-b197-30511b996fe2");
@@ -249,6 +263,53 @@ fn store(path: &Path, c: &Stored) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// The container file for tools that read and write saves while the title is not running (the
+/// launcher's save editor, `crates/saves`): the runtime's own encoding, file naming and all-or-nothing
+/// write, so a tool can never produce a file the runtime reads differently.
+pub mod file {
+    use super::{disk, read_index, store, Stored};
+    use std::path::{Path, PathBuf};
+
+    /// The container files' extension.
+    pub const EXTENSION: &str = super::EXT;
+
+    /// The file's bytes for `c`, exactly as the runtime writes them.
+    pub fn encode(c: &Stored) -> Vec<u8> {
+        super::encode(c)
+    }
+
+    /// One whole container file: refused if anything is malformed, or if bytes follow its last blob.
+    pub fn decode(bytes: &[u8]) -> std::io::Result<Stored> {
+        let mut r = bytes;
+        let index = read_index(&mut r)?;
+        let mut blobs = Vec::with_capacity(index.blobs.len());
+        for (name, size) in index.blobs {
+            let size = usize::try_from(size).map_err(|_| super::bad("blob too big"))?;
+            if r.len() < size {
+                return Err(super::bad("file ends inside a blob"));
+            }
+            let (data, rest) = r.split_at(size);
+            blobs.push((name, data.to_vec()));
+            r = rest;
+        }
+        if !r.is_empty() {
+            return Err(super::bad("bytes after the last blob"));
+        }
+        Ok(Stored { name: index.name, display: index.display, modified: index.modified, blobs })
+    }
+
+    /// The file the runtime keeps container `name` in, inside a provider folder.
+    pub fn path(dir: &Path, name: &str) -> PathBuf {
+        super::container_file(dir, name)
+    }
+
+    /// Writes `c` to `path` as the runtime does: beside it, flushed, renamed over (all or nothing).
+    pub fn write(path: &Path, c: &Stored) -> std::io::Result<()> {
+        let _disk = disk();
+        store(path, c)
+    }
+}
+
 /// Every container in `dir`, by name.
 fn containers(dir: &Path) -> Vec<Index> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
@@ -365,6 +426,7 @@ fn remaining(dir: &Path) -> i64 {
 }
 
 fn delete(dir: &Path, name: &str) -> HRESULT {
+    trace!("delete container {name:?}");
     let _disk = disk();
     match std::fs::remove_file(container_file(dir, name)) {
         Ok(()) => S_OK,
@@ -391,6 +453,13 @@ fn read(c: &Container, names: Option<Vec<String>>) -> Result<Vec<(String, Vec<u8
 }
 
 fn submit(u: Update) -> HRESULT {
+    let name = u.container.name.clone();
+    let hr = submit_now(u);
+    trace!("submit {name:?}: {hr:#010x}");
+    hr
+}
+
+fn submit_now(u: Update) -> HRESULT {
     let written: u64 = u.ops.iter().filter_map(|o| o.1.as_ref()).map(|d| d.len() as u64).sum();
     if written > MAX_UPDATE {
         return E_GS_UPDATE_TOO_BIG;
@@ -546,6 +615,7 @@ unsafe extern "system" fn initialize(_: This, user: Handle, scid: *const c_char,
         return E_INVALIDARG;
     }
     let scid = unsafe { text(scid) }.unwrap_or_default();
+    trace!("initialize provider scid {scid:?}");
     match open_provider(&scid) {
         Ok(dir) => unsafe { put(out, new_provider(dir) as Handle) },
         Err(hr) => hr,
@@ -558,6 +628,7 @@ unsafe extern "system" fn initialize_async(_: This, user: Handle, scid: *const c
         return E_INVALIDARG;
     }
     let scid = unsafe { text(scid) }.unwrap_or_default();
+    trace!("initialize provider async scid {scid:?}");
     let work: Work = Box::new(move || open_provider(&scid).map(|dir| Out::Bytes(new_provider(dir).to_ne_bytes().to_vec())));
     unsafe { start(block, &INIT, work) }
 }
@@ -657,6 +728,7 @@ unsafe extern "system" fn container_info(_: This, provider: Handle, name: *const
         let _disk = disk();
         load_index(&container_file(&dir, &name)).filter(|i| i.name == name)
     };
+    trace!("container info {name:?}: {}", found.as_ref().map_or("none".to_string(), |i| format!("{} blobs, {} bytes", i.blobs.len(), i.total())));
     unsafe { report_containers(found.into_iter().collect(), context, callback) }
 }
 
@@ -666,6 +738,7 @@ unsafe fn enumerate(provider: Handle, prefix: &str, context: *mut c_void, callba
         let _disk = disk();
         containers(&dir).into_iter().filter(|c| c.name.starts_with(prefix)).collect()
     };
+    trace!("enumerate containers {prefix:?}: {:?}", list.iter().map(|c| c.name.as_str()).collect::<Vec<_>>());
     unsafe { report_containers(list, context, callback) }
 }
 
@@ -692,6 +765,7 @@ unsafe extern "system" fn create_container(_: This, provider: Handle, name: *con
         Ok(name) => name,
         Err(hr) => return hr,
     };
+    trace!("create container {name:?}");
     let id = with(|h| {
         let id = fresh(h);
         h.containers.insert(id, Container { dir, name });
@@ -758,6 +832,7 @@ unsafe extern "system" fn read_blobs(_: This, container: Handle, list: *const *c
         Ok(w) => w,
         Err(hr) => return hr,
     };
+    trace!("read blobs {:?} {wanted:?}", c.name);
     let blobs = match read(&c, wanted) {
         Ok(b) => b,
         Err(hr) => return hr,
@@ -783,6 +858,7 @@ unsafe extern "system" fn read_async(_: This, container: Handle, list: *const *c
         Ok(w) => w,
         Err(hr) => return hr,
     };
+    trace!("read blobs async {:?} {wanted:?}", c.name);
     unsafe { start(block, &READ, Box::new(move || read(&c, wanted).map(Out::Blobs))) }
 }
 
@@ -822,6 +898,7 @@ unsafe extern "system" fn create_update(_: This, container: Handle, display: *co
     unsafe { out.write_unaligned(std::ptr::null()) };
     let Some(c) = container_of(container) else { return E_INVALIDARG };
     let display = unsafe { text(display) };
+    trace!("create update {:?} display {display:?}", c.name);
     let id = with(|h| {
         let id = fresh(h);
         h.updates.insert(id, Update { container: c, display, ops: Vec::new() });
@@ -859,6 +936,7 @@ unsafe extern "system" fn write_blob(_: This, update: Handle, name: *const c_cha
         return E_INVALIDARG;
     }
     let bytes = if size == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(data, size) }.to_vec() };
+    trace!("write blob {name:?} {size} bytes");
     add_op(update, name, Some(bytes))
 }
 
@@ -1273,5 +1351,31 @@ mod tests {
         assert!(!p.is_null());
         unsafe { taskqueue::close(q) };
         done(&dir);
+    }
+
+    /// The tools' view of a container file is the runtime's: decode inverts encode, refuses a file cut
+    /// short or with bytes after its last blob, and `file::write` lands where the runtime reads.
+    #[test]
+    fn the_file_api_is_the_runtimes() {
+        let c = Stored {
+            name: "SettingsProfileSettings".into(),
+            display: "Profile Settings".into(),
+            modified: 1_764_000_000,
+            blobs: vec![("Save Game Header".into(), vec![6; 0x128]), ("Save Game Data".into(), vec![1, 2, 3])],
+        };
+        let bytes = file::encode(&c);
+        assert_eq!(file::decode(&bytes).unwrap(), c);
+        assert!(file::decode(&bytes[..bytes.len() - 1]).is_err());
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(file::decode(&longer).is_err());
+        let dir = std::env::temp_dir().join(format!("rebuild-gdk-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = file::path(&dir, &c.name);
+        assert_eq!(path, container_file(&dir, &c.name));
+        file::write(&path, &c).unwrap();
+        assert_eq!(load(&path).unwrap(), c);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
