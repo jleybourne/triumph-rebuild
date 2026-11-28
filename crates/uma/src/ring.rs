@@ -1325,6 +1325,8 @@ mod tests {
     fn a_cold_region_is_not_read_and_its_next_write_still_arrives() {
         use crate::space::{Space, SUB};
         use crate::{Uma, PAGE};
+        use std::time::Duration;
+        let _g = cold::TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         cold::enable();
         let device = warp();
         let space: Arc<OnceLock<Mutex<Space>>> = Arc::new(OnceLock::new());
@@ -1339,18 +1341,42 @@ mod tests {
         let console = k * SUB;
         let (_, mapped) = uma.place(console, 4 * PAGE).unwrap();
         space.lock().unwrap().map(&mapped).unwrap();
-        let region = Watched::alloc(0, 4 * PAGE).unwrap();
+        // a slice of its own: a slice goes cold only when every region in it is quiet, and another test's small
+        // region (`Watched::alloc` lands anywhere) written and flushed while this one waits keeps a shared slice
+        // hot. The whole slice is committed, so going cold reads the allocation's descriptor as before
+        let whole = cold::alloc_aligned(cold::SLICE, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE);
+        let region = Watched { base: whole as *mut u8, len: 4 * PAGE, console: 0 };
         unsafe { region.base.add(10).write_volatile(1) };
         unsafe { ring.add(region.base, region.len, console).unwrap() };
         let v = ring.flush();
         assert!(ring.next_finished().unwrap().bytes > 0);
         ring.wait(v).unwrap();
-
-        // quiet past QUIET_MS: the next pass reads it once more, then makes it cold
-        std::thread::sleep(std::time::Duration::from_millis(QUIET_MS + 50));
-        ring.flush();
-        assert_eq!(ring.next_finished().unwrap().went_cold, 1);
         let slice = cold::find(region.base as u64).unwrap();
+        let dirty = slice.last_dirty.load(Ordering::Relaxed);
+
+        // not quiet for QUIET_MS yet: a pass leaves it hot (checked when this pass surely ran inside QUIET_MS; on a
+        // busy machine it may run later, be quiet by then, and make it cold itself)
+        ring.flush();
+        let mut went_cold = ring.next_finished().unwrap().went_cold;
+        if cold::now_ms() < dirty + QUIET_MS {
+            assert_eq!(went_cold, 0, "written {} ms ago: not quiet yet", cold::now_ms() - dirty);
+        }
+
+        // quiet past QUIET_MS: the next pass reads it once more, then makes it cold. Waited for on the slices' own
+        // clock with a deadline, not slept: on a busy machine a pass may also spend its cooling budget before it
+        // reaches the slice, and then the next pass makes it cold
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while went_cold == 0 {
+            assert!(Instant::now() < deadline, "quiet for {} ms and never cold (state {})", cold::now_ms() - dirty, slice.state());
+            if !slice.may_go_cold(cold::now_ms(), QUIET_MS) {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            ring.flush();
+            went_cold = ring.next_finished().unwrap().went_cold;
+        }
+        assert_eq!(went_cold, 1, "one slice");
+        assert_eq!(slice.last_dirty.load(Ordering::Relaxed), dirty, "no write since");
         assert_eq!(slice.state(), cold::COLD);
         ring.flush();
         let st = ring.next_finished().unwrap();

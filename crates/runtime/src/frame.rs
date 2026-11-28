@@ -178,11 +178,16 @@ struct Clock {
 /// Started by the first wait.
 static CLOCK: Mutex<Option<Clock>> = Mutex::new(None);
 
-/// The next origin after `now` at `step` (`None` = unlimited): its token and when it falls. Re-anchors the clock
-/// when the step changed, at the last origin passed under the old step, so tokens never go back.
+/// The next origin after `now` at `step` (`None` = unlimited) on the process's clock: see [`origin_after`].
 fn next_origin(now: Instant, step: Option<Duration>) -> (u64, Instant) {
-    let mut g = CLOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let c = g.get_or_insert(Clock { anchor: now, token: 0, step });
+    origin_after(&mut CLOCK.lock().unwrap_or_else(|e| e.into_inner()), now, step)
+}
+
+/// The next origin after `now` at `step` (`None` = unlimited) on clock `clock` (started at `now` if `None`): its
+/// token and when it falls. Re-anchors the clock when the step changed, at the last origin passed under the old
+/// step, so tokens never go back. Pure in `now`: the tests drive it with instants of their own.
+fn origin_after(clock: &mut Option<Clock>, now: Instant, step: Option<Duration>) -> (u64, Instant) {
+    let c = clock.get_or_insert(Clock { anchor: now, token: 0, step });
     if c.step != step {
         if let Some(old) = c.step {
             let passed = now.saturating_duration_since(c.anchor).as_nanos() / old.as_nanos().max(1);
@@ -312,23 +317,105 @@ mod tests {
         }
     }
 
+    /// The clock's state after the waits: its step.
+    fn clock_step() -> Option<Duration> {
+        CLOCK.lock().unwrap().as_ref().expect("the clock runs").step
+    }
+
+    /// When origin `t` (a token of the clock's current anchor) falls.
+    fn origin_of(t: u64) -> Instant {
+        let g = CLOCK.lock().unwrap();
+        let c = g.as_ref().expect("the clock runs");
+        let s = c.step.expect("a clock with a step");
+        assert!(t > c.token, "token {t} is of the current anchor (token {})", c.token);
+        c.anchor + Duration::from_nanos(((t - c.token) as u128 * s.as_nanos()) as u64)
+    }
+
+    /// The clock's arithmetic on instants of the test's own: exact, whatever the machine is doing.
+    #[test]
+    fn the_clock_puts_origins_on_the_interval_on_time_of_its_own() {
+        let ms = |n: u64| Duration::from_millis(n);
+        let t0 = Instant::now();
+        let mut c = None;
+        let twenty = Some(ms(20));
+        // started at t0: the first origin is one interval on
+        assert_eq!(origin_after(&mut c, t0, twenty), (1, t0 + ms(20)));
+        // within one frame: the same origin (the title's origin poll and its flip wait)
+        assert_eq!(origin_after(&mut c, t0 + ms(5), twenty), (1, t0 + ms(20)));
+        assert_eq!(origin_after(&mut c, t0 + ms(20) - Duration::from_nanos(1), twenty), (1, t0 + ms(20)));
+        // a wait that slept to its origin gets the next one
+        assert_eq!(origin_after(&mut c, t0 + ms(20), twenty), (2, t0 + ms(40)));
+        assert_eq!(origin_after(&mut c, t0 + ms(40), twenty), (3, t0 + ms(60)));
+        // a caller held off past origins skips them
+        assert_eq!(origin_after(&mut c, t0 + ms(75), twenty), (4, t0 + ms(80)));
+        // a cap of 100 fps: re-anchored at the last 20 ms origin passed (60 ms, token 3), then 10 ms origins
+        let ten = Some(ms(10));
+        assert_eq!(origin_after(&mut c, t0 + ms(75), ten), (5, t0 + ms(80)));
+        assert_eq!(origin_after(&mut c, t0 + ms(80), ten), (6, t0 + ms(90)));
+        assert_eq!(origin_after(&mut c, t0 + ms(90), ten), (7, t0 + ms(100)));
+        // unlimited: re-anchored at the last 10 ms origin passed (100 ms, token 7), then every call a new origin, now
+        assert_eq!(origin_after(&mut c, t0 + ms(101), None), (8, t0 + ms(101)));
+        assert_eq!(origin_after(&mut c, t0 + ms(101), None), (9, t0 + ms(101)));
+        assert_eq!(origin_after(&mut c, t0 + ms(102), None), (10, t0 + ms(102)));
+        // back to a clock: anchored at the last unlimited origin, tokens go on upward
+        assert_eq!(origin_after(&mut c, t0 + ms(103), ten), (11, t0 + ms(112)));
+        assert_eq!(origin_after(&mut c, t0 + ms(112), ten), (12, t0 + ms(122)));
+
+        // any waits, any steps, any change of step between them: each wait's origin is the first after its call
+        // (now, unlimited), and has a token after that of every origin a wait reached before (tokens never go back)
+        let steps = [Some(ms(10)), Some(Duration::from_micros(33_333)), Some(ms(1)), None, Some(Duration::from_nanos(1_000_000_000 / 144))];
+        let mut c = None;
+        let (mut now, mut reached, mut step, mut x) = (t0, 0u64, steps[0], 0x2545_F491_4F6C_DD1Du64);
+        for i in 0..20_000 {
+            x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            now += Duration::from_micros((x >> 33) % 40_000);
+            if (x >> 20) % 8 == 0 {
+                step = steps[(x >> 8) as usize % steps.len()];
+            }
+            let (tok, at) = origin_after(&mut c, now, step);
+            assert!(tok > reached, "call {i}: token {tok} after a reached {reached}");
+            match step {
+                None => assert_eq!(at, now, "call {i}: unlimited origins are now"),
+                Some(s) => {
+                    assert!(at > now && at <= now + s, "call {i}: the first origin after the call");
+                    // a wait that slept to it gets the next origin, one step on
+                    assert_eq!(origin_after(&mut c, at, step), (tok + 1, at + s), "call {i}: the next origin");
+                    now = at;
+                }
+            }
+            reached = tok;
+        }
+    }
+
+    /// The pacing calls on the real clock. Only what holds on any machine is checked: the clock's arithmetic is
+    /// the test above, and how soon the OS wakes a thread after its origin is the scheduler's.
     #[test]
     fn origins_fall_on_the_interval_and_a_short_timeout_reports_false() {
         let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         set_frame_limit(FrameLimit::Title);
         unsafe { SetFrameIntervalX(std::ptr::null_mut(), std::ptr::null_mut(), 20_000, 0, 0) };
+        let step = Duration::from_millis(20);
         let mut t = 0u64;
+        let called = Instant::now();
         assert_eq!(wait(1000, 0, &mut t), 0);
         let first = t;
-        let start = Instant::now();
+        let back = Instant::now();
         assert_eq!(wait(1000, 0, &mut t), 0);
-        assert_eq!(t, first + 1, "the next origin");
-        // one interval (20 ms) plus scheduler slack: the machine may be busy (helper lanes compiling)
-        assert!(start.elapsed() <= Duration::from_millis(100));
+        let back2 = Instant::now();
+        assert_eq!(clock_step(), Some(step), "the title's interval");
+        // a later origin (the next one unless this thread was held off past it between the waits)
+        assert!(t > first, "the next origin: {t} after {first}");
+        let (o1, o2) = (origin_of(first), origin_of(t));
+        assert_eq!(o2 - o1, step * (t - first) as u32, "on the interval");
+        // each wait named an origin after it was called, and returned no sooner than it
+        assert!(o1 > called && back >= o1, "the first wait's origin is after its call, and it returned at it");
+        assert!(o2 > back && back2 >= o2, "the second wait's origin is after its call, and it returned at it");
         // 0 ms timeout: not reached yet, token only when asked
         let mut t2 = 0u64;
+        assert_eq!(wait(0, 0, &mut t2), S_FALSE);
+        assert_eq!(t2, 0, "no token unless asked");
         assert_eq!(wait(0, 2, &mut t2), S_FALSE);
-        assert!(t2 > first);
+        assert!(t2 > t);
     }
 
     #[test]
@@ -344,34 +431,40 @@ mod tests {
 
         // cap 100: 10 ms frames, not the title's 33 ms
         set_frame_limit(FrameLimit::Cap(100));
+        let step = Duration::from_millis(10);
+        let called = Instant::now();
         assert_eq!(wait(1000, 0, &mut t), 0);
         seen(t, "cap first");
-        let start = Instant::now();
+        let (first, back) = (t, Instant::now());
+        let mut last_called = back;
         for _ in 0..10 {
+            last_called = Instant::now();
             assert_eq!(wait(1000, 0, &mut t), 0);
             seen(t, "cap");
         }
-        let took = start.elapsed();
-        assert!(took >= Duration::from_millis(95), "10 frames at 100 fps took {took:?}");
-        // 10 frames of the title's interval would be 333 ms; allow slack for a busy machine
-        assert!(took <= Duration::from_millis(250), "10 frames at 100 fps took {took:?}");
+        let took = called.elapsed();
+        assert_eq!(clock_step(), Some(step), "the cap's step");
+        let frames = (t - first) as u32;
+        assert!(frames >= 10, "each wait a new origin: {frames}");
+        // not faster than the cap: the last wait returned no sooner than its origin, `frames` steps after the
+        // first's, which fell after the first call
+        assert!(took >= step * frames, "{frames} frames at 100 fps took {took:?}");
+        // not slower: the last wait's origin is the first after its call and the first's no later than its return,
+        // so `frames` steps of 10 ms span the time between (at the title's 33 ms: ~300 ms against ~100)
+        assert!(step * frames > last_called - back, "{frames} frames at 100 fps spanned {:?}", last_called - back);
 
-        // unlimited: no sleep, a new token each call
+        // unlimited: no clock, a new token each call. A 0 ms timeout proves it does not wait: a clock's origin is
+        // always after the call, so on one a 0 ms wait times out
         set_frame_limit(FrameLimit::Unlimited);
-        let start = Instant::now();
         let mut prev = None;
-        for _ in 0..1000 {
-            assert_eq!(wait(1000, 0, &mut t), 0);
+        for i in 0..1000 {
+            assert_eq!(wait(if i % 2 == 0 { 0 } else { 1000 }, 0, &mut t), 0, "an unlimited wait does not wait");
             seen(t, "unlimited");
             if let Some(p) = prev {
                 assert!(t > p, "unlimited tokens are new each call");
             }
             prev = Some(t);
         }
-        assert!(start.elapsed() < Duration::from_millis(100), "1000 unlimited waits took {:?}", start.elapsed());
-        // a 0 ms poll succeeds at once too
-        assert_eq!(wait(0, 2, &mut t), 0);
-        seen(t, "unlimited poll");
 
         // back to a clock: tokens continue upward
         set_frame_limit(FrameLimit::Cap(200));
@@ -381,9 +474,10 @@ mod tests {
         let mut p = 0u64;
         assert_eq!(wait(0, 2, &mut p), S_FALSE, "a 0 ms poll on the title's clock times out");
         seen(p, "title poll");
+        assert_eq!(clock_step(), Some(interval()), "the title's interval");
         assert_eq!(wait(1000, 0, &mut t), 0);
+        // the poll and the wait name the same origin unless the wait began past it (exact in the clock test)
         seen(t, "title");
-        assert_eq!(t, p, "the poll and the wait name the same origin");
         set_frame_limit(FrameLimit::Title);
     }
 }
