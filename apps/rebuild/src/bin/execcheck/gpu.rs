@@ -9,8 +9,10 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 
 /// Descriptors in the resource heap and the sampler heap. The resource heap reaches every index translated code
 /// can name through `sir_vi` (console indices below `CONSOLE_VIEWS` and the null bank after them), so an index a
-/// program computes from its data lands on a view, not past the heap; the recording pass's own slots are last.
-pub const HEAP_SLOTS: u32 = rebuild_sir::lift::CONSOLE_VIEWS + rebuild_sir::lift::NULL_BANK + 56;
+/// program computes from its data lands on a view, not past the heap. It reaches the first 32 windows too
+/// (`rebuild_sir::lift::WINDOW_HEAP_BASE`: a root descriptor's buffer, read through window addressing, `run::plan`);
+/// the recording pass's own slots are last, after them.
+pub const HEAP_SLOTS: u32 = rebuild_sir::lift::WINDOW_HEAP_BASE + 64;
 pub const SAMPLER_SLOTS: u32 = 2048;
 
 pub struct Gpu {
@@ -145,7 +147,7 @@ impl Gpu {
             Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
             Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 { Texture2D: D3D12_TEX2D_SRV { MipLevels: 1, ..Default::default() } },
         };
-        // the whole heap once, then only the slots written since (the heap has ~750,000)
+        // the whole heap once, then only the slots written since (the heap has ~967,000)
         let dirty: Vec<u32> = if self.cleared.get() { std::mem::take(&mut *self.dirty.borrow_mut()).into_iter().collect() } else { (0..HEAP_SLOTS).collect() };
         for k in dirty {
             unsafe { self.device.CreateShaderResourceView(None, Some(&null), self.slot_handle(k)) };

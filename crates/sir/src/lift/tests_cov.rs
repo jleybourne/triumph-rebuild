@@ -302,6 +302,23 @@ fn a_buffer_descriptors_stride_and_records_come_from_the_shadow_table() {
 }
 
 #[test]
+fn an_image_descriptors_base_level_reads_0() {
+    // the console compiler shifts a texture size by the base level (word 3, bits 12-15): the host view starts at
+    // its own base level, so it reads 0 (with the identity swizzle below it)
+    let (layout, used) = table();
+    let parts = [smem("s_load_dwordx8", 8, 0, 0), vec![sop2("s_bfe_u32", 20, 11, LIT)[0], 12 | 4 << 16]];
+    let l = lifted(&parts, &layout, &used);
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    assert!(l.body.contains(&format!("sir_bfe_u({}u, ", super::IMAGE_WORD3_LOW)), "{}", l.body);
+    compile(&l, "cov_image_word3");
+    // the last level and the type (bits 16 and up) are not known: refused, as is a buffer's word 3
+    for (load, field) in [("s_load_dwordx8", 16 | 4 << 16), ("s_load_dwordx4", 12 | 4 << 16)] {
+        let l = lifted(&[smem(load, 8, 0, 0), vec![sop2("s_bfe_u32", 21, 11, LIT)[0], field]], &layout, &used);
+        assert!(l.unsupported[0].1.contains("read as data"), "{load}: {:?}", l.unsupported);
+    }
+}
+
+#[test]
 fn a_typed_access_with_no_index_and_no_offset_is_element_0() {
     let (layout, used) = table();
     let parts = [

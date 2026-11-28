@@ -56,7 +56,7 @@ pub fn bytes_of(words: impl Iterator<Item = u32>) -> Vec<u8> {
 }
 
 /// What the program's inputs are: user data, and the view at each heap slot.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Plan {
     /// user-data dword → (value per input set); tables are fixed, constants vary
     pub ud: [[u32; 16]; SETS as usize],
@@ -68,10 +68,25 @@ pub struct Plan {
     /// raw buffer slots the oracle reads as constant buffers: the title's root signature names the range a CBV
     /// (the fork's translation reads a buffer through a CBV range as a CBV; ours reads every heap buffer raw)
     pub oracle_cbv: BTreeSet<u32>,
+    /// per input set, buffer slot → the dwords that hold set 0's word instead of the set's own: the words the
+    /// program uses as descriptor indices ([`index_words`]), so an index computed from float data stays an index
+    pub patch: [BTreeMap<u32, Vec<bool>>; SETS as usize],
+    /// input sets whose indices from the data still leave the heap (no buffer word found that feeds them)
+    pub oob: Vec<u32>,
+    /// the oracle's root SRVs (`t<register>, space1`) and the heap slot of the window view ours reads the same buffer
+    /// through ([`ROOT_WINDOW`])
+    pub roots: Vec<(u32, u32)>,
 }
 
+/// The first window ([`rebuild_sir::lift::window_slot`]) a root descriptor's address names: the title's root SRV
+/// is a 64-bit address, which ours reads through window addressing (the window's raw view, the address's low 29
+/// bits as the offset) and the oracle through a root SRV. Each root descriptor gets an address at offset 0 of its
+/// own window, whose view is a buffer of the plan; the oracle's root SRV is that buffer.
+const ROOT_WINDOW: u32 = 8;
+
 /// `record`: dynamic indices are left to the recording pass ([`super::record`]): no region is filled for them.
-pub fn plan(p: &Prog, record: bool) -> Result<Plan, String> {
+/// `roots`: the oracle's root SRV registers (space 1), each the root descriptor at that root parameter index.
+pub fn plan(p: &Prog, record: bool, roots: &[u32]) -> Result<Plan, String> {
     let mut pl = Plan::default();
     // each table at its own place: resource tables 256 slots apart, sampler tables 64
     let mut table_base: BTreeMap<u8, (Heap, u32)> = BTreeMap::new();
@@ -102,6 +117,17 @@ pub fn plan(p: &Prog, record: bool) -> Result<Plan, String> {
             }
             RootType::ResourceHeap | RootType::SamplerHeap => {
                 table_base.insert(prm.user_data, (if prm.root == RootType::SamplerHeap { Heap::Sampler } else { Heap::Resource }, 0));
+            }
+            RootType::Descriptor if roots.contains(&u32::from(prm.slot)) && prm.user_data < 15 => {
+                // the address: offset 0 of window k (`sir_wi`: (hi << 3 | lo >> 29) & 32767)
+                let k = ROOT_WINDOW + pl.roots.len() as u32;
+                let slot = rebuild_sir::lift::WINDOW_HEAP_BASE + k;
+                for s in 0..SETS as usize {
+                    pl.ud[s][prm.user_data as usize] = (k & 7) << 29;
+                    pl.ud[s][prm.user_data as usize + 1] = k >> 3;
+                }
+                pl.slots.insert(slot, View::Raw);
+                pl.roots.push((u32::from(prm.slot), slot));
             }
             _ => {
                 for k in 0..prm.sgprs.max(1) as u8 {
@@ -194,8 +220,11 @@ pub fn plan(p: &Prog, record: bool) -> Result<Plan, String> {
     Ok(pl)
 }
 
+/// One kind of view for a filled dynamic region. A plain and an array texture are not: an index from the data
+/// over both is left to the recording pass, which keeps index words in the heap (`index_words`).
 fn same_kind(a: View, b: View) -> bool {
-    merge(a, b).is_ok()
+    let two_ways = matches!((a, b), (View::Tex(1), View::Tex(5)) | (View::Tex(5), View::Tex(1)) | (View::Tex(0), View::Tex(4)) | (View::Tex(4), View::Tex(0)));
+    merge(a, b).is_ok() && !two_ways
 }
 
 /// Two reads of one descriptor: a load and a store of the same raw buffer are one UAV.
@@ -204,6 +233,10 @@ pub fn merge(a: View, b: View) -> Result<View, String> {
         _ if a == b => a,
         (View::Raw, View::RwRaw) | (View::RwRaw, View::Raw) => View::RwRaw,
         (View::Typed, View::RwTyped) | (View::RwTyped, View::Typed) => View::RwTyped,
+        // one texture sampled as 2D and as 2D array (or 1D and 1D array): one array view of an array texture, which
+        // both declarations read, the same descriptor for ours and the oracle
+        (View::Tex(1), View::Tex(5)) | (View::Tex(5), View::Tex(1)) => View::Tex(5),
+        (View::Tex(0), View::Tex(4)) | (View::Tex(4), View::Tex(0)) => View::Tex(4),
         (View::Sampler, View::SamplerCmp) | (View::SamplerCmp, View::Sampler) => return Err("one sampler read as plain and comparison".into()),
         _ => return Err(format!("one descriptor read as {a:?} and {b:?}")),
     })
@@ -329,8 +362,9 @@ fn tex_bytes(d: &D3D12_RESOURCE_DESC) -> usize {
 }
 
 /// Makes the resource behind one view, with input set `set`'s contents.
-fn make(g: &Gpu, view: View, set: u32, salt: u64) -> Result<Res, String> {
-    let words = |n: usize| bytes_of((0..n as u64).map(|i| word(set, salt, i)));
+/// `patch`: dwords of a buffer that take set 0's word ([`Plan::patch`]).
+fn make(g: &Gpu, view: View, set: u32, salt: u64, patch: Option<&Vec<bool>>) -> Result<Res, String> {
+    let words = |n: usize| bytes_of((0..n as u64).map(|i| if patch.is_some_and(|p| p.get(i as usize) == Some(&true)) { word(0, salt, i) } else { word(set, salt, i) }));
     let srv = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
     let uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     match view {
@@ -496,7 +530,7 @@ fn resources(g: &Gpu, pl: &Plan, set: u32, d: &Draw) -> Result<(Vec<(Vec<u32>, B
                 continue;
             }
         }
-        let res = make(g, *v, set, *slot as u64).map_err(|e| ("input resource", e))?;
+        let res = make(g, *v, set, *slot as u64, pl.patch[set as usize].get(slot)).map_err(|e| ("input resource", e))?;
         by_view.insert(*v, bound.len());
         bound.push((vec![*slot], Bound { res, view: *v }));
     }
@@ -554,8 +588,9 @@ fn descriptors(g: &Gpu, pl: &Plan, bound: &[(Vec<u32>, Bound)]) {
 }
 
 /// Records one side's draw or dispatch (between `begin` and `end`).
-/// `extra`: a further root SRV (parameter, buffer) the side's root signature has (the oracle's live-slot table).
-fn record_draw(g: &Gpu, d: &Draw, pso: &ID3D12PipelineState, rs: &ID3D12RootSignature, ud: &[u32; 16], tres: &[Res], extra: Option<(u32, &ID3D12Resource)>) {
+/// `extra`: further root SRVs (parameter, buffer) the side's root signature has (the oracle's live-slot table and
+/// root SRVs).
+fn record_draw(g: &Gpu, d: &Draw, pso: &ID3D12PipelineState, rs: &ID3D12RootSignature, ud: &[u32; 16], tres: &[Res], extra: &[(u32, &ID3D12Resource)]) {
     unsafe {
         let l = &g.list;
         l.SetDescriptorHeaps(&[Some(g.heap.clone()), Some(g.samplers.clone())]);
@@ -565,8 +600,8 @@ fn record_draw(g: &Gpu, d: &Draw, pso: &ID3D12PipelineState, rs: &ID3D12RootSign
             l.SetComputeRootSignature(rs);
             l.SetComputeRoot32BitConstants(layout::param::CS_USER_DATA, 16, ud, 0);
             l.SetComputeRootShaderResourceView(layout::param::CS_SHADOW, d.shadow.GetGPUVirtualAddress());
-            if let Some((k, b)) = extra {
-                l.SetComputeRootShaderResourceView(k, b.GetGPUVirtualAddress());
+            for (k, b) in extra {
+                l.SetComputeRootShaderResourceView(*k, b.GetGPUVirtualAddress());
             }
             l.Dispatch(d.groups[0], d.groups[1], d.groups[2]);
         } else {
@@ -574,8 +609,8 @@ fn record_draw(g: &Gpu, d: &Draw, pso: &ID3D12PipelineState, rs: &ID3D12RootSign
             let user = if d.vsetup.is_some() { layout::param::VS_USER_DATA } else { layout::param::PS_USER_DATA };
             l.SetGraphicsRoot32BitConstants(user, 16, ud, 0);
             l.SetGraphicsRootShaderResourceView(layout::param::GFX_SHADOW, d.shadow.GetGPUVirtualAddress());
-            if let Some((k, b)) = extra {
-                l.SetGraphicsRootShaderResourceView(k, b.GetGPUVirtualAddress());
+            for (k, b) in extra {
+                l.SetGraphicsRootShaderResourceView(*k, b.GetGPUVirtualAddress());
             }
             match d.vsetup {
                 Some(st) => super::vs::draw(g, st, &tres[0], &tres[1]),
@@ -600,7 +635,8 @@ fn shadow_table(pl: &Plan) -> Vec<u8> {
         let at = PAGE_TABLE_BYTE as usize + page as usize * 4;
         shadow[at..at + 4].copy_from_slice(&v.to_le_bytes());
     }
-    for (slot, v) in &pl.slots {
+    // (a window view, past the console range, has no shadow entry)
+    for (slot, v) in pl.slots.range(..CONSOLE_VIEWS) {
         let at = *slot as usize * 16;
         shadow[at + 8..at + 12].copy_from_slice(&slot.to_le_bytes());
         if matches!(v, View::Raw | View::RwRaw) || (*v == View::Cbv && pl.strides.contains_key(slot)) {
@@ -613,69 +649,203 @@ fn shadow_table(pl: &Plan) -> Vec<u8> {
 }
 
 /// The recording pass ([`super::record`]): our instrumented program on every input set, until the slots it names
-/// settle; they join the plan.
+/// settle; they join the plan. A set whose indices from the data leave the heap (float words used as indices)
+/// has the words feeding them found ([`index_words`]) and given set 0's word, and the plan settles again.
 /// `at`: the output folder and hash, so a set that never finishes is named (`current`) and `skip`ped next time.
 #[allow(clippy::too_many_arguments)]
 fn record_plan(g: &mut Gpu, pl: &mut Plan, rec_pso: &ID3D12PipelineState, rs: &ID3D12RootSignature, d: &Draw, kinds: &[View], at: (&std::path::Path, &str), skip: &[u32]) -> Result<(), (&'static str, String)> {
-    use super::record::*;
-    for _round in 0..ROUNDS {
+    let r = Rec { pso: rec_pso, rs, d, kinds, at };
+    let sets: Vec<u32> = (0..SETS).filter(|s| !skip.contains(s)).collect();
+    let mut searched = BTreeSet::new();
+    loop {
+        let oob = settle(g, pl, &r, &sets)?;
+        let todo: Vec<u32> = oob.iter().copied().filter(|s| !searched.contains(s)).collect();
+        if todo.is_empty() {
+            pl.oob = oob;
+            return Ok(());
+        }
+        for s in todo {
+            searched.insert(s);
+            index_words(g, pl, &r, s)?;
+        }
+    }
+}
+
+/// The recording pipeline and what one of its runs needs.
+struct Rec<'a> {
+    pso: &'a ID3D12PipelineState,
+    rs: &'a ID3D12RootSignature,
+    d: &'a Draw<'a>,
+    kinds: &'a [View],
+    at: (&'a std::path::Path, &'a str),
+}
+
+/// Rounds over every set until no new slot is named; the sets whose indices left the heap in the last round.
+fn settle(g: &mut Gpu, pl: &mut Plan, r: &Rec, sets: &[u32]) -> Result<Vec<u32>, (&'static str, String)> {
+    for _round in 0..super::record::ROUNDS {
         let mut grew = false;
-        for set in (0..SETS).filter(|s| !skip.contains(s)) {
-            let _ = std::fs::write(super::shard_file(at.0, "current"), format!("{} {set}", at.1));
-            let (bound, tres) = resources(g, pl, set, d)?;
-            // a dummy of every kind the program names, the known table, the record
-            let mut dummies = Vec::new();
-            for v in kinds.iter().filter(|v| !matches!(v, View::Sampler | View::SamplerCmp)) {
-                let res = make(g, *v, set, 0xD0 + bit(*v) as u64).map_err(|e| ("input resource", e))?;
-                dummies.push((DUMMY_BASE + bit(*v), Bound { res, view: *v }));
+        let mut oob = Vec::new();
+        for &set in sets {
+            let a = record_once(g, pl, r, set)?;
+            grew |= a.new;
+            if a.oob {
+                oob.push(set);
             }
-            let known = g
-                .resource(buffer_desc(WORDS as u64 * 4, false), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false, known(pl))
-                .map_err(|e| ("known table", e))?;
-            let rec = g.resource(rec_desc(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, vec![0u8; WORDS as usize * 4]).map_err(|e| ("record", e))?;
-            let shadow = g.upload_buffer(&shadow_table(pl)).map_err(|e| ("shadow table", e))?;
-            let d = Draw { shadow: &shadow, ..*d };
-            descriptors(g, pl, &bound);
-            for (s, b) in &dummies {
-                describe(g, *s, b);
-            }
-            unsafe {
-                let raw = |n: u32| D3D12_SHADER_RESOURCE_VIEW_DESC {
-                    Format: DXGI_FORMAT_R32_TYPELESS,
-                    ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
-                    Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-                    Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 { Buffer: D3D12_BUFFER_SRV { FirstElement: 0, NumElements: n, StructureByteStride: 0, Flags: D3D12_BUFFER_SRV_FLAG_RAW } },
-                };
-                g.device.CreateShaderResourceView(&known.r, Some(&raw(WORDS)), g.slot(KNOWN_SLOT));
-                let u = D3D12_UNORDERED_ACCESS_VIEW_DESC {
-                    Format: DXGI_FORMAT_R32_TYPELESS,
-                    ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
-                    Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 { Buffer: D3D12_BUFFER_UAV { FirstElement: 0, NumElements: WORDS, StructureByteStride: 0, CounterOffsetInBytes: 0, Flags: D3D12_BUFFER_UAV_FLAG_RAW } },
-                };
-                g.device.CreateUnorderedAccessView(&rec.r, None, Some(&u), g.slot(REC_SLOT));
-            }
-            for (s, v) in [(SAMPLER_DUMMY, false), (SAMPLER_DUMMY + 1, true)] {
-                g.sampler(s, v);
-            }
-            let all: Vec<&Res> = bound.iter().map(|(_, b)| &b.res).chain(dummies.iter().map(|(_, b)| &b.res)).chain(tres.iter()).chain([&known, &rec]).collect();
-            g.begin();
-            for r in &all {
-                g.upload(r);
-            }
-            record_draw(g, &d, rec_pso, rs, &pl.ud[set as usize], &tres, None);
-            g.download(&rec);
-            g.end().map_err(|e| ("recording pass lost the device", e))?;
-            if g.lost() {
-                return Err(("recording pass lost the device", String::new()));
-            }
-            let words = g.read(&rec);
-            grew |= absorb(pl, &words).map_err(|e| ("untested", e))?;
         }
         if !grew {
-            return Ok(());
+            return Ok(oob);
         }
     }
     Err(("untested", format!("recorded indices still growing after {} rounds", super::record::ROUNDS)))
+}
+
+/// Tests (recording runs) one set may spend finding its index words.
+const INDEX_TESTS: usize = 600;
+
+/// The buffer words set `set` uses as descriptor indices: with every buffer word of the plan given set 0's word
+/// (small integers, as the title's own index words are) the set's indices stay in the heap, else nothing is
+/// patched; then whole buffers, halves, down to single words go back to the set's own words while the indices
+/// stay in the heap. What is left patched are the index words (and only words the program reads: an unread word
+/// changes nothing). Both sides then run on the same patched buffers.
+fn index_words(g: &mut Gpu, pl: &mut Plan, r: &Rec, set: u32) -> Result<(), (&'static str, String)> {
+    let s = set as usize;
+    let n = (BUFFER_BYTES / 4) as usize;
+    let saved = pl.patch[s].clone();
+    // every buffer word from set 0, the plan growing by the slots the set names then (a buffer reached only on
+    // this data is patched too)
+    let mut tests = 0usize;
+    let mut bufs: Vec<u32> = Vec::new();
+    let mut whole_ok = false;
+    for _ in 0..super::record::ROUNDS {
+        bufs = pl.slots.iter().filter(|(_, v)| matches!(v, View::Cbv | View::Raw | View::Typed | View::RwRaw | View::RwTyped)).map(|(k, _)| *k).collect();
+        for b in &bufs {
+            pl.patch[s].insert(*b, vec![true; n]);
+        }
+        tests += 1;
+        match record_once(g, pl, r, set) {
+            Ok(a) if a.new => continue,
+            Ok(a) => {
+                whole_ok = !a.oob;
+                break;
+            }
+            Err(("untested", e)) => {
+                if std::env::var_os("REBUILD_EXEC_TRACE").is_some() {
+                    eprintln!("execcheck: set {set}: {e}");
+                }
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    if !whole_ok {
+        if std::env::var_os("REBUILD_EXEC_TRACE").is_some() {
+            eprintln!("execcheck: set {set}: indices leave the heap with every buffer word from set 0");
+        }
+        pl.patch[s] = saved;
+        return Ok(());
+    }
+    // a range goes back to the set's words when the indices stay in the heap without it; else its halves are tried
+    #[allow(clippy::too_many_arguments)]
+    fn shrink(g: &mut Gpu, pl: &mut Plan, r: &Rec, set: u32, b: u32, lo: usize, hi: usize, tests: &mut usize) -> Result<(), (&'static str, String)> {
+        if *tests >= INDEX_TESTS {
+            return Ok(());
+        }
+        let s = set as usize;
+        pl.patch[s].get_mut(&b).unwrap()[lo..hi].fill(false);
+        if in_heap(g, pl, r, set, tests)? {
+            return Ok(());
+        }
+        pl.patch[s].get_mut(&b).unwrap()[lo..hi].fill(true);
+        if hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            shrink(g, pl, r, set, b, lo, mid, tests)?;
+            shrink(g, pl, r, set, b, mid, hi, tests)?;
+        }
+        Ok(())
+    }
+    for b in bufs {
+        shrink(g, pl, r, set, b, 0, n, &mut tests)?;
+    }
+    pl.patch[s].retain(|_, v| v.contains(&true));
+    if std::env::var_os("REBUILD_EXEC_TRACE").is_some() {
+        let words: Vec<String> = pl.patch[s].iter().map(|(b, v)| format!("{b}:{:?}", v.iter().enumerate().filter(|x| *x.1).map(|x| x.0).collect::<Vec<_>>())).collect();
+        eprintln!("execcheck: set {set}: index words {} after {tests} tests", words.join(" "));
+    }
+    if !pl.patch[s].is_empty() {
+        pl.notes.push("index words from set 0");
+    }
+    Ok(())
+}
+
+/// One test of [`index_words`]: set `set` recorded on a copy of the plan (rounds while it names new slots) names
+/// no index past the heap.
+fn in_heap(g: &mut Gpu, pl: &Plan, r: &Rec, set: u32, tests: &mut usize) -> Result<bool, (&'static str, String)> {
+    let mut t = pl.clone();
+    for _ in 0..3 {
+        *tests += 1;
+        match record_once(g, &mut t, r, set) {
+            Ok(a) if a.oob => return Ok(false),
+            Ok(a) if !a.new => return Ok(true),
+            Ok(_) => {}
+            Err(("untested", _)) => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
+}
+
+/// One run of the instrumented program on one set, its record absorbed into the plan.
+fn record_once(g: &mut Gpu, pl: &mut Plan, r: &Rec, set: u32) -> Result<super::record::Absorbed, (&'static str, String)> {
+    use super::record::*;
+    let _ = std::fs::write(super::shard_file(r.at.0, "current"), format!("{} {set}", r.at.1));
+    let (bound, tres) = resources(g, pl, set, r.d)?;
+    // a dummy of every kind the program names, the known table, the record
+    let mut dummies = Vec::new();
+    for v in r.kinds.iter().filter(|v| !matches!(v, View::Sampler | View::SamplerCmp)) {
+        let res = make(g, *v, set, 0xD0 + bit(*v) as u64, None).map_err(|e| ("input resource", e))?;
+        dummies.push((DUMMY_BASE + bit(*v), Bound { res, view: *v }));
+    }
+    let known = g
+        .resource(buffer_desc(WORDS as u64 * 4, false), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false, known(pl))
+        .map_err(|e| ("known table", e))?;
+    let rec = g.resource(rec_desc(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, vec![0u8; WORDS as usize * 4]).map_err(|e| ("record", e))?;
+    let shadow = g.upload_buffer(&shadow_table(pl)).map_err(|e| ("shadow table", e))?;
+    let d = Draw { shadow: &shadow, ..*r.d };
+    descriptors(g, pl, &bound);
+    for (s, b) in &dummies {
+        describe(g, *s, b);
+    }
+    unsafe {
+        let raw = |n: u32| D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_R32_TYPELESS,
+            ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 { Buffer: D3D12_BUFFER_SRV { FirstElement: 0, NumElements: n, StructureByteStride: 0, Flags: D3D12_BUFFER_SRV_FLAG_RAW } },
+        };
+        g.device.CreateShaderResourceView(&known.r, Some(&raw(WORDS)), g.slot(KNOWN_SLOT));
+        let u = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: DXGI_FORMAT_R32_TYPELESS,
+            ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 { Buffer: D3D12_BUFFER_UAV { FirstElement: 0, NumElements: WORDS, StructureByteStride: 0, CounterOffsetInBytes: 0, Flags: D3D12_BUFFER_UAV_FLAG_RAW } },
+        };
+        g.device.CreateUnorderedAccessView(&rec.r, None, Some(&u), g.slot(REC_SLOT));
+    }
+    for (s, v) in [(SAMPLER_DUMMY, false), (SAMPLER_DUMMY + 1, true)] {
+        g.sampler(s, v);
+    }
+    let all: Vec<&Res> = bound.iter().map(|(_, b)| &b.res).chain(dummies.iter().map(|(_, b)| &b.res)).chain(tres.iter()).chain([&known, &rec]).collect();
+    g.begin();
+    for x in &all {
+        g.upload(x);
+    }
+    record_draw(g, &d, r.pso, r.rs, &pl.ud[set as usize], &tres, &[]);
+    g.download(&rec);
+    g.end().map_err(|e| ("recording pass lost the device", e))?;
+    if g.lost() {
+        return Err(("recording pass lost the device", String::new()));
+    }
+    let words = g.read(&rec);
+    absorb(pl, &words).map_err(|e| ("untested", e))
 }
 
 /// Runs a program and the oracle's on every input set.
@@ -691,8 +861,12 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
     if o.wave > 32 {
         return row("untested", format!("the oracle needs wave size {} (no adapter here runs it)", o.wave), String::new());
     }
-    if o.root_views > 0 && !o.live_table {
+    // root views: the live-slot table (with REBUILD_EXEC_LIVE) and root SRVs, each over a root descriptor of ours
+    if o.other_roots || (o.root_views > o.root_srvs.len() && !o.live_table) {
         return row("untested", "the oracle binds root views".into(), String::new());
+    }
+    if let Some(r) = o.root_srvs.iter().find(|r| !p.layout.iter().any(|x| x.root == RootType::Descriptor && u32::from(x.slot) == **r && x.user_data < 15)) {
+        return row("untested", format!("the oracle's root SRV t{r} has no root descriptor in user data"), String::new());
     }
     // ours declares a wave size (wave-wide compute: native wave32, or wave64 doubled onto 32 lanes); WARP's waves
     // are 4 lanes, so the pipeline cannot be made here
@@ -707,10 +881,10 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
     // region: recording those too (with the recorded slots outside the region given views) turned 30 programs that
     // match into differing ones, where the oracle reads other slots than ours for an index from the data
     let record = std::env::var_os("REBUILD_EXEC_NORECORD").is_none();
-    let (mut pl, recording) = match plan(p, false) {
+    let (mut pl, recording) = match plan(p, false, &o.root_srvs) {
         Ok(pl) => (pl, None),
         Err(e) if e == "dynamic descriptor index over mixed views" && record => {
-            let pl = match plan(p, true) {
+            let pl = match plan(p, true, &o.root_srvs) {
                 Ok(pl) => pl,
                 Err(e) => return row("untested", e, String::new()),
             };
@@ -746,6 +920,15 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
         oracle_root.params.push(layout::Param::Srv { register: 255, space: 1, vis });
         oracle_root.params.len() as u32 - 1
     });
+    // the oracle's root SRVs: (parameter, slot of the buffer ours reads through its window)
+    let root_params: Vec<(u32, u32)> = pl
+        .roots
+        .iter()
+        .map(|(register, slot)| {
+            oracle_root.params.push(layout::Param::Srv { register: *register, space: 1, vis });
+            (oracle_root.params.len() as u32 - 1, *slot)
+        })
+        .collect();
     let roots = [&ours_root, &oracle_root].map(|r| rebuild_pipelines::d3d::serialize(r).and_then(|b| g.root_signature(&b)));
     let (ours_rs, oracle_rs) = match roots {
         [Ok(a), Ok(b)] => (a, b),
@@ -907,8 +1090,16 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
             for r in &all {
                 g.upload(r);
             }
-            let extra = if side == 1 { live.as_ref().map(|(k, b)| (*k, b)) } else { None };
-            record_draw(g, &draw, pso, rs, &pl.ud[set as usize], &tres, extra);
+            let mut extra: Vec<(u32, &ID3D12Resource)> = Vec::new();
+            if side == 1 {
+                extra.extend(live.as_ref().map(|(k, b)| (*k, b)));
+                for (k, slot) in &root_params {
+                    if let Some((_, b)) = bound.iter().find(|(slots, _)| slots.contains(slot)) {
+                        extra.push((*k, &b.res.r));
+                    }
+                }
+            }
+            record_draw(g, &draw, pso, rs, &pl.ud[set as usize], &tres, &extra);
             for r in &all {
                 g.download(r);
             }
@@ -948,6 +1139,11 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
         if verdict == "match" && !(kept && dropped) {
             (verdict, reason) = ("vacuous", "coverage only, and the sets never both keep and discard pixels".into());
         }
+    }
+    // an index from the data still past the heap on a set (no buffer word feeds it): the oracle reads past its heap
+    // there (undefined), ours the null view
+    if verdict == "differ" && !pl.oob.is_empty() {
+        reason = format!("an index from the data leaves the heap (set {:?}); {reason}", pl.oob);
     }
     if verdict == "differ" && racing {
         reason = format!("racing writes (our own runs differ); {reason}");

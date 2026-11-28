@@ -317,9 +317,14 @@ pub struct Oracle {
     pub statics: Vec<[u32; 10]>,
     /// root CBVs, SRVs, UAVs and root-indexed views the oracle binds outside the heap
     pub root_views: usize,
-    /// the root views are exactly one SRV, `t255, space1`: the fork's table of live heap slots (a dword per slot,
-    /// read before each heap access, 0 for an empty slot), which the harness can give it
+    /// the root views include the SRV `t255, space1`: the fork's table of live heap slots (a dword per slot, read
+    /// before each heap access, 0 for an empty slot), which the harness can give it
     pub live_table: bool,
+    /// the root SRVs other than the live table: `t<r>, space1`, the buffer behind the title's root descriptor at root
+    /// parameter r ([`run::plan`] gives it a window)
+    pub root_srvs: Vec<u32>,
+    /// root CBVs, UAVs or root-indexed views: no path for them here
+    pub other_roots: bool,
     /// `[WaveSize]` of the oracle (0: none)
     pub wave: u32,
 }
@@ -363,13 +368,15 @@ fn oracle(dir: &Path, hash: &str) -> Result<Oracle, String> {
     root_views += indexed;
     // given only with REBUILD_EXEC_LIVE: on WARP most of these programs (with every slot live) never finish a set
     // in 30 s on either input, which costs a worker restart each; off, they stay untested (root views)
-    let live_table = std::env::var_os("REBUILD_EXEC_LIVE").is_some() && lists[0].is_empty() && lists[1] == [255] && lists[2].is_empty() && indexed == 0;
+    let live_table = std::env::var_os("REBUILD_EXEC_LIVE").is_some() && lists[1].contains(&255);
+    let root_srvs: Vec<u32> = lists[1].iter().filter(|r| **r != 255).map(|r| u32::from(*r)).collect();
+    let other_roots = !lists[0].is_empty() || !lists[2].is_empty() || indexed > 0;
     // the wave size the oracle demands ([WaveSize]: PSV0 runtime info, minimum expected lane count)
     let wave = rebuild_shader::Container::parse(&dxil)
         .ok()
         .and_then(|c| c.part(rebuild_shader::FourCC::PSV0).and_then(|p| p.data.get(20..24).map(|w| u32::from_le_bytes(w.try_into().unwrap()))))
         .unwrap_or(0);
-    Ok(Oracle { dxil, statics, root_views, live_table, wave })
+    Ok(Oracle { dxil, statics, root_views, live_table, root_srvs, other_roots, wave })
 }
 
 /// The result of one program.

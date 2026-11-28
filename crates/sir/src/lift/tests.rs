@@ -66,6 +66,8 @@ fn moves_float_math_modifiers_and_literals() {
     assert!(b.contains("mad(asfloat(v0), asfloat(v1), asfloat(1073741824u))"), "{b}");
     assert!(b.contains("saturate((mad(abs(asfloat(v0)), (-asfloat(v1)), asfloat(v2))) * 2.0f)"), "{b}");
     assert!(b.contains("v7 = sir_pkrtz(asfloat(v5), asfloat(v6));"), "{b}");
+    // the console's reciprocal as a correctly rounded division (DXC's rcp is a fast one)
+    assert!(b.contains("sir_rcp(asfloat(v5))"), "{b}");
     assert!(!l.exec_narrowed);
     assert_eq!(l.vgprs.iter().copied().collect::<Vec<_>>(), (0..=7).collect::<Vec<u16>>());
 }
@@ -105,6 +107,22 @@ fn compares_are_per_lane_masks_and_cmpx_predicates_later_writes() {
     assert!(b.contains("ex = (3u < v2);"), "{b}");
     assert!(b.contains("if (ex) v3 = asuint(1.0f);"), "{b}");
     assert!(l.exec_narrowed);
+}
+
+#[test]
+fn fract_and_turns_keep_the_consoles_results() {
+    // v_fract never 1.0; v_sin / v_cos take the whole turns off before scaling to radians
+    let p = program(&[vop1("v_fract_f32", 1, V + 0), vop1("v_sin_f32", 2, V + 0), vop1("v_cos_f32", 3, V + 0), vop1("v_fract_f16", 4, V + 0)]);
+    let l = lift(&p);
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let b = &l.body;
+    for f in ["sir_fract(asfloat(v0))", "sir_sin(asfloat(v0))", "sir_cos(asfloat(v0))", "sir_fract_h("] {
+        assert!(b.contains(f), "{f}: {b}");
+    }
+    assert!(!b.contains("frac(") && !b.contains("6.2831853f"), "{b}");
+    for f in ["float sir_fract(", "float sir_fract_h(", "float sir_turns(", "float sir_sin(", "float sir_cos(", "float sir_rcp("] {
+        assert!(super::PRELUDE.contains(f), "{f}");
+    }
 }
 
 #[test]

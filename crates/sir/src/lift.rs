@@ -111,6 +111,9 @@ pub fn window_slot(address: u64) -> (u32, u32) {
 /// [WINDOW_HEAP_BASE, 1,000,000)              window raw SRVs (loads)
 /// ```
 pub const CONSOLE_VIEWS: u32 = 750_000;
+/// The low 16 bits of an image descriptor's word 3 as translated code reads them: `dst_sel` x, y, z, w = 4, 5, 6, 7
+/// (the identity: the host view does the console's swizzle) and base level 0 (bits 12-15).
+pub const IMAGE_WORD3_LOW: u32 = 0xFAC;
 /// Null views after [`CONSOLE_VIEWS`]: see [`NullKind::slot`].
 pub const NULL_BANK: u32 = 24;
 
@@ -200,6 +203,18 @@ float sir_mul_legacy(float a, float b) { return (a == 0.0f || b == 0.0f) ? 0.0f 
 float sir_med3(float a, float b, float c) { precise float r = (isnan(a) || isnan(b) || isnan(c)) ? min(min(a, b), c) : max(min(a, b), min(max(a, b), c)); return r; }
 float sir_clamp(float x, float lo, float hi) { precise float r = min(max(x, lo), hi); return r; }
 float sir_sub(float a, float b) { precise float r = a - b; return r; }
+// v_fract_f32 is never 1.0: a tiny negative x gives the largest float below one, where the host's frac rounds to 1
+// v_rcp_f32 as a correctly rounded division (DXC's rcp is a fast division, which a host may approximate)
+float sir_rcp(float x) { precise float r = 1.0f / x; return r; }
+float sir_fract(float x) { precise float r = frac(x); return r >= 1.0f ? asfloat(0x3f7fffffu) : r; }
+// v_fract_f16 (in f32, rounded to f16 after): a fraction that would round to 1.0 is the largest half below one
+float sir_fract_h(float x) { precise float r = frac(x); return r >= 0.999755859375f ? 0.99951171875f : r; }
+// v_sin_f32 / v_cos_f32 take turns: the whole turns come off first (exact), so a large angle keeps its fraction
+// (scaling to radians first rounds it away); a zero stays itself (the sine of -0 is -0); a half turn's sine and a
+// quarter turn's cosine are exactly +0 on the console, where the host's function of the rounded angle is ~1e-7
+float sir_turns(float x) { precise float p = x - round(x); return x == 0.0f ? x : p; }
+float sir_sin(float x) { float p = sir_turns(x); return abs(p) == 0.5f ? 0.0f : sin(p * 6.2831855f); }
+float sir_cos(float x) { float p = sir_turns(x); return abs(p) == 0.25f ? 0.0f : cos(p * 6.2831855f); }
 int sir_med3i(int a, int b, int c) { return max(min(a, b), min(max(a, b), c)); }
 uint sir_med3u(uint a, uint b, uint c) { return max(min(a, b), min(max(a, b), c)); }
 // f32 -> f16 rounding toward zero (the console's v_cvt_pkrtz_f16_f32)
@@ -394,6 +409,9 @@ struct Lifter<'a> {
     /// the current instruction keeps only bits 16 and up of its first operand (a shift right or field
     /// extract from bit 16): a descriptor's word 1 may be read as its stride
     hi16: bool,
+    /// the current instruction keeps only bits below 16 of its first operand (a field extract or a mask below bit
+    /// 16): an image descriptor's word 3 may be read for its swizzle and base level
+    lo16: bool,
     /// inside an SDWA instruction: the operands are `sir_a` / `sir_b` (selected and extended), and the op's
     /// result goes to `sir_r` (merged into the destination's selected bits afterwards)
     sdwa: bool,
@@ -428,6 +446,14 @@ impl Lifter<'_> {
                             } else {
                                 format!("(sir_shadow.Load(sir_sh(s{b})) << 16)")
                             });
+                        }
+                    }
+                    // an image descriptor's word 3 with only its low 16 bits kept: the identity swizzle (the host view
+                    // swizzles) and base level 0 (the host view starts at its own base level, so a size the code
+                    // shifts by it is the view's); the last level and the type above them are not known here
+                    if let Some((b, 3)) = self.desc_word_of(n) {
+                        if self.lo16 && self.f.descs.get(&b).is_some_and(|d| d.heap == res::Heap::Resource && d.dwords == 8) {
+                            return Some(format!("{IMAGE_WORD3_LOW}u"));
                         }
                     }
                     // a descriptor word read as data
@@ -1371,6 +1397,12 @@ impl Lifter<'_> {
             "s_bfe_u32" => self.cval(d, "ssrc1").is_some_and(|k| k & 31 >= 16),
             _ => false,
         };
+        // `s_bfe_u32 x, w, off | width << 16` (off + width <= 16) or `s_and_b32 x, w, k` (k < 2^16)
+        self.lo16 = match name {
+            "s_bfe_u32" => self.cval(d, "ssrc1").is_some_and(|k| (k & 31) + ((k >> 16) & 127) <= 16),
+            "s_and_b32" => self.cval(d, "ssrc1").is_some_and(|k| k < 1 << 16),
+            _ => false,
+        };
         let a = |l: &mut Self| l.usrc(d, "ssrc0");
         let b = |l: &mut Self| l.usrc(d, "ssrc1");
         match name {
@@ -1834,14 +1866,14 @@ impl Lifter<'_> {
                     "v_ceil_f32" => format!("ceil({x})"),
                     "v_trunc_f32" => format!("trunc({x})"),
                     "v_rndne_f32" => format!("round({x})"),
-                    "v_fract_f32" => format!("frac({x})"),
+                    "v_fract_f32" => format!("sir_fract({x})"),
                     "v_sqrt_f32" => format!("sqrt({x})"),
                     "v_rsq_f32" => format!("rsqrt({x})"),
-                    "v_rcp_f32" | "v_rcp_iflag_f32" => format!("rcp({x})"),
+                    "v_rcp_f32" | "v_rcp_iflag_f32" => format!("sir_rcp({x})"),
                     "v_exp_f32" => format!("exp2({x})"),
                     "v_log_f32" => format!("log2({x})"),
-                    "v_sin_f32" => format!("sin(({x}) * 6.2831853f)"),
-                    "v_cos_f32" => format!("cos(({x}) * 6.2831853f)"),
+                    "v_sin_f32" => format!("sir_sin({x})"),
+                    "v_cos_f32" => format!("sir_cos({x})"),
                     _ => unreachable!(),
                 };
                 self.vwrite_f(d, e);
@@ -2058,18 +2090,18 @@ impl Lifter<'_> {
             | "v_exp_f16" | "v_log_f16" | "v_sin_f16" | "v_cos_f16" => {
                 let x = self.fsrc16(d, "src0", 0)?;
                 let e = match name {
-                    "v_rcp_f16" => format!("rcp({x})"),
+                    "v_rcp_f16" => format!("sir_rcp({x})"),
                     "v_sqrt_f16" => format!("sqrt({x})"),
                     "v_rsq_f16" => format!("rsqrt({x})"),
                     "v_floor_f16" => format!("floor({x})"),
                     "v_ceil_f16" => format!("ceil({x})"),
                     "v_trunc_f16" => format!("trunc({x})"),
                     "v_rndne_f16" => format!("round({x})"),
-                    "v_fract_f16" => format!("frac({x})"),
+                    "v_fract_f16" => format!("sir_fract_h({x})"),
                     "v_exp_f16" => format!("exp2({x})"),
                     "v_log_f16" => format!("log2({x})"),
-                    "v_sin_f16" => format!("sin(({x}) * 6.2831853f)"),
-                    _ => format!("cos(({x}) * 6.2831853f)"),
+                    "v_sin_f16" => format!("sir_sin({x})"),
+                    _ => format!("sir_cos({x})"),
                 };
                 self.vwrite16(d, e, true);
                 Some(())
@@ -2339,6 +2371,7 @@ impl<'a> Lifter<'a> {
             scc_live: false,
             dpp: None,
             hi16: false,
+            lo16: false,
             sdwa: false,
             code: Vec::new(),
             wave: Wave::Agnostic,
@@ -2354,6 +2387,7 @@ impl<'a> Lifter<'a> {
         for (k, i) in insts.iter().enumerate() {
             self.why = None;
             self.hi16 = false;
+            self.lo16 = false;
             self.scc_live = live.get(k).copied().unwrap_or(true);
             let start = self.out.body.len();
             self.pre.clear();
