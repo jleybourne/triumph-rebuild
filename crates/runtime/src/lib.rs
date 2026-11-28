@@ -45,6 +45,8 @@ pub mod titlewindow;
 pub mod titlemem;
 #[cfg(windows)]
 pub mod memory;
+#[cfg(windows)]
+pub mod kwrite;
 #[cfg(all(test, windows))]
 mod present_card;
 #[cfg(windows)]

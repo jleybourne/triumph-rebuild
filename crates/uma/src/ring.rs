@@ -43,6 +43,7 @@ use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::System::Memory::*;
 
 use crate::chunks::{self, Run, CHUNK, CHUNKS_PER_PAGE, OS_PAGE};
+use crate::cold;
 use crate::WINDOW;
 
 const WRITE_WATCH_FLAG_RESET: u32 = 1;
@@ -117,6 +118,12 @@ pub struct FlushStats {
     pub zeroed: usize,
     /// regions GetWriteWatch refused this pass (skipped)
     pub unwatchable: usize,
+    /// bytes whose write-watch this pass read, and bytes of cold slices it did not read
+    pub watched_bytes: u64,
+    pub cold_bytes: u64,
+    /// slices made cold after the pass, and the time that took (ms)
+    pub went_cold: usize,
+    pub cold_ms: f64,
 }
 
 /// Over the ring's life: passes, bytes sent, and the coordinator's time (µs).
@@ -138,6 +145,17 @@ pub struct Totals {
     pub record_us: AtomicU64,
     /// waiting for the region lock (a free of watched memory held it)
     pub lock_us: AtomicU64,
+    /// write-watch read, and cold slices not read (bytes, summed over passes); making slices cold (µs)
+    pub watched_bytes: AtomicU64,
+    pub cold_bytes: AtomicU64,
+    pub cool_us: AtomicU64,
+    /// REBUILD_COLD_CHECK: pages found written in cold slices
+    pub cold_dirty: AtomicU64,
+}
+
+fn cold_check() -> bool {
+    static C: OnceLock<bool> = OnceLock::new();
+    *C.get_or_init(|| std::env::var("REBUILD_COLD_CHECK").is_ok_and(|v| v == "1"))
 }
 
 struct Ptr<T>(*mut T);
@@ -163,12 +181,56 @@ struct Region {
     len: usize,
     console: u64,
     sent: Box<[OnceLock<Box<[AtomicU64]>>]>,
+    /// the cold slices over it, in address order (`crate::cold`): a cold one's write-watch is not read
+    slices: Box<[&'static cold::Slice]>,
     _keep: Option<Arc<Watched>>,
 }
 
 impl Region {
     fn new(base: *mut u8, len: usize, console: u64, keep: Option<Arc<Watched>>) -> Region {
-        Region { base: Ptr(base), len, console, sent: (0..len.div_ceil(BLOCK)).map(|_| OnceLock::new()).collect(), _keep: keep }
+        let (first, end) = (base as u64 / cold::SLICE as u64, (base as u64 + len as u64).div_ceil(cold::SLICE as u64));
+        // no room left in the slice table (never expected): no slices, the region is read whole every pass
+        let slices = (first..end).map(|k| cold::slice(k * cold::SLICE as u64, true)).collect::<Option<Box<[_]>>>().unwrap_or_default();
+        Region { base: Ptr(base), len, console, sent: (0..len.div_ceil(BLOCK)).map(|_| OnceLock::new()).collect(), slices, _keep: keep }
+    }
+
+    /// Index in `slices` of the slice holding CPU address `a`.
+    fn slice_of(&self, a: u64) -> Option<usize> {
+        let first = self.slices.first()?.base;
+        Some(((a - first) / cold::SLICE as u64) as usize).filter(|&k| k < self.slices.len())
+    }
+
+    /// The CPU ranges whose write-watch a pass reads: runs of hot slices (the whole region if it has none).
+    /// Returns the bytes left out (cold).
+    fn hot_runs(&self, out: &mut Vec<(u64, u64)>, all: bool) -> u64 {
+        let n = self.slices.len();
+        if n == 0 || all {
+            out.push((self.base.0 as u64, self.base.0 as u64 + self.len as u64));
+            return 0;
+        }
+        let (mut k, mut cold) = (0, 0);
+        while k < n {
+            if !self.slices[k].scanned() {
+                let (f, t) = self.part(k);
+                cold += t - f;
+                k += 1;
+                continue;
+            }
+            let mut e = k + 1;
+            while e < n && self.slices[e].scanned() {
+                e += 1;
+            }
+            out.push((self.part(k).0, self.part(e - 1).1));
+            k = e;
+        }
+        cold
+    }
+
+    /// The CPU address range of its slice `k` (clipped to the region).
+    fn part(&self, k: usize) -> (u64, u64) {
+        let (base, end) = (self.base.0 as u64, self.base.0 as u64 + self.len as u64);
+        let s = self.slices[k].base;
+        (s.max(base), (s + cold::SLICE as u64).min(end))
     }
 
     /// The hashes of the page at `offset` as last sent (all-zero chunks if nothing was sent in its block).
@@ -344,6 +406,8 @@ struct Shared {
     zero: Mutex<Vec<(u64, u32)>>,
     backer: OnceLock<Backer>,
     totals: Totals,
+    /// this ring makes quiet slices cold ([`Ring::set_cold`])
+    cold: std::sync::atomic::AtomicBool,
 }
 
 struct Coordinator {
@@ -422,7 +486,7 @@ impl Ring {
                 list.Close().map_err(err("close"))?;
                 slots.push(Slot { staging_ptr: map(&staging)?, index_ptr: map(&index)? as *mut u32, staging, index, alloc, list, last_use: 0 });
             }
-            let shared = Arc::new(Shared { regions: RwLock::new(Vec::new()), carry: Mutex::new(Vec::new()), zero: Mutex::new(Vec::new()), backer: OnceLock::new(), totals: Totals::default() });
+            let shared = Arc::new(Shared { regions: RwLock::new(Vec::new()), carry: Mutex::new(Vec::new()), zero: Mutex::new(Vec::new()), backer: OnceLock::new(), totals: Totals::default(), cold: Default::default() });
             let coord = Coordinator {
                 gpu: Gpu { queue: queue.clone(), fence: fence.clone(), signature, pso, fill, slots },
                 shared: shared.clone(),
@@ -495,6 +559,8 @@ impl Ring {
         let mut regions = self.shared.regions.write().unwrap_or_else(|e| e.into_inner());
         let Some(k) = regions.iter().position(|r| r.console == console) else { return false };
         let r = regions.remove(k);
+        // what we made read-only there goes with the memory (the caller frees it next)
+        cold::forget(r.base.0 as u64, r.len as u64);
         let end = r.console + r.len as u64;
         self.shared.carry.lock().unwrap_or_else(|e| e.into_inner()).retain(|&p| p < r.console || p >= end);
         true
@@ -503,10 +569,20 @@ impl Ring {
     /// Run `f` while no pass reads any region (decommit or protect pages in one), then drop pages of
     /// `console..+len` carried to the next pass.
     pub fn quiet<R>(&self, console: u64, len: u64, f: impl FnOnce() -> R) -> R {
-        let _regions = self.shared.regions.write().unwrap_or_else(|e| e.into_inner());
+        let regions = self.shared.regions.write().unwrap_or_else(|e| e.into_inner());
         let out = f();
+        // decommitted pages lose our read-only marks (a commit there later is fresh, and touches the slice)
+        if let Some(r) = regions.iter().find(|r| r.console <= console && console < r.console + r.len as u64) {
+            cold::forget(r.base.0 as u64 + (console - r.console), len);
+        }
         self.shared.carry.lock().unwrap_or_else(|e| e.into_inner()).retain(|&p| p < console || p >= console + len);
         out
+    }
+
+    /// Make quiet slices of this ring's regions cold (`crate::cold`; it must be enabled, the I/O syscalls
+    /// guarded). One ring in a process should: slices are the process's.
+    pub fn set_cold(&self, on: bool) {
+        self.shared.cold.store(on, Ordering::Relaxed);
     }
 
     /// Set what backs pages before a pass writes them ([`Backer`]); once.
@@ -587,6 +663,9 @@ impl Coordinator {
                 tot.diff_us.fetch_add(us(st.diff_ms), Ordering::Relaxed);
                 tot.gather_us.fetch_add(us(st.gather_ms), Ordering::Relaxed);
                 tot.record_us.fetch_add(us(st.record_ms), Ordering::Relaxed);
+                tot.watched_bytes.fetch_add(st.watched_bytes, Ordering::Relaxed);
+                tot.cold_bytes.fetch_add(st.cold_bytes, Ordering::Relaxed);
+                tot.cool_us.fetch_add(us(st.cold_ms), Ordering::Relaxed);
                 tot.bytes.fetch_add(st.bytes as u64, Ordering::Relaxed);
                 tot.latency_us.fetch_add((st.latency_ms * 1000.0) as u64, Ordering::Relaxed);
                 tot.carried.fetch_add(st.carried_pages as u64, Ordering::Relaxed);
@@ -622,25 +701,78 @@ impl Coordinator {
         }
         st.slot_wait_ms = ms(t);
 
-        // watch
+        // watch: the hot slices of each region, runs of them in one call (a call costs ~0.08 ms of its own)
         let t = Instant::now();
+        let now = cold::now_ms();
+        // only a ring that makes slices cold skips them (another ring sharing a slice reads all it watches)
+        let cooling = self.shared.cold.load(Ordering::Relaxed) && cold::enabled();
+        let mut runs: Vec<(u64, u64)> = Vec::new();
         for (ri, r) in regions.iter().enumerate() {
-            let want = r.len / OS_PAGE;
-            if self.addresses.len() < want {
-                self.addresses.resize(want, std::ptr::null_mut());
+            let base = r.base.0 as u64;
+            runs.clear();
+            st.cold_bytes += r.hot_runs(&mut runs, !cooling);
+            for &(from, to) in &runs {
+                let len = (to - from) as usize;
+                let want = len / OS_PAGE;
+                if self.addresses.len() < want {
+                    self.addresses.resize(want, std::ptr::null_mut());
+                }
+                let mut count = want;
+                let mut gran = 0u32;
+                let rc = unsafe { GetWriteWatch(WRITE_WATCH_FLAG_RESET, from as *const _, len, Some(self.addresses.as_mut_ptr()), Some(&mut count), Some(&mut gran)) };
+                if rc != 0 {
+                    // not write-watched memory (a bug of the caller's): skipped and counted, the rest goes up
+                    st.unwatchable += 1;
+                    continue;
+                }
+                st.watched_bytes += len as u64;
+                let mut last = usize::MAX;
+                for a in &self.addresses[..count] {
+                    let a = *a as u64;
+                    self.pages.push(Page { region: ri as u32, offset: (a - base) as u32 });
+                    // the slice written is not quiet
+                    if let Some(k) = r.slice_of(a).filter(|&k| k != last) {
+                        r.slices[k].last_dirty.store(now, Ordering::Relaxed);
+                        last = k;
+                    }
+                }
             }
-            let mut count = want;
-            let mut gran = 0u32;
-            let rc = unsafe {
-                GetWriteWatch(WRITE_WATCH_FLAG_RESET, r.base.0 as *const _, r.len, Some(self.addresses.as_mut_ptr()), Some(&mut count), Some(&mut gran))
-            };
-            if rc != 0 {
-                // not write-watched memory (a bug of the caller's): skipped and counted, the rest goes up
-                st.unwatchable += 1;
-                continue;
+        }
+        // REBUILD_COLD_CHECK=1: cold slices are read too, and what they hold is counted (and sent): a write the
+        // faults and the I/O guard missed shows here (as do first reads of never-touched pages: write-watch
+        // counts those, and the diff then finds nothing changed)
+        let mut unsorted = false;
+        if cooling && cold_check() {
+            for (ri, r) in regions.iter().enumerate() {
+                let base = r.base.0 as u64;
+                for k in 0..r.slices.len() {
+                    if r.slices[k].state() != cold::COLD {
+                        continue;
+                    }
+                    let (from, to) = r.part(k);
+                    let want = ((to - from) as usize) / OS_PAGE;
+                    if self.addresses.len() < want {
+                        self.addresses.resize(want, std::ptr::null_mut());
+                    }
+                    let (mut count, mut gran) = (want, 0u32);
+                    if unsafe { GetWriteWatch(WRITE_WATCH_FLAG_RESET, from as *const _, (to - from) as usize, Some(self.addresses.as_mut_ptr()), Some(&mut count), Some(&mut gran)) } != 0 || count == 0 {
+                        continue;
+                    }
+                    if r.slices[k].state() != cold::COLD {
+                        // it turned hot meanwhile: a write by the rules
+                        continue;
+                    }
+                    if self.shared.totals.cold_dirty.fetch_add(count as u64, Ordering::Relaxed) < 16 {
+                        eprintln!("cold      check: {count} pages written in a cold slice at {from:#x}, first {:#x}", self.addresses[0] as u64);
+                    }
+                    self.pages.extend(self.addresses[..count].iter().map(|a| Page { region: ri as u32, offset: (*a as u64 - base) as u32 }));
+                    unsorted = true;
+                }
             }
-            let base = r.base.0 as usize;
-            self.pages.extend(self.addresses[..count].iter().map(|a| Page { region: ri as u32, offset: (*a as usize - base) as u32 }));
+        }
+        if unsorted && carry.is_empty() {
+            self.pages.sort_unstable();
+            self.pages.dedup();
         }
         if !carry.is_empty() {
             // the last pass's leftovers (by console address: regions may have come and gone), merged so the
@@ -839,11 +971,74 @@ impl Coordinator {
                 regs[r as usize].commit(i as usize, h);
             }
         }));
-        st.carried_pages = carry.len();
         st.latency_ms = ms(asked);
+
+        // quiet slices go cold, after the Signal (off the GPU's wait) and a few ms at most a pass
+        if cooling {
+            let t = Instant::now();
+            self.cool(regions, carry, now, &mut st);
+            st.cold_ms = ms(t);
+        }
+        st.carried_pages = carry.len();
         Ok(st)
     }
+
+    /// Make slices no write touched for [`QUIET_MS`] cold. A slice two regions share goes cold over both parts.
+    /// Pages written while one went cold are carried (sent by the next pass).
+    fn cool(&mut self, regions: &[Region], carry: &mut Vec<u64>, now: u64, st: &mut FlushStats) {
+        let t = Instant::now();
+        let mut cand: Vec<(usize, usize, usize)> = Vec::new(); // slice address, region, index in it
+        for (ri, r) in regions.iter().enumerate() {
+            for (k, s) in r.slices.iter().enumerate() {
+                if s.may_go_cold(now, QUIET_MS) {
+                    cand.push((*s as *const cold::Slice as usize, ri, k));
+                }
+            }
+        }
+        if cand.is_empty() {
+            return;
+        }
+        cand.sort_unstable();
+        let mut found: Vec<*mut std::ffi::c_void> = vec![std::ptr::null_mut(); cold::SLICE / OS_PAGE];
+        let mut i = 0;
+        while i < cand.len() && t.elapsed().as_secs_f64() * 1000.0 < COLD_BUDGET_MS {
+            let mut j = i + 1;
+            while j < cand.len() && cand[j].0 == cand[i].0 {
+                j += 1;
+            }
+            let group = &cand[i..j];
+            let parts: Vec<(u64, u64)> = group.iter().map(|&(_, ri, k)| regions[ri].part(k)).collect();
+            // SAFETY: slices live for the process
+            let slice = unsafe { &*(cand[i].0 as *const cold::Slice) };
+            let mut late: Vec<u64> = Vec::new();
+            let ok = slice.go_cold(&parts, |from, to| {
+                let mut count = found.len();
+                let mut gran = 0u32;
+                if unsafe { GetWriteWatch(WRITE_WATCH_FLAG_RESET, from as *const _, (to - from) as usize, Some(found.as_mut_ptr()), Some(&mut count), Some(&mut gran)) } == 0 {
+                    late.extend(found[..count].iter().map(|a| *a as u64));
+                }
+            });
+            if ok {
+                st.went_cold += 1;
+            }
+            for a in late {
+                if let Some(&(_, ri, _)) = group.iter().find(|&&(_, ri, k)| {
+                    let (f, t) = regions[ri].part(k);
+                    (f..t).contains(&a)
+                }) {
+                    let r = &regions[ri];
+                    carry.push(r.console + (a - r.base.0 as u64));
+                }
+            }
+            i = j;
+        }
+    }
 }
+
+/// A slice goes cold when no write touched it for this long (ms).
+const QUIET_MS: u64 = 300;
+/// Time a pass may spend making slices cold (ms; ~1 ms a touched 32 MiB slice).
+const COLD_BUDGET_MS: f64 = 2.0;
 
 fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1000.0
@@ -1122,5 +1317,55 @@ mod tests {
         assert_eq!(ring.next_finished().unwrap().zeroed, 1);
         ring.wait(v).unwrap();
         assert!(read_at(&device, &sub, 40 * PAGE as u64, PAGE).iter().all(|&b| b == 0), "the old bytes are gone");
+    }
+
+    /// Cold slices end to end: a quiet region goes cold after a pass, is no longer read, and a write into it
+    /// faults it hot and reaches the GPU with the next flush.
+    #[test]
+    fn a_cold_region_is_not_read_and_its_next_write_still_arrives() {
+        use crate::space::{Space, SUB};
+        use crate::{Uma, PAGE};
+        cold::enable();
+        let device = warp();
+        let space: Arc<OnceLock<Mutex<Space>>> = Arc::new(OnceLock::new());
+        let s2 = space.clone();
+        let va: WindowVa = Arc::new(move |k| s2.get()?.lock().unwrap().va(k as usize));
+        let ring = Ring::dynamic(&device, SUB, va, 2, 1 << 20).unwrap();
+        ring.set_cold(true);
+        assert!(space.set(Mutex::new(Space::new(&device, &ring.queue).unwrap())).is_ok());
+        let space = space.get().unwrap();
+        let mut uma = Uma::new(4096, 64 << 20);
+        let k = 5u64;
+        let console = k * SUB;
+        let (_, mapped) = uma.place(console, 4 * PAGE).unwrap();
+        space.lock().unwrap().map(&mapped).unwrap();
+        let region = Watched::alloc(0, 4 * PAGE).unwrap();
+        unsafe { region.base.add(10).write_volatile(1) };
+        unsafe { ring.add(region.base, region.len, console).unwrap() };
+        let v = ring.flush();
+        assert!(ring.next_finished().unwrap().bytes > 0);
+        ring.wait(v).unwrap();
+
+        // quiet past QUIET_MS: the next pass reads it once more, then makes it cold
+        std::thread::sleep(std::time::Duration::from_millis(QUIET_MS + 50));
+        ring.flush();
+        assert_eq!(ring.next_finished().unwrap().went_cold, 1);
+        let slice = cold::find(region.base as u64).unwrap();
+        assert_eq!(slice.state(), cold::COLD);
+        ring.flush();
+        let st = ring.next_finished().unwrap();
+        assert_eq!((st.watched_bytes, st.cold_bytes), (0, 4 * PAGE as u64), "a cold region is not read");
+
+        // a write faults it hot, and arrives
+        unsafe { region.base.add(3 * PAGE + 77).write_volatile(0x5A) };
+        assert_eq!(slice.state(), cold::HOT);
+        let v = ring.flush();
+        let st = ring.next_finished().unwrap();
+        assert_eq!(st.bytes, CHUNK, "the chunk written");
+        ring.wait(v).unwrap();
+        let sub = space.lock().unwrap().sub(k as usize).unwrap().clone();
+        let got = read_at(&device, &sub, 0, 4 * PAGE);
+        assert_eq!((got[10], got[3 * PAGE + 77]), (1, 0x5A));
+        assert!(ring.remove(console));
     }
 }

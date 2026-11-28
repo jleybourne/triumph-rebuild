@@ -454,6 +454,8 @@ pub fn run(o: Options) -> ! {
     watch::install();
     // console CPU instructions the host lacks (clwb), patched where the title uses them; first in the handler line
     rebuild_runtime::cpu::install();
+    // cold slices of watched memory: the I/O syscalls guarded and the write-fault handler first in line
+    rebuild_runtime::memory::install_cold();
     // the title's code assumes its TLS block is slot 0 (an exe's): give it slot 0 before any thread runs
     if let Some(tls) = &exe.image.tls {
         let index = (exe.base + (tls.index_va - exe.image.image_base)) as *mut u32;

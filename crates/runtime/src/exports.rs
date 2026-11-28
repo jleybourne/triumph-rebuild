@@ -174,6 +174,8 @@ pub extern "system" fn XMemVirtualQuery(_process: HANDLE, address: *const c_void
     }
     let flags = with(|s| s.xmem.find(address as u64).map(|r| r.flags).unwrap_or(0));
     unsafe {
+        // a cold slice's read-only mark is ours (write tracking), not the title's
+        (*out).host.Protect = PAGE_PROTECTION_FLAGS(rebuild_d3d12x::vmem::effective(address as u64, (*out).host.Protect.0));
         (*out).flags = if (*out).host.State == MEM_COMMIT || flags != 0 { flags } else { 0 };
         (*out).tag_code = 0;
         (*out).tag = [0; 4];
