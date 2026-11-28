@@ -26,6 +26,9 @@ pub struct Fake {
     /// `keep_words` (off for the benches: a lock and a vector are not the host's cost)
     pub words: Mutex<Vec<(usize, u32, Vec<u32>, u32)>>,
     pub keep_words: AtomicBool,
+    /// The console list recording into this one ([`host_of`]): reading a count first translates what that list
+    /// keeps as records ([`super::mode`]), so a test sees the host list as the title's calls so far made it.
+    pub owner: AtomicUsize,
 }
 
 impl Fake {
@@ -38,6 +41,7 @@ impl Fake {
             last: [const { [const { AtomicU64::new(0) }; 3] }; SLOTS],
             words: Mutex::new(Vec::new()),
             keep_words: AtomicBool::new(false),
+            owner: AtomicUsize::new(0),
         });
         Box::into_raw(f).cast()
     }
@@ -47,15 +51,26 @@ impl Fake {
         unsafe { &*p.cast::<Fake>() }
     }
 
+    /// Translate what the owning console list keeps as records.
+    pub fn sync(&self) {
+        let o = self.owner.load(Ordering::Relaxed);
+        if o != 0 {
+            let _ = super::stats(o as Raw);
+        }
+    }
+
     pub fn count(&self, slot: usize) -> u64 {
+        self.sync();
         self.calls[slot].load(Ordering::Relaxed)
     }
 
     pub fn arg(&self, slot: usize, i: usize) -> u64 {
+        self.sync();
         self.args[slot][i].load(Ordering::Relaxed)
     }
 
     pub fn last(&self, slot: usize, i: usize) -> u64 {
+        self.sync();
         self.last[slot][i].load(Ordering::Relaxed)
     }
 }
@@ -188,5 +203,7 @@ pub fn backend_keeping_words() -> Arc<FakeBackend> {
 /// The stand-in behind a list's current host list.
 pub fn host_of(list: Raw) -> &'static Fake {
     let seg = super::segments(list).expect("ours");
-    Fake::of(seg.last().expect("a segment").list.list.as_raw())
+    let f = Fake::of(seg.last().expect("a segment").list.list.as_raw());
+    f.owner.store(list as usize, Ordering::Relaxed);
+    f
 }
