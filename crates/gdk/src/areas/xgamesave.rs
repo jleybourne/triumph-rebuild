@@ -28,6 +28,20 @@ use crate::guid::Guid;
 use crate::hr::*;
 use crate::object::{put, text, InterfaceDef};
 use crate::profile;
+
+/// `REBUILD_TRACE_SAVES=1`: one line per save call that names a container or changes one (stderr).
+fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("REBUILD_TRACE_SAVES").is_ok_and(|v| v.trim() == "1"))
+}
+
+macro_rules! trace {
+    ($($t:tt)*) => {
+        if tracing() {
+            eprintln!("gamesave  {}", format!($($t)*));
+        }
+    };
+}
 use crate::xasync::{self, ProviderData, XAsyncBlock};
 
 pub const PROVIDER: Guid = Guid::parse("704c3f58-e629-4cc2-b197-30511b996fe2");
@@ -412,6 +426,7 @@ fn remaining(dir: &Path) -> i64 {
 }
 
 fn delete(dir: &Path, name: &str) -> HRESULT {
+    trace!("delete container {name:?}");
     let _disk = disk();
     match std::fs::remove_file(container_file(dir, name)) {
         Ok(()) => S_OK,
@@ -438,6 +453,13 @@ fn read(c: &Container, names: Option<Vec<String>>) -> Result<Vec<(String, Vec<u8
 }
 
 fn submit(u: Update) -> HRESULT {
+    let name = u.container.name.clone();
+    let hr = submit_now(u);
+    trace!("submit {name:?}: {hr:#010x}");
+    hr
+}
+
+fn submit_now(u: Update) -> HRESULT {
     let written: u64 = u.ops.iter().filter_map(|o| o.1.as_ref()).map(|d| d.len() as u64).sum();
     if written > MAX_UPDATE {
         return E_GS_UPDATE_TOO_BIG;
@@ -593,6 +615,7 @@ unsafe extern "system" fn initialize(_: This, user: Handle, scid: *const c_char,
         return E_INVALIDARG;
     }
     let scid = unsafe { text(scid) }.unwrap_or_default();
+    trace!("initialize provider scid {scid:?}");
     match open_provider(&scid) {
         Ok(dir) => unsafe { put(out, new_provider(dir) as Handle) },
         Err(hr) => hr,
@@ -605,6 +628,7 @@ unsafe extern "system" fn initialize_async(_: This, user: Handle, scid: *const c
         return E_INVALIDARG;
     }
     let scid = unsafe { text(scid) }.unwrap_or_default();
+    trace!("initialize provider async scid {scid:?}");
     let work: Work = Box::new(move || open_provider(&scid).map(|dir| Out::Bytes(new_provider(dir).to_ne_bytes().to_vec())));
     unsafe { start(block, &INIT, work) }
 }
@@ -704,6 +728,7 @@ unsafe extern "system" fn container_info(_: This, provider: Handle, name: *const
         let _disk = disk();
         load_index(&container_file(&dir, &name)).filter(|i| i.name == name)
     };
+    trace!("container info {name:?}: {}", found.as_ref().map_or("none".to_string(), |i| format!("{} blobs, {} bytes", i.blobs.len(), i.total())));
     unsafe { report_containers(found.into_iter().collect(), context, callback) }
 }
 
@@ -713,6 +738,7 @@ unsafe fn enumerate(provider: Handle, prefix: &str, context: *mut c_void, callba
         let _disk = disk();
         containers(&dir).into_iter().filter(|c| c.name.starts_with(prefix)).collect()
     };
+    trace!("enumerate containers {prefix:?}: {:?}", list.iter().map(|c| c.name.as_str()).collect::<Vec<_>>());
     unsafe { report_containers(list, context, callback) }
 }
 
@@ -739,6 +765,7 @@ unsafe extern "system" fn create_container(_: This, provider: Handle, name: *con
         Ok(name) => name,
         Err(hr) => return hr,
     };
+    trace!("create container {name:?}");
     let id = with(|h| {
         let id = fresh(h);
         h.containers.insert(id, Container { dir, name });
@@ -805,6 +832,7 @@ unsafe extern "system" fn read_blobs(_: This, container: Handle, list: *const *c
         Ok(w) => w,
         Err(hr) => return hr,
     };
+    trace!("read blobs {:?} {wanted:?}", c.name);
     let blobs = match read(&c, wanted) {
         Ok(b) => b,
         Err(hr) => return hr,
@@ -830,6 +858,7 @@ unsafe extern "system" fn read_async(_: This, container: Handle, list: *const *c
         Ok(w) => w,
         Err(hr) => return hr,
     };
+    trace!("read blobs async {:?} {wanted:?}", c.name);
     unsafe { start(block, &READ, Box::new(move || read(&c, wanted).map(Out::Blobs))) }
 }
 
@@ -869,6 +898,7 @@ unsafe extern "system" fn create_update(_: This, container: Handle, display: *co
     unsafe { out.write_unaligned(std::ptr::null()) };
     let Some(c) = container_of(container) else { return E_INVALIDARG };
     let display = unsafe { text(display) };
+    trace!("create update {:?} display {display:?}", c.name);
     let id = with(|h| {
         let id = fresh(h);
         h.updates.insert(id, Update { container: c, display, ops: Vec::new() });
@@ -906,6 +936,7 @@ unsafe extern "system" fn write_blob(_: This, update: Handle, name: *const c_cha
         return E_INVALIDARG;
     }
     let bytes = if size == 0 { Vec::new() } else { unsafe { std::slice::from_raw_parts(data, size) }.to_vec() };
+    trace!("write blob {name:?} {size} bytes");
     add_op(update, name, Some(bytes))
 }
 

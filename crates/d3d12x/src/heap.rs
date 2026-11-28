@@ -336,7 +336,9 @@ impl Inner {
             Some(Record::Null { uav, dimension }) => {
                 let v = if uav {
                     HostView::NullUav
-                } else if dimension <= 1 {
+                } else if !(2..=10).contains(&dimension) {
+                    // a buffer (1), no dimension (0), or a ray-tracing acceleration structure (11, whose host view
+                    // must have format UNKNOWN and a location: a texture-shaped null one removes the device)
                     HostView::NullBuffer
                 } else {
                     HostView::NullTexture(dimension as i32)
