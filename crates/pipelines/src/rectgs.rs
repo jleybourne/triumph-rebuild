@@ -13,6 +13,13 @@
 //! rectangles come as top left, bottom left, bottom right: the second; its tiled ones as top left, bottom left,
 //! top right: the first). That holds in clip space when all three have one positive w (then it is the same on
 //! the screen); three vertices that differ in w, coincide, or have no such corner stay the triangle they make.
+//! A rectangle that covers the whole clip square (the title's full-screen passes) is emitted as one triangle
+//! instead, its legs from the corner twice as long, every float output continued the same way; the clipper cuts it
+//! to the screen (inside the guard band, GPUs rasterise it whole). Then no 2x2 pixel quad of the rectangle is split
+//! between two triangles, as on the console, which rasterises a rectangle as one primitive: two triangles leave
+//! helper lanes in every quad along their shared diagonal (shading the diagonal's quads twice, and lanes a
+//! translated pixel shader's derivatives and wave operations could see), and a full-screen pass is one primitive
+//! instead of two.
 //! Integer outputs (flat by rule) are the first vertex's on every vertex emitted, whichever the host takes a flat
 //! value from. A pixel shader that reads the primitive id gets the rectangle's number (the triangle's).
 //!
@@ -128,6 +135,19 @@ pub fn source(vs_out: &[Element], primitive_id: Option<u32>) -> Result<String, S
         s.push_str("    o.prim = p;\n");
     }
     s.push_str("    return o;\n}\n");
+    // a corner of the single triangle that covers a whole-screen rectangle: twice as far from c as a is
+    s.push_str("G far(V a, V c, V f, uint p) {\n    G o;\n");
+    for (k, e) in els.iter().enumerate() {
+        if is_float(e.comp) {
+            let _ = writeln!(s, "    o.e{k} = a.e{k} + a.e{k} - c.e{k};");
+        } else {
+            let _ = writeln!(s, "    o.e{k} = f.e{k};");
+        }
+    }
+    if primitive_id.is_some() {
+        s.push_str("    o.prim = p;\n");
+    }
+    s.push_str("    return o;\n}\n");
     let _ = write!(
         s,
         r#"[maxvertexcount({VERTICES})]
@@ -150,6 +170,16 @@ void main(triangle V i[3], uint p : SV_PrimitiveID, inout TriangleStream<G> s) {
     V vc = i[0], va = i[1], vb = i[2];
     if (c == 1) {{ vc = i[1]; va = i[2]; vb = i[0]; }}
     else if (c == 2) {{ vc = i[2]; va = i[0]; vb = i[1]; }}
+    // a rectangle over the whole clip square: one triangle with legs twice as long, which the clipper cuts to the
+    // screen; no diagonal inside the rectangle, so no 2x2 quad of it is split between two triangles
+    float lx = min(min(q0.x, q1.x), q2.x), hx = max(max(q0.x, q1.x), q2.x);
+    float ly = min(min(q0.y, q1.y), q2.y), hy = max(max(q0.y, q1.y), q2.y);
+    if (lx <= -q0.w && hx >= q0.w && ly <= -q0.w && hy >= q0.w) {{
+        s.Append(pass(vc, i[0], p));
+        s.Append(far(va, vc, i[0], p));
+        s.Append(far(vb, vc, i[0], p));
+        return;
+    }}
     s.Append(pass(vc, i[0], p));
     s.Append(pass(va, i[0], p));
     s.Append(pass(vb, i[0], p));
@@ -361,7 +391,8 @@ mod tests {
         let p = &s[s.find("G pass(").unwrap()..s.find("G fourth(").unwrap()];
         assert!(p.contains("o.e2 = f.e2;") && p.contains("o.e3 = v.e3;"));
         // the corner, then the others, then the fourth: a strip of four
-        assert_eq!(s.matches("s.Append(").count(), 3 + 4);
+        assert_eq!(s.matches("s.Append(").count(), 3 + 3 + 4);
+        assert!(s.contains("s.Append(far(va, vc, i[0], p));") && s.contains("o.e1 = a.e1 + a.e1 - c.e1;"), "the whole-screen triangle");
         assert!(s.contains("s.Append(fourth(va, vb, vc, i[0], p));"));
     }
 
