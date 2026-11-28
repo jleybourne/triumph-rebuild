@@ -19,7 +19,7 @@ built around the right memory model from the first line, aiming at 30 frames a s
 </p>
 
 <p align="center"><a href="progress.md"><b>Progress <code>██████████████░░░░░░</code> 70 %</b></a><br>
-<sub>work toward 30 fps, weighted by build step · Build 5 (first frame) <code>██████████████░░░░░░</code> 70 % · frames 1-2 presented</sub></p>
+<sub>work toward 30 fps, weighted by build step · Build 5 (first frame) <code>███████████████████░</code> 95 % · the title's menus on the card</sub></p>
 
 <table align="center">
   <tr>
