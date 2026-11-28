@@ -411,7 +411,10 @@ impl Presenter {
         let device = crate::device::get().ok_or("no device")?.host.clone();
         let e = |what: &'static str| move |e: windows::core::Error| format!("{what}: {e}");
         let mode = crate::dxgi::host_mode();
-        let size = (mode.width.max(1), mode.height.max(1));
+        let size = match window_mode() {
+            WindowMode::Borderless => (mode.width.max(1), mode.height.max(1)),
+            WindowMode::Windowed(w, h) => (w, h),
+        };
         let format = family(source.Format.0 as u32).unwrap_or(DXGI_FORMAT_R8G8B8A8_UNORM);
         let window = window(size, WINDOW_HIDDEN.load(Ordering::Relaxed))?;
         unsafe {
@@ -931,8 +934,38 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
-/// A borderless window over the primary display (or a hidden one), on its own thread that pumps its messages.
+/// How the title's window is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowMode {
+    /// A normal window with a frame, of this client size, shown without taking focus (the default).
+    Windowed(u32, u32),
+    /// A borderless window over the whole primary display.
+    Borderless,
+}
+
+/// `REBUILD_WINDOW=windowed|borderless` (default windowed) and `REBUILD_WINDOW_SIZE=WxH` (default 1280x720).
+pub fn window_mode() -> WindowMode {
+    parse_window_mode(std::env::var("REBUILD_WINDOW").ok().as_deref(), std::env::var("REBUILD_WINDOW_SIZE").ok().as_deref())
+}
+
+fn parse_window_mode(mode: Option<&str>, size: Option<&str>) -> WindowMode {
+    if mode.is_some_and(|m| m.trim().eq_ignore_ascii_case("borderless") || m.trim().eq_ignore_ascii_case("fullscreen")) {
+        return WindowMode::Borderless;
+    }
+    let (w, h) = size
+        .and_then(|s| {
+            let (w, h) = s.trim().split_once(['x', 'X'])?;
+            Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?))
+        })
+        .filter(|&(w, h)| (160..=16384).contains(&w) && (90..=16384).contains(&h))
+        .unwrap_or((1280, 720));
+    WindowMode::Windowed(w, h)
+}
+
+/// The title's window (borderless over the display, a framed window of the chosen client size, or a hidden one),
+/// on its own thread that pumps its messages. A visible window is shown without taking focus.
 fn window(size: (u32, u32), hidden: bool) -> Result<HWND, String> {
+    let windowed = matches!(window_mode(), WindowMode::Windowed(..));
     let (tx, rx) = std::sync::mpsc::channel::<Result<usize, String>>();
     std::thread::Builder::new()
         .name("window".into())
@@ -951,16 +984,21 @@ fn window(size: (u32, u32), hidden: bool) -> Result<HWND, String> {
             RegisterClassExW(&wc);
             let (ex, style, x, y, w, h) = if hidden {
                 (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, WS_POPUP, -32000, -32000, 64, 64)
+            } else if windowed {
+                // a framed window whose client area is `size`; created hidden, then shown without activation
+                let style = WS_OVERLAPPEDWINDOW;
+                let mut r = RECT { left: 0, top: 0, right: size.0 as i32, bottom: size.1 as i32 };
+                let _ = AdjustWindowRectEx(&mut r, style, false, WS_EX_APPWINDOW);
+                (WS_EX_APPWINDOW, style, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top)
             } else {
-                (WS_EX_APPWINDOW, WS_POPUP | WS_VISIBLE, 0, 0, size.0 as i32, size.1 as i32)
+                (WS_EX_APPWINDOW, WS_POPUP, 0, 0, size.0 as i32, size.1 as i32)
             };
             let title: Vec<u16> = "triumph-rebuild\0".encode_utf16().collect();
             let hwnd = CreateWindowExW(ex, PCWSTR(class.as_ptr()), PCWSTR(title.as_ptr()), style, x, y, w, h, None, None, instance, None);
             match hwnd {
                 Ok(hwnd) => {
-                    if hidden {
-                        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-                    }
+                    // every visible kind is shown without stealing focus from what the user is doing
+                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                     let _ = tx.send(Ok(hwnd.0 as usize));
                 }
                 Err(e) => {
@@ -1045,5 +1083,22 @@ mod tests {
         assert_eq!(px(DXGI_FORMAT_R16G16B16A16_FLOAT, &row), [255, 188, 0, 255]);
         assert_eq!(half(0x3c00), 1.0);
         assert_eq!(half(0xc000), -2.0);
+    }
+}
+
+#[cfg(test)]
+mod window_mode_tests {
+    use super::{parse_window_mode, WindowMode};
+
+    #[test]
+    fn the_window_is_a_720p_window_unless_asked_otherwise() {
+        assert_eq!(parse_window_mode(None, None), WindowMode::Windowed(1280, 720));
+        assert_eq!(parse_window_mode(Some("windowed"), Some("1600x900")), WindowMode::Windowed(1600, 900));
+        assert_eq!(parse_window_mode(Some("Borderless"), Some("1600x900")), WindowMode::Borderless);
+        assert_eq!(parse_window_mode(Some("fullscreen"), None), WindowMode::Borderless);
+        // unreadable or absurd sizes fall back to 720p
+        assert_eq!(parse_window_mode(None, Some("huge")), WindowMode::Windowed(1280, 720));
+        assert_eq!(parse_window_mode(None, Some("10x10")), WindowMode::Windowed(1280, 720));
+        assert_eq!(parse_window_mode(None, Some(" 1920 X 1080 ")), WindowMode::Windowed(1920, 1080));
     }
 }
