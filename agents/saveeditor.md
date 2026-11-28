@@ -40,10 +40,33 @@ tests   rebuild-saves 25 · launcher +1 (the screen's actions end to end: open, 
 - **No new dependencies.** A 300-line strict JSON reader/writer instead of serde.
 - **Backups beside the saves folder** (`GameSave.backups`), never inside it, so the runtime never sees them.
 
-## Next (needs a real save)
+## Second pass: real saves (branch `agent/saveeditor2`)
 
-- read one: `SettingsProfileSettings`' and `Player`'s kinds, the stamp's unit, the body layout; then typed
-  fields for the settings body.
+The owner's older build wrote `Player` (kind 3) and `SettingsProfileSettings` (kind 2). Copies are in the
+session scratchpad, never in git.
+
+- **The parser takes both real saves.** Every checksum and load check passes, and both blobs and both
+  bodies round-trip byte-identically (`savedump`).
+- **Resolved:**
+  - the stamp is Unix seconds UTC (it equals the old build's version-folder time to the second);
+  - the ASAV words +0x154..+0x164 are 0 for kinds 2 and 3;
+  - the header's copies match;
+  - the ASAV text is the container's name (the gamertag for `Player`).
+- **Player body:** count, a word 3, `joaat(entries)`, (id u32, value u32) × count, then zeros. The ids are
+  numeric and unnamed; values are editable.
+- **Settings body:** the engine's parser-tree JSON (`0x1440692c0`), with member keys
+  `"$0x<joaat(name)>"`.
+  - 53 of 219 key hashes are named (each checked by joaat); 166 stay `#hash`.
+  - All 260 values have typed editing that keeps the body's length; `$v`, versions and `$data` are
+    read-only.
+- **Import from Triumph** (`triumph.rs`): reads the fork's `<name>~<fnv>\v<N>\{0,1,manifest}`
+  (highest committed version), checks everything, then writes through `write_container`. The fork's
+  folder is never touched (a test snapshots it).
+
+## Next
+
+- names for the profile's ids and for the remaining settings members; a progress save (kinds 1/9,
+  read-only) when one exists.
 
 ## For the lead
 
