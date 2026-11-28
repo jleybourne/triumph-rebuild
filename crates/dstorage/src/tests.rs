@@ -259,7 +259,13 @@ fn d2_ordered_completion_over_files() {
     let start = Instant::now();
     while seen < 12 {
         assert!(start.elapsed() < Duration::from_secs(30));
-        let complete: Vec<bool> = (0..12).map(|k| done(array, k)).collect();
+        // Read last to first: entries complete in order, so once entry k reads complete every entry before it
+        // is complete too, and an earlier one still read pending is out of order. Read first to last, entries
+        // completing between two reads (a poll held off on a busy machine) would look out of order.
+        let mut complete = [false; 12];
+        for k in (0..12).rev() {
+            complete[k] = done(array, k as u32);
+        }
         let first_pending = complete.iter().position(|c| !c).unwrap_or(12) as u32;
         assert!(complete[first_pending as usize..].iter().all(|c| !c), "out of order: {complete:?}");
         for k in seen..first_pending {
