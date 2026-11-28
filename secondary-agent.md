@@ -319,7 +319,7 @@ updated   2026-11-28 (evening): menus at 30 fps (the title's cap; ~260 unlimited
           #68 polish, #69 depth twins, #70 view remap (data swapped), #71 launcher recommendation; body text still
           missing letters, black Bink stretches (video lane)
 progress  71 % (progress.md) · shaders 12,981 / 25,694 compile, 5,195 counted
-tests     786 green: cargo test --release --no-fail-fast
+tests     791 green: cargo test --release --no-fail-fast
 lanes     shadercount, storage, saveeditor (video merged: menus readable, intro video plays)
 ```
 
