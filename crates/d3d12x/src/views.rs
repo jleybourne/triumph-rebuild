@@ -219,6 +219,14 @@ pub trait HostDevice: Send + Sync {
     fn resource_in(&self, desc: &D3D12_RESOURCE_DESC, clear: Option<&D3D12_CLEAR_VALUE>, _layout: D3D12_BARRIER_LAYOUT) -> Result<Option<ID3D12Resource>, HRESULT> {
         self.resource(desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_NONE, clear)
     }
+    /// A host texture the GPU writes, for console memory `console` (start, end) the title placed it at: in a heap
+    /// shared with the live textures over the same memory where it fits (`crate::alias`). `None`: make a committed
+    /// one (no GPU, aliasing off, or no heap).
+    fn aliased(&self, _console: (u64, u64), _desc: &D3D12_RESOURCE_DESC, _clear: Option<&D3D12_CLEAR_VALUE>, _layout: D3D12_BARRIER_LAYOUT) -> Option<ID3D12Resource> {
+        None
+    }
+    /// A texture [`HostDevice::aliased`] made is gone (`host`: its pointer).
+    fn aliased_gone(&self, _host: usize) {}
     /// The card bytes a host resource of `desc` takes (`GetResourceAllocationInfo`); 0 with no GPU.
     fn bytes(&self, _desc: &D3D12_RESOURCE_DESC) -> u64 {
         0
@@ -246,6 +254,10 @@ pub struct DeviceHost {
     /// `D3D12_HEAP_TYPE_GPU_UPLOAD` works (resizable BAR): the shadow table lives in VRAM, the
     /// CPU writes it through the BAR
     pub gpu_upload: bool,
+    /// resource heap tier 2: a heap takes targets and other textures alike
+    heap_tier2: bool,
+    /// heaps of GPU-written textures at title addresses (`crate::alias`)
+    aliases: std::sync::Mutex<crate::alias::Groups<ID3D12Heap>>,
 }
 // SAFETY: D3D12 devices are free-threaded.
 unsafe impl Send for DeviceHost {}
@@ -259,7 +271,52 @@ impl DeviceHost {
         }
         .is_ok()
             && o.GPUUploadHeapSupported.as_bool();
-        Ok(DeviceHost { device: device.clone(), gpu_upload })
+        let mut o0 = D3D12_FEATURE_DATA_D3D12_OPTIONS::default();
+        let heap_tier2 = unsafe { device.CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, (&mut o0 as *mut D3D12_FEATURE_DATA_D3D12_OPTIONS).cast(), size_of_val(&o0) as u32) }.is_ok()
+            && o0.ResourceHeapTier.0 >= D3D12_RESOURCE_HEAP_TIER_2.0;
+        Ok(DeviceHost { device: device.clone(), gpu_upload, heap_tier2, aliases: Default::default() })
+    }
+
+    /// [`HostDevice::resource_in`] before its residency priority.
+    fn resource_in_now(&self, desc: &D3D12_RESOURCE_DESC, clear: Option<&D3D12_CLEAR_VALUE>, layout: D3D12_BARRIER_LAYOUT) -> Result<Option<ID3D12Resource>, HRESULT> {
+        // common: the legacy call (interop with both barrier kinds); otherwise the layout call, the only way a
+        // texture starts in a layout the title's enhanced barriers then name
+        let Some(d10) = self.device.cast::<ID3D12Device10>().ok().filter(|_| layout != D3D12_BARRIER_LAYOUT_COMMON) else {
+            return self.resource(desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_NONE, clear);
+        };
+        let d1 = desc1(desc);
+        let heap = if crate::vram::to_system(desc) {
+            crate::vram::fell_back(desc);
+            SYSTEM_HEAP
+        } else {
+            D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() }
+        };
+        let mut r: Option<ID3D12Resource> = None;
+        match unsafe { d10.CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d1, layout, clear.map(|c| c as *const _), None, None, &mut r) } {
+            // the card is full: system memory (see `resource`)
+            Err(e) if e.code() == E_OUTOFMEMORY => {
+                crate::vram::fell_back(desc);
+                unsafe { d10.CreateCommittedResource3(&SYSTEM_HEAP, D3D12_HEAP_FLAG_NONE, &d1, layout, clear.map(|c| c as *const _), None, None, &mut r) }.map_err(hr)?;
+            }
+            m => m.map_err(hr)?,
+        }
+        Ok(r)
+    }
+
+    /// A texture of `desc` placed at `offset` in `heap`, starting in `layout` (the layout call when the host has
+    /// it, as committed textures are made).
+    fn placed(&self, heap: &ID3D12Heap, offset: u64, desc: &D3D12_RESOURCE_DESC, clear: Option<&D3D12_CLEAR_VALUE>, layout: D3D12_BARRIER_LAYOUT) -> Option<ID3D12Resource> {
+        let mut r: Option<ID3D12Resource> = None;
+        let made = match self.device.cast::<ID3D12Device10>().ok().filter(|_| layout != D3D12_BARRIER_LAYOUT_COMMON) {
+            Some(d10) => {
+                let d1 = desc1(desc);
+                // SAFETY: a heap of this device, an offset inside it, a description and an out-parameter
+                unsafe { d10.CreatePlacedResource2(heap, offset, &d1, layout, clear.map(|c| c as *const _), None, &mut r) }
+            }
+            // SAFETY: as above
+            None => unsafe { self.device.CreatePlacedResource(heap, offset, desc, D3D12_RESOURCE_STATE_COMMON, clear.map(|c| c as *const _), &mut r) },
+        };
+        made.ok().and(r)
     }
 
     fn null_fill(&self, heap: &HostHeap) -> windows::core::Result<()> {
@@ -288,6 +345,34 @@ impl DeviceHost {
         }
         Ok(())
     }
+}
+
+fn desc1(desc: &D3D12_RESOURCE_DESC) -> D3D12_RESOURCE_DESC1 {
+    D3D12_RESOURCE_DESC1 {
+        Dimension: desc.Dimension,
+        Alignment: desc.Alignment,
+        Width: desc.Width,
+        Height: desc.Height,
+        DepthOrArraySize: desc.DepthOrArraySize,
+        MipLevels: desc.MipLevels,
+        Format: desc.Format,
+        SampleDesc: desc.SampleDesc,
+        Layout: desc.Layout,
+        Flags: desc.Flags,
+        ..Default::default()
+    }
+}
+
+/// Render target, depth or unordered access: the GPU writes it.
+fn gpu_written(desc: &D3D12_RESOURCE_DESC) -> bool {
+    desc.Flags.0 & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL.0 | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0) != 0
+}
+
+/// What the GPU writes stays on the card first: past the budget the driver demotes sampled textures before it.
+fn keep_resident(device: &ID3D12Device, object: &impl Interface) {
+    let (Ok(d1), Ok(p)) = (device.cast::<ID3D12Device1>(), object.cast::<ID3D12Pageable>()) else { return };
+    // SAFETY: one object of this device and its priority
+    let _ = unsafe { d1.SetResidencyPriority(1, &Some(p), &D3D12_RESIDENCY_PRIORITY_HIGH) };
 }
 
 /// System memory the GPU reads over the bus: where a resource goes when the card has no room for it.
@@ -417,39 +502,56 @@ impl HostDevice for DeviceHost {
         Ok(r)
     }
 
-    fn resource_in(&self, desc: &D3D12_RESOURCE_DESC, clear: Option<&D3D12_CLEAR_VALUE>, layout: D3D12_BARRIER_LAYOUT) -> Result<Option<ID3D12Resource>, HRESULT> {
-        // common: the legacy call (interop with both barrier kinds); otherwise the layout call, the only way a
-        // texture starts in a layout the title's enhanced barriers then name
-        let Some(d10) = self.device.cast::<ID3D12Device10>().ok().filter(|_| layout != D3D12_BARRIER_LAYOUT_COMMON) else {
-            return self.resource(desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_NONE, clear);
-        };
-        let d1 = D3D12_RESOURCE_DESC1 {
-            Dimension: desc.Dimension,
-            Alignment: desc.Alignment,
-            Width: desc.Width,
-            Height: desc.Height,
-            DepthOrArraySize: desc.DepthOrArraySize,
-            MipLevels: desc.MipLevels,
-            Format: desc.Format,
-            SampleDesc: desc.SampleDesc,
-            Layout: desc.Layout,
-            Flags: desc.Flags,
-            ..Default::default()
-        };
-        let heap = if crate::vram::to_system(desc) {
-            crate::vram::fell_back(desc);
-            SYSTEM_HEAP
-        } else {
-            D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() }
-        };
-        let mut r: Option<ID3D12Resource> = None;
-        match unsafe { d10.CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d1, layout, clear.map(|c| c as *const _), None, None, &mut r) } {
-            // the card is full: system memory (see `resource`)
-            Err(e) if e.code() == E_OUTOFMEMORY => {
-                crate::vram::fell_back(desc);
-                unsafe { d10.CreateCommittedResource3(&SYSTEM_HEAP, D3D12_HEAP_FLAG_NONE, &d1, layout, clear.map(|c| c as *const _), None, None, &mut r) }.map_err(hr)?;
+
+    fn aliased(&self, console: (u64, u64), desc: &D3D12_RESOURCE_DESC, clear: Option<&D3D12_CLEAR_VALUE>, layout: D3D12_BARRIER_LAYOUT) -> Option<ID3D12Resource> {
+        if !crate::alias::enabled() || !gpu_written(desc) {
+            return None;
+        }
+        // SAFETY: one description
+        let info = unsafe { self.device.GetResourceAllocationInfo(0, std::slice::from_ref(desc)) };
+        if info.SizeInBytes == 0 || info.SizeInBytes == u64::MAX {
+            return None;
+        }
+        let (bytes, align) = (info.SizeInBytes, info.Alignment.max(64 << 10));
+        let targets = desc.Flags.0 & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL.0) != 0;
+        let kind = u8::from(!self.heap_tier2 && targets);
+        let now = std::time::Instant::now();
+        let mut g = self.aliases.lock().unwrap_or_else(|e| e.into_inner());
+        g.reap(now);
+        if let Some((base, i, offset, heap)) = g.find(console, bytes, align, kind) {
+            if let Some(r) = self.placed(&heap, offset, desc, clear, layout) {
+                g.join(base, i, crate::alias::Member { offset, bytes, console, host: r.as_raw() as usize });
+                return Some(r);
             }
-            m => m.map_err(hr)?,
+        }
+        let flags = match (self.heap_tier2, targets) {
+            (true, _) => D3D12_HEAP_FLAG_NONE,
+            (false, true) => D3D12_HEAP_FLAG_ALLOW_ONLY_RT_DS_TEXTURES,
+            (false, false) => D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES,
+        };
+        let size = bytes.next_multiple_of(align);
+        let hd = D3D12_HEAP_DESC { SizeInBytes: size, Properties: D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() }, Alignment: align, Flags: flags };
+        let mut h: Option<ID3D12Heap> = None;
+        // SAFETY: a description and an out-parameter
+        unsafe { self.device.CreateHeap(&hd, &mut h) }.ok()?;
+        let heap = h?;
+        keep_resident(&self.device, &heap);
+        let r = self.placed(&heap, 0, desc, clear, layout)?;
+        g.create(console.0, heap, size, align, kind, crate::alias::Member { offset: 0, bytes, console, host: r.as_raw() as usize });
+        Some(r)
+    }
+
+    fn aliased_gone(&self, host: usize) {
+        let now = std::time::Instant::now();
+        let mut g = self.aliases.lock().unwrap_or_else(|e| e.into_inner());
+        g.leave(host, now);
+        g.reap(now);
+    }
+
+    fn resource_in(&self, desc: &D3D12_RESOURCE_DESC, clear: Option<&D3D12_CLEAR_VALUE>, layout: D3D12_BARRIER_LAYOUT) -> Result<Option<ID3D12Resource>, HRESULT> {
+        let r = self.resource_in_now(desc, clear, layout)?;
+        if let (Some(t), true) = (&r, gpu_written(desc)) {
+            keep_resident(&self.device, t);
         }
         Ok(r)
     }

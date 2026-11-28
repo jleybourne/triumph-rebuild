@@ -63,6 +63,8 @@ pub struct Resource {
     pub view_format: u32,
     /// memory we allocated (freed with the resource)
     owned: bool,
+    /// the host texture is placed in a heap shared with textures over the same console memory (`crate::alias`)
+    aliased: bool,
     /// the host texture's card bytes and where it came from, and its twins' bytes (`crate::vram`)
     host_bytes: u64,
     origin: crate::vram::Origin,
@@ -167,6 +169,9 @@ impl Drop for Resource {
             ctx.memory.texture_gone(self.address, h);
             crate::vram::gone(self.origin, self.host_bytes, self.bytes);
             crate::vram::untrack(h.as_raw() as usize);
+            if self.aliased {
+                ctx.host.aliased_gone(h.as_raw() as usize);
+            }
         }
         for (t, &b) in self.twins.iter().zip(&self.twin_bytes) {
             if t.is_some() {
@@ -369,6 +374,7 @@ impl Resources {
         let (hd, view_format) = format::host_desc(desc);
         // a host texture the memory model made on its own card pages (its bytes are the model's, not counted here)
         let mut from_model = false;
+        let mut aliased = false;
         let host = if desc.Dimension.0 == DIMENSION_BUFFER {
             ctx.memory.buffer(address, desc.Width.max(1))
         } else {
@@ -389,19 +395,29 @@ impl Resources {
                     });
                     let clear = clear.filter(|_| hd.Flags.0 & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL.0) != 0);
                     let layout = initial_layout(initial, &hd);
-                    match ctx.host.resource_in(&hd, clear.as_ref(), layout) {
+                    // a texture the GPU writes at the title's address: in a heap shared with the live textures over
+                    // the same console memory (the title's aliasing), else committed
+                    let shared = if owned { None } else { ctx.host.aliased((address, address + info.size), &hd, clear.as_ref(), layout) };
+                    aliased = shared.is_some();
+                    match shared.map(|t| Ok(Some(t))).unwrap_or_else(|| ctx.host.resource_in(&hd, clear.as_ref(), layout)) {
                         Ok(t) => t,
                         Err(hr) => {
-                            if owned {
-                                ctx.memory.free(address, info.size);
-                            }
+                            // neither the card nor system memory took it: the title still gets its resource (its
+                            // views are null views, copies and barriers skip it), never a failure it would write
+                            // through as a null object
                             ctx.counters.refused.fetch_add(1, Ordering::Relaxed);
+                            if crate::vram::HOSTLESS.fetch_add(1, Ordering::Relaxed) < 8 {
+                                eprintln!(
+                                    "vram      no host texture for a {}x{}x{} format {} mips {} texture at {address:#x} ({:#x}): the title gets it without one",
+                                    hd.Width, hd.Height, hd.DepthOrArraySize, hd.Format.0, hd.MipLevels, hr.0 as u32
+                                );
+                            }
                             ctx.events.note("host texture refused", hr.0 as u32 as u64);
                             ctx.events.note("  its (dimension, host format, flags, layout)", (hd.Dimension.0 as u64) << 48 | (hd.Format.0 as u64 & 0xffff) << 32 | (hd.Flags.0 as u64 & 0xffff) << 16 | layout.0 as u64 & 0xffff);
                             ctx.events.note("  its (width, height)", hd.Width << 32 | u64::from(hd.Height));
                             ctx.events.note("  its (depth or array, mips, samples, quality)", u64::from(hd.DepthOrArraySize) << 48 | u64::from(hd.MipLevels) << 32 | u64::from(hd.SampleDesc.Count) << 16 | u64::from(hd.SampleDesc.Quality) & 0xffff);
                             ctx.events.note("  its (title format, title flags, clear format or ffff)", (desc.Format.0 as u64 & 0xffff) << 32 | (desc.Flags.0 as u64 & 0xffff) << 16 | clear.map_or(0xffff, |c| c.Format.0 as u64 & 0xffff));
-                            return hr;
+                            None
                         }
                     }
                 }
@@ -477,6 +493,7 @@ impl Resources {
             twins,
             view_format,
             owned,
+            aliased,
             host_bytes,
             origin,
             twin_bytes,

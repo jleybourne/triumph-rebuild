@@ -13,6 +13,9 @@
 //!   thread; results come back in command order.
 //! - `xdsp` (A3, `chad.dll`): the DSP's block streams.
 //! - `wasapi` (A4): host output on a thread of its own, fed through a lock-free ring.
+//! - `hostout`: the title's own output through the host's WASAPI, watched (counts, a file tap, session volume).
+//! - `loopback`, `wav`: what the host plays for a process, recorded, and a numbers-only look at a WAV.
+//! - `stats`: counts of the title's calls into the console audio functions, for the run report.
 //!
 //! No GPU. No title bytes: every test builds its own input.
 #![cfg(windows)]
@@ -21,12 +24,18 @@
 pub mod acp;
 pub mod awc;
 pub mod heap;
+pub mod hostout;
+pub mod loopback;
 #[cfg(test)]
 mod measure;
 pub mod ring;
+pub mod spatial;
+pub mod stats;
 pub mod wasapi;
+pub mod wav;
 pub mod wma;
 pub mod xapu;
+pub mod xaudio;
 pub mod xdsp;
 pub mod xma;
 
