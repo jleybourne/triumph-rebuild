@@ -41,6 +41,19 @@ pub const OFFLINE: ConnectivityHint = ConnectivityHint {
     roaming: false,
 };
 
+/// The offline online-mode sandbox hint (debug): level `InternetAccess` (3), cost `Unrestricted` (1),
+/// IANA interface type Ethernet (6). Reported only when the sandbox is on, so the title walks past its
+/// connectivity gate; the runtime layer still blocks every real connection.
+pub const SANDBOX_ONLINE: ConnectivityHint = ConnectivityHint {
+    level: 3,
+    cost: 1,
+    iana_interface_type: 6,
+    network_initialized: true,
+    approaching_data_limit: false,
+    over_data_limit: false,
+    roaming: false,
+};
+
 unsafe extern "system" fn udp_port(_: This, out: *mut u16) -> HRESULT {
     unsafe { put(out, UDP_PORT) }
 }
@@ -66,7 +79,8 @@ unsafe extern "system" fn security_info_result(_: This, block: *mut XAsyncBlock,
 }
 
 unsafe extern "system" fn connectivity_hint(_: This, out: *mut ConnectivityHint) -> HRESULT {
-    unsafe { put(out, OFFLINE) }
+    let hint = if crate::sandbox::online() { SANDBOX_ONLINE } else { OFFLINE };
+    unsafe { put(out, hint) }
 }
 /// The hint never changes: the callback is never called.
 unsafe extern "system" fn register(_: This, _queue: *const c_void, _context: *mut c_void, _callback: *const c_void, out: *mut u64) -> HRESULT {
@@ -132,5 +146,25 @@ mod tests {
             assert_eq!(method::<Reg>(&NETWORKING_IFACE, 0x80)(t, std::ptr::null(), std::ptr::null_mut(), std::ptr::null(), &mut token), S_OK);
             assert!(method::<unsafe extern "system" fn(This, u64, u8) -> bool>(&NETWORKING_IFACE, 0x88)(t, token, 1));
         }
+    }
+
+    #[test]
+    fn the_sandbox_reports_online_but_default_stays_offline() {
+        type Hint = unsafe extern "system" fn(This, *mut ConnectivityHint) -> HRESULT;
+        let t = this(&NETWORKING_IFACE);
+        let read = || unsafe {
+            let mut h = std::mem::MaybeUninit::<ConnectivityHint>::zeroed();
+            assert_eq!(method::<Hint>(&NETWORKING_IFACE, 0x78)(t, h.as_mut_ptr()), S_OK);
+            h.assume_init()
+        };
+        // default: offline (level None = 1)
+        crate::sandbox::with_override(false, || assert_eq!(read(), OFFLINE));
+        // sandbox on: online-capable (level InternetAccess = 3)
+        crate::sandbox::with_override(true, || {
+            let h = read();
+            assert_eq!(h, SANDBOX_ONLINE);
+            assert_eq!(h.level, 3);
+            assert!(h.network_initialized);
+        });
     }
 }

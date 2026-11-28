@@ -35,6 +35,7 @@ pub mod pipeline;
 pub mod registry;
 pub mod overlay;
 pub mod present;
+pub mod sandbox;
 pub mod titlemem;
 #[cfg(all(test, windows))]
 mod present_card;
@@ -148,6 +149,32 @@ pub const OVERRIDES: &[(&str, &str)] = &[
     // process identity: the console title must not see the host's command line or exe path
     ("GetCommandLineW", "process"),
     ("GetCommandLineA", "process"),
+    // network: the offline online-mode sandbox (`crate::sandbox`) refuses every non-loopback destination
+    // while it is on. Off, these bind to the host's own function (override with none built), unchanged.
+    ("connect", "network"),
+    ("WSAConnect", "network"),
+    ("WSAConnectByNameW", "network"),
+    ("WSAConnectByNameA", "network"),
+    ("WSAConnectByList", "network"),
+    ("WSAIoctl", "network"),
+    ("sendto", "network"),
+    ("WSASendTo", "network"),
+    ("WSASendMsg", "network"),
+    ("getaddrinfo", "network"),
+    ("GetAddrInfoW", "network"),
+    ("GetAddrInfoExW", "network"),
+    ("gethostbyname", "network"),
+    ("WSAAsyncGetHostByName", "network"),
+    ("WinHttpConnect", "network"),
+    ("WinHttpSendRequest", "network"),
+    ("InternetConnectW", "network"),
+    ("InternetConnectA", "network"),
+    ("InternetOpenUrlW", "network"),
+    ("InternetOpenUrlA", "network"),
+    ("HttpSendRequestW", "network"),
+    ("HttpSendRequestA", "network"),
+    ("HttpSendRequestExW", "network"),
+    ("HttpSendRequestExA", "network"),
 ];
 
 /// What the GDK runtime noted: interfaces, slots and exports the title asked for that we do not serve.

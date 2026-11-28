@@ -99,8 +99,69 @@ unsafe extern "system" fn resolve_privilege_result(_: This, block: *mut XAsyncBl
 }
 
 static TOKEN: u8 = 0;
+
+/// The placeholder token/signature the offline online-mode sandbox hands back (debug only). It is a
+/// locally generated string, never obtained from or presented to any real service — the runtime layer
+/// blocks all non-loopback network, so it can never leave the machine.
+const SANDBOX_TOKEN: &str = "XBL3.0 x=0;rebuild-offline-sandbox-placeholder-token";
+const SANDBOX_SIGNATURE: &str = "rebuild-offline-sandbox-placeholder-signature";
+
+/// A placeholder `XUserGetTokenAndSignatureData`, built into the title's own result buffer at GetResult
+/// time so its `token`/`signature` pointers address that buffer.
+struct PlaceholderToken {
+    /// the token string, null-terminated (the API's `token` is `_Field_z_`)
+    token: Vec<u8>,
+    signature: Vec<u8>,
+}
+
+impl PlaceholderToken {
+    /// `size_t tokenCount; size_t signatureCount; const char* token; const char* signature;`
+    const HEADER: usize = 32;
+
+    fn new() -> PlaceholderToken {
+        let mut token = SANDBOX_TOKEN.as_bytes().to_vec();
+        token.push(0);
+        PlaceholderToken { token, signature: SANDBOX_SIGNATURE.as_bytes().to_vec() }
+    }
+
+    fn size(&self) -> usize {
+        Self::HEADER + self.token.len() + self.signature.len()
+    }
+}
+
+unsafe extern "system" fn token_provider(op: u32, data: *const xasync::ProviderData) -> HRESULT {
+    let data = unsafe { &*data };
+    let ctx = data.context.cast::<PlaceholderToken>();
+    match op {
+        xasync::OP_BEGIN => {
+            let size = unsafe { &*ctx }.size();
+            unsafe { xasync::complete(data.async_block, S_OK, size) };
+        }
+        xasync::OP_GET_RESULT => {
+            let p = unsafe { &*ctx };
+            let b = data.buffer.cast::<u8>();
+            unsafe {
+                let token_ptr = b.add(PlaceholderToken::HEADER);
+                let sig_ptr = token_ptr.add(p.token.len());
+                // tokenCount is the string length without the terminating null; signatureCount its bytes.
+                b.cast::<usize>().write_unaligned(p.token.len() - 1);
+                b.add(8).cast::<usize>().write_unaligned(p.signature.len());
+                b.add(16).cast::<*const u8>().write_unaligned(token_ptr);
+                b.add(24).cast::<*const u8>().write_unaligned(sig_ptr);
+                token_ptr.copy_from_nonoverlapping(p.token.as_ptr(), p.token.len());
+                sig_ptr.copy_from_nonoverlapping(p.signature.as_ptr(), p.signature.len());
+            }
+        }
+        xasync::OP_CLEANUP => drop(unsafe { Box::from_raw(ctx) }),
+        _ => {}
+    }
+    S_OK
+}
+
 /// `XUserGetTokenAndSignatureAsync`: tokens come from the service, so offline this fails with
-/// `E_GAMEUSER_FAILED_TO_GET_TOKEN` (the console's exact offline code is not known).
+/// `E_GAMEUSER_FAILED_TO_GET_TOKEN` (the console's exact offline code is not known). With the offline
+/// online-mode sandbox on (debug), a locally generated placeholder token succeeds instead, so the
+/// sign-in code proceeds; the runtime layer guarantees it never reaches a real service.
 unsafe extern "system" fn token_async(
     _: This,
     _: UserHandle,
@@ -114,14 +175,29 @@ unsafe extern "system" fn token_async(
     block: *mut XAsyncBlock,
 ) -> HRESULT {
     let url = unsafe { text(url) }.unwrap_or_default();
+    if crate::sandbox::online() {
+        crate::discovery::note(format!("sandbox: XUserGetTokenAndSignatureAsync placeholder token for {url}"));
+        let ctx = Box::into_raw(Box::new(PlaceholderToken::new()));
+        let hr = unsafe { xasync::begin(block, ctx.cast(), (&TOKEN as *const u8).cast(), Some(token_provider)) };
+        if failed(hr) {
+            drop(unsafe { Box::from_raw(ctx) });
+        }
+        return hr;
+    }
     crate::discovery::note(format!("offline: XUserGetTokenAndSignatureAsync {url}"));
     unsafe { xasync::finish(block, &TOKEN, Err(E_GAMEUSER_FAILED_TO_GET_TOKEN)) }
 }
 unsafe extern "system" fn token_size(_: This, block: *mut XAsyncBlock, out: *mut usize) -> HRESULT {
     unsafe { xasync::get_result_size(block, out) }
 }
-unsafe extern "system" fn token_result(_: This, block: *mut XAsyncBlock, size: usize, buffer: *mut c_void, _data: *mut *const c_void, used: *mut usize) -> HRESULT {
-    unsafe { xasync::get_result(block, (&TOKEN as *const u8).cast(), size, buffer, used) }
+unsafe extern "system" fn token_result(_: This, block: *mut XAsyncBlock, size: usize, buffer: *mut c_void, data: *mut *const c_void, used: *mut usize) -> HRESULT {
+    let hr = unsafe { xasync::get_result(block, (&TOKEN as *const u8).cast(), size, buffer, used) };
+    // On success the result's `token`/`signature` pointers live in `buffer`; the title reads the struct
+    // through this out pointer.
+    if hr == S_OK && !data.is_null() && !buffer.is_null() {
+        unsafe { data.write_unaligned(buffer as *const c_void) };
+    }
+    hr
 }
 
 /// The user never changes: the callback is never called.
@@ -270,5 +346,35 @@ mod tests {
             assert_eq!(method::<Res>(&USER_IFACE, 0xc8)(t, &mut block, 0, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()), E_GAMEUSER_FAILED_TO_GET_TOKEN);
         }
         assert!(crate::discovery::contains("offline: XUserGetTokenAndSignatureAsync https://example.invalid/"));
+    }
+
+    #[test]
+    fn tokens_succeed_with_a_placeholder_in_the_sandbox() {
+        type Token = unsafe extern "system" fn(This, UserHandle, u32, *const c_char, *const c_char, usize, *const c_void, usize, *const c_void, *mut XAsyncBlock) -> HRESULT;
+        type Size = unsafe extern "system" fn(This, *mut XAsyncBlock, *mut usize) -> HRESULT;
+        type Res = unsafe extern "system" fn(This, *mut XAsyncBlock, usize, *mut c_void, *mut *const c_void, *mut usize) -> HRESULT;
+        let t = this(&USER_IFACE);
+        let mut block = XAsyncBlock::new(std::ptr::null(), None);
+        let null = std::ptr::null();
+        crate::sandbox::with_override(true, || unsafe {
+            let hr = method::<Token>(&USER_IFACE, 0xb8)(t, user(), 0, c"POST".as_ptr(), c"https://title.example/auth".as_ptr(), 0, null, 0, null, &mut block);
+            assert_eq!(hr, S_OK);
+            assert_eq!(xasync::get_status(&mut block, true), S_OK, "the sandbox token succeeds");
+            let mut size = 0usize;
+            assert_eq!(method::<Size>(&USER_IFACE, 0xc0)(t, &mut block, &mut size), S_OK);
+            assert!(size >= 32, "room for the struct and strings");
+            let mut buf = vec![0u8; size];
+            let mut data: *const c_void = std::ptr::null();
+            let mut used = 0usize;
+            assert_eq!(method::<Res>(&USER_IFACE, 0xc8)(t, &mut block, size, buf.as_mut_ptr().cast(), &mut data, &mut used), S_OK);
+            assert_eq!(data, buf.as_ptr().cast(), "the result points into the title's buffer");
+            // the struct's token pointer resolves to the placeholder string
+            let token_ptr = usize::from_ne_bytes(buf[16..24].try_into().unwrap()) as *const c_char;
+            let token = std::ffi::CStr::from_ptr(token_ptr).to_str().unwrap();
+            assert_eq!(token, SANDBOX_TOKEN);
+            let token_count = usize::from_ne_bytes(buf[0..8].try_into().unwrap());
+            assert_eq!(token_count, SANDBOX_TOKEN.len());
+        });
+        assert!(crate::discovery::contains("sandbox: XUserGetTokenAndSignatureAsync placeholder token for https://title.example/auth"));
     }
 }

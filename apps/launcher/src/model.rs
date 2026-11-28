@@ -75,7 +75,7 @@ pub fn group_of(s: &Setting) -> Group {
         "limits" => Group::Limits,
         "title" => Group::Title,
         "menu" => Group::Menu,
-        "diagnostics" => Group::Diagnostics,
+        "diagnostics" | "debug" => Group::Diagnostics,
         "game" => Group::Files,
         "launcher" => Group::Launcher,
         _ => Group::MemoryShaders,

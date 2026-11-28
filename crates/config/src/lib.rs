@@ -180,6 +180,7 @@ pub static REGISTRY: &[Setting] = &[
     s("game.console", "Console", "The console the title is told it runs on (its ConsoleMode): series-x or series-s.", Kind::Choice { options: &["series-x", "series-s"] }, Default::Choice("series-x"), Restart, Stable),
     s("diagnostics.warp", "WARP (software GPU)", "Run on WARP, the software rasterizer: very slow, but title work that would hang a GPU only fails. For diagnosis.", Kind::Bool, Default::Bool(false), Restart, Experimental),
     s("menu.key", "In-game menu key", "Toggles the in-game menu. While it is open the title sees no input.", Kind::Choice { options: &["F10", "F11", "F12", "Insert", "Home"] }, Default::Choice("F10"), Restart, Stable),
+    s("debug.offline_online_sandbox", "Offline online-mode sandbox", "Debug only: makes the GDK stubs report online so the title enters its online/content-loading code, while every non-loopback network connection is hard-blocked in code. Not a way to play online: with nothing real to reach, no multiplayer session forms; it exercises the online init offline.", Kind::Bool, Default::Bool(false), Restart, Experimental),
 ];
 
 /// `REBUILD_FRAME_RATE` for the layer from `display.frame_rate` and `display.frame_cap`: `title`, `unlimited`, or
