@@ -73,10 +73,20 @@ pub struct Plan {
     pub patch: [BTreeMap<u32, Vec<bool>>; SETS as usize],
     /// input sets whose indices from the data still leave the heap (no buffer word found that feeds them)
     pub oob: Vec<u32>,
+    /// the oracle's root SRVs (`t<register>, space1`) and the heap slot of the window view ours reads the same buffer
+    /// through ([`ROOT_WINDOW`])
+    pub roots: Vec<(u32, u32)>,
 }
 
+/// The first window ([`rebuild_sir::lift::window_slot`]) a root descriptor's address names: the title's root SRV
+/// is a 64-bit address, which ours reads through window addressing (the window's raw view, the address's low 29
+/// bits as the offset) and the oracle through a root SRV. Each root descriptor gets an address at offset 0 of its
+/// own window, whose view is a buffer of the plan; the oracle's root SRV is that buffer.
+const ROOT_WINDOW: u32 = 8;
+
 /// `record`: dynamic indices are left to the recording pass ([`super::record`]): no region is filled for them.
-pub fn plan(p: &Prog, record: bool) -> Result<Plan, String> {
+/// `roots`: the oracle's root SRV registers (space 1), each the root descriptor at that root parameter index.
+pub fn plan(p: &Prog, record: bool, roots: &[u32]) -> Result<Plan, String> {
     let mut pl = Plan::default();
     // each table at its own place: resource tables 256 slots apart, sampler tables 64
     let mut table_base: BTreeMap<u8, (Heap, u32)> = BTreeMap::new();
@@ -107,6 +117,17 @@ pub fn plan(p: &Prog, record: bool) -> Result<Plan, String> {
             }
             RootType::ResourceHeap | RootType::SamplerHeap => {
                 table_base.insert(prm.user_data, (if prm.root == RootType::SamplerHeap { Heap::Sampler } else { Heap::Resource }, 0));
+            }
+            RootType::Descriptor if roots.contains(&u32::from(prm.slot)) && prm.user_data < 15 => {
+                // the address: offset 0 of window k (`sir_wi`: (hi << 3 | lo >> 29) & 32767)
+                let k = ROOT_WINDOW + pl.roots.len() as u32;
+                let slot = rebuild_sir::lift::WINDOW_HEAP_BASE + k;
+                for s in 0..SETS as usize {
+                    pl.ud[s][prm.user_data as usize] = (k & 7) << 29;
+                    pl.ud[s][prm.user_data as usize + 1] = k >> 3;
+                }
+                pl.slots.insert(slot, View::Raw);
+                pl.roots.push((u32::from(prm.slot), slot));
             }
             _ => {
                 for k in 0..prm.sgprs.max(1) as u8 {
@@ -567,8 +588,9 @@ fn descriptors(g: &Gpu, pl: &Plan, bound: &[(Vec<u32>, Bound)]) {
 }
 
 /// Records one side's draw or dispatch (between `begin` and `end`).
-/// `extra`: a further root SRV (parameter, buffer) the side's root signature has (the oracle's live-slot table).
-fn record_draw(g: &Gpu, d: &Draw, pso: &ID3D12PipelineState, rs: &ID3D12RootSignature, ud: &[u32; 16], tres: &[Res], extra: Option<(u32, &ID3D12Resource)>) {
+/// `extra`: further root SRVs (parameter, buffer) the side's root signature has (the oracle's live-slot table and
+/// root SRVs).
+fn record_draw(g: &Gpu, d: &Draw, pso: &ID3D12PipelineState, rs: &ID3D12RootSignature, ud: &[u32; 16], tres: &[Res], extra: &[(u32, &ID3D12Resource)]) {
     unsafe {
         let l = &g.list;
         l.SetDescriptorHeaps(&[Some(g.heap.clone()), Some(g.samplers.clone())]);
@@ -578,8 +600,8 @@ fn record_draw(g: &Gpu, d: &Draw, pso: &ID3D12PipelineState, rs: &ID3D12RootSign
             l.SetComputeRootSignature(rs);
             l.SetComputeRoot32BitConstants(layout::param::CS_USER_DATA, 16, ud, 0);
             l.SetComputeRootShaderResourceView(layout::param::CS_SHADOW, d.shadow.GetGPUVirtualAddress());
-            if let Some((k, b)) = extra {
-                l.SetComputeRootShaderResourceView(k, b.GetGPUVirtualAddress());
+            for (k, b) in extra {
+                l.SetComputeRootShaderResourceView(*k, b.GetGPUVirtualAddress());
             }
             l.Dispatch(d.groups[0], d.groups[1], d.groups[2]);
         } else {
@@ -587,8 +609,8 @@ fn record_draw(g: &Gpu, d: &Draw, pso: &ID3D12PipelineState, rs: &ID3D12RootSign
             let user = if d.vsetup.is_some() { layout::param::VS_USER_DATA } else { layout::param::PS_USER_DATA };
             l.SetGraphicsRoot32BitConstants(user, 16, ud, 0);
             l.SetGraphicsRootShaderResourceView(layout::param::GFX_SHADOW, d.shadow.GetGPUVirtualAddress());
-            if let Some((k, b)) = extra {
-                l.SetGraphicsRootShaderResourceView(k, b.GetGPUVirtualAddress());
+            for (k, b) in extra {
+                l.SetGraphicsRootShaderResourceView(*k, b.GetGPUVirtualAddress());
             }
             match d.vsetup {
                 Some(st) => super::vs::draw(g, st, &tres[0], &tres[1]),
@@ -613,7 +635,8 @@ fn shadow_table(pl: &Plan) -> Vec<u8> {
         let at = PAGE_TABLE_BYTE as usize + page as usize * 4;
         shadow[at..at + 4].copy_from_slice(&v.to_le_bytes());
     }
-    for (slot, v) in &pl.slots {
+    // (a window view, past the console range, has no shadow entry)
+    for (slot, v) in pl.slots.range(..CONSOLE_VIEWS) {
         let at = *slot as usize * 16;
         shadow[at + 8..at + 12].copy_from_slice(&slot.to_le_bytes());
         if matches!(v, View::Raw | View::RwRaw) || (*v == View::Cbv && pl.strides.contains_key(slot)) {
@@ -815,7 +838,7 @@ fn record_once(g: &mut Gpu, pl: &mut Plan, r: &Rec, set: u32) -> Result<super::r
     for x in &all {
         g.upload(x);
     }
-    record_draw(g, &d, r.pso, r.rs, &pl.ud[set as usize], &tres, None);
+    record_draw(g, &d, r.pso, r.rs, &pl.ud[set as usize], &tres, &[]);
     g.download(&rec);
     g.end().map_err(|e| ("recording pass lost the device", e))?;
     if g.lost() {
@@ -838,8 +861,12 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
     if o.wave > 32 {
         return row("untested", format!("the oracle needs wave size {} (no adapter here runs it)", o.wave), String::new());
     }
-    if o.root_views > 0 && !o.live_table {
+    // root views: the live-slot table (with REBUILD_EXEC_LIVE) and root SRVs, each over a root descriptor of ours
+    if o.other_roots || (o.root_views > o.root_srvs.len() && !o.live_table) {
         return row("untested", "the oracle binds root views".into(), String::new());
+    }
+    if let Some(r) = o.root_srvs.iter().find(|r| !p.layout.iter().any(|x| x.root == RootType::Descriptor && u32::from(x.slot) == **r && x.user_data < 15)) {
+        return row("untested", format!("the oracle's root SRV t{r} has no root descriptor in user data"), String::new());
     }
     // ours declares a wave size (wave-wide compute: native wave32, or wave64 doubled onto 32 lanes); WARP's waves
     // are 4 lanes, so the pipeline cannot be made here
@@ -854,10 +881,10 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
     // region: recording those too (with the recorded slots outside the region given views) turned 30 programs that
     // match into differing ones, where the oracle reads other slots than ours for an index from the data
     let record = std::env::var_os("REBUILD_EXEC_NORECORD").is_none();
-    let (mut pl, recording) = match plan(p, false) {
+    let (mut pl, recording) = match plan(p, false, &o.root_srvs) {
         Ok(pl) => (pl, None),
         Err(e) if e == "dynamic descriptor index over mixed views" && record => {
-            let pl = match plan(p, true) {
+            let pl = match plan(p, true, &o.root_srvs) {
                 Ok(pl) => pl,
                 Err(e) => return row("untested", e, String::new()),
             };
@@ -893,6 +920,15 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
         oracle_root.params.push(layout::Param::Srv { register: 255, space: 1, vis });
         oracle_root.params.len() as u32 - 1
     });
+    // the oracle's root SRVs: (parameter, slot of the buffer ours reads through its window)
+    let root_params: Vec<(u32, u32)> = pl
+        .roots
+        .iter()
+        .map(|(register, slot)| {
+            oracle_root.params.push(layout::Param::Srv { register: *register, space: 1, vis });
+            (oracle_root.params.len() as u32 - 1, *slot)
+        })
+        .collect();
     let roots = [&ours_root, &oracle_root].map(|r| rebuild_pipelines::d3d::serialize(r).and_then(|b| g.root_signature(&b)));
     let (ours_rs, oracle_rs) = match roots {
         [Ok(a), Ok(b)] => (a, b),
@@ -1054,8 +1090,16 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
             for r in &all {
                 g.upload(r);
             }
-            let extra = if side == 1 { live.as_ref().map(|(k, b)| (*k, b)) } else { None };
-            record_draw(g, &draw, pso, rs, &pl.ud[set as usize], &tres, extra);
+            let mut extra: Vec<(u32, &ID3D12Resource)> = Vec::new();
+            if side == 1 {
+                extra.extend(live.as_ref().map(|(k, b)| (*k, b)));
+                for (k, slot) in &root_params {
+                    if let Some((_, b)) = bound.iter().find(|(slots, _)| slots.contains(slot)) {
+                        extra.push((*k, &b.res.r));
+                    }
+                }
+            }
+            record_draw(g, &draw, pso, rs, &pl.ud[set as usize], &tres, &extra);
             for r in &all {
                 g.download(r);
             }
