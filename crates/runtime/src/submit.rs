@@ -128,26 +128,31 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
             for w in &seg.waits {
                 wait(&mut batch, w);
             }
+            // a list still running from an earlier submission, on this queue or another: wait for it (the console
+            // allows the re-execution, a host queue refuses it, and a card can hang on it). This also keeps the
+            // mark below covering the earlier run: the list pool resets its allocator after the last mark only.
+            let last = seg.list.executed_at.load(Ordering::Acquire);
+            let on = seg.list.executed_on.load(Ordering::Relaxed);
+            if last != 0 && !executed(on, last) {
+                batch.flush();
+                if on == me && last == value {
+                    // the same list twice in this submission: close this value now, take a fresh one for the rest
+                    unsafe { let _ = q.host.Signal(&q.progress, value); };
+                    value = q.progress_next.fetch_add(1, Ordering::AcqRel) + 1;
+                }
+                // SAFETY: as in `executed`
+                wait_done(unsafe { &*(on as *const Queue) }, last);
+                REEXECUTED.fetch_add(1, Ordering::Relaxed);
+            }
+            // every list given to a submission is marked, executed or skipped: the list pool never resets a list
+            // the title closed without a mark (it may be on the GPU by a path that does not mark)
+            seg.list.executed_on.store(me, Ordering::Relaxed);
+            seg.list.executed_at.store(value, Ordering::Release);
             // a list the host refused at Close: executing it would remove the device
             if seg.list.bad.load(Ordering::Relaxed) {
                 BAD.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
-            // a list still running from an earlier submission: wait for it (the console allows the re-execution, a
-            // host queue refuses it, and a card can hang on it)
-            let last = seg.list.executed_at.load(Ordering::Acquire);
-            if last != 0 && seg.list.executed_on.load(Ordering::Relaxed) == me && unsafe { q.progress.GetCompletedValue() } < last {
-                batch.flush();
-                if last == value {
-                    // the same list twice in this submission: close this value now, take a fresh one for the rest
-                    unsafe { let _ = q.host.Signal(&q.progress, value); };
-                    value = q.progress_next.fetch_add(1, Ordering::AcqRel) + 1;
-                }
-                wait_done(q, last);
-                REEXECUTED.fetch_add(1, Ordering::Relaxed);
-            }
-            seg.list.executed_on.store(me, Ordering::Relaxed);
-            seg.list.executed_at.store(value, Ordering::Release);
             batch.push(seg.list.list.as_raw());
             let stamp = seg.list.stamp.load(Ordering::Relaxed);
             if stamp != rebuild_xlist::console::stamps::NONE {
