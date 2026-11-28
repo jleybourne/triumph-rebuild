@@ -1123,7 +1123,7 @@ impl Resources {
             }
             // the host resource has no unordered access (the console allows it on any resource; the host strips it
             // from depth targets): a null view, never an invalid descriptor (WARP faults on one, then removes)
-            // (a depth texture's plane-0 UAVs are views of its twin instead: `docs/design/depth-uav.md`)
+            // (a depth texture's UAVs are views of its planes' twins instead: `docs/design/depth-uav.md`)
             Some(r) if crate::format::host_desc(&r.desc).0.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 == 0 && !crate::resource::twin_takes(r, desc) => {
                 if NO_UAV.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
                     self.inner.events.note("UAV of a resource without unordered access: a null view (counted)", r.desc.Flags.0 as u64);
@@ -1140,14 +1140,12 @@ impl Resources {
                     None => default_uav(r),
                 };
                 v.Format = view_format(v.Format.0, r, false);
-                if r.twin.is_some() {
-                    v.Format = DXGI_FORMAT(crate::format::twin_view_format(v.Format.0 as u32) as i32);
-                }
+                let target = crate::resource::uav_target(r, &mut v);
                 if let Some((mips, arrays)) = host_extent(r) {
                     fit_uav(&mut v, mips, arrays);
                 }
                 let k = uav_key(&v);
-                self.texture_entry(r, k, HostView::Uav { resource: r.uav_raw(), desc: v })
+                self.texture_entry(r, k, HostView::Uav { resource: target, desc: v })
             }
         };
         self.put(handle, &rec);

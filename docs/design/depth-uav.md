@@ -53,11 +53,11 @@ exit  (UAV -> y)   twin UAV -> COPY_SOURCE, depth COPY_SOURCE -> COPY_DEST; copy
 UAV -> UAV         a barrier on the twin alone
 ```
 
-- **Resource side** (`crates/d3d12x`): `format::twin_desc` (R16 for D16, R32 for D32 and D32S8; none for the
-  console's D16S8, which the host keeps as 24/8). `make_resource` makes the twin with the resource, resting in
-  `UNORDERED_ACCESS`; a depth texture the title starts in UAV starts parked in `COPY_SOURCE` (`initial_layout`).
-  `create_uav` makes plane-0 UAVs on the twin (stencil-plane UAVs stay null views). `Resources::uav_twin` answers
-  the list for textures whose UAV the host stripped.
+- **Resource side** (`crates/d3d12x`): `format::twin_desc` (R16 for D16, R32 for D32, D32S8 and the console's
+  D16S8) and `format::stencil_twin_desc` (R8 for the stencil plane: see the follow-up below). `make_resource`
+  makes the twins with the resource, resting in `UNORDERED_ACCESS`; a depth texture the title starts in UAV starts
+  parked in `COPY_SOURCE` (`initial_layout`). `create_uav` makes each UAV on its plane's twin.
+  `Resources::uav_twin` answers the list for textures whose UAV the host stripped.
 - **List side** (`crates/xlist/src/console/twin.rs`, a few lines in `list.rs`): `ListHost::uav_twin` (default
   `None`), `twin::plan` turns one title texture barrier into barriers in its group, copies after the group and
   barriers after the copies. UAV clears name the twin (`uav_clear`). Each list remembers, per twin, the last phase
@@ -88,10 +88,32 @@ The process's dedicated GPU memory with twins was 6.1 GiB of the card's 12. Two 
 builds shared the machine; the A/B pair above ran back to back and shows no cost. `REBUILD_DEPTH_TWINS=0` turns
 the twins off for such comparisons.
 
+## Stencil planes and the console's D16S8 (follow-up)
+
+The console's 16-bit depth with stencil (format 118, two 2560x1440 targets, one with UAVs) has no PC format.
+It used to become D24S8, but a 24-bit depth plane copies into no UAV-capable format without a compute pass. It
+is now **D32_FLOAT_S8X24_UINT** (`format::host_format`: 118 -> 20, its depth read 119 -> 21
+`R32_FLOAT_X8X24_TYPELESS`, its stencil read 120 -> 22 `X32_TYPELESS_G8X24_UINT`; the title's views of it are
+exactly 118 DSVs, 119 SRVs of plane 0 and 120 SRVs of plane 1, measured). It costs 29 MiB per 1440p texture
+instead of 11.
+
+Every depth format with stencil (D32S8 and this one) has **two twins**, one per plane: R32 for depth and R8 for
+stencil (`format::stencil_twin_desc`). A UAV names the twin of its plane (`resource::uav_target`, which also sets
+the view to the twin's one plane). `UavTwin::twins` holds both, and the planner gives each plane the barrier names
+its own barriers and copies. Depth subresource `mip + slice * mips + plane * mips * arrays` is twin subresource
+`mip + slice * mips`. A UAV clear names the resource of the view it clears (`ListHost::uav_resource`, which reads
+the record at the clear's CPU handle), so a stencil clear clears the R8 twin.
+
+The title's R16_UNORM UAV of the D16S8 depth plane becomes an R32_FLOAT UAV of the R32 twin. The translated
+shaders' typed image loads and stores are `RWTexture*<float4>` (`sir::lift::res`), which convert through the
+descriptor's format, so they see floats either way, with more precision; values outside 0..1 are no longer
+clamped. The only integer forms are image atomics (`RWTexture2D<uint>`), which need a 32-bit integer UAV and so
+cannot name an R16_UNORM one. No raw or bitwise access to such a UAV exists in the lifter. The stencil UAV is
+R8_UINT, as the title made it. A float4 store into it is the lifter's general typed-integer-UAV case, unchanged
+here.
+
 ## Not covered
 
-- The console's D16S8 (format 118, one 2560x1440 target): the host has no 16-bit depth with stencil, so its two
-  UAVs (R16 depth plane, R8 stencil plane) stay null views. Stencil-plane UAVs of D32S8 likewise.
 - Legacy `ResourceBarrier` transitions through `UNORDERED_ACCESS` on depth (the title makes none).
 - A depth texture entered into UAV on one queue and left on another works (each edge is self-contained), but a
   phase entered in one list and left in another always copies back.
@@ -100,7 +122,9 @@ the twins off for such comparisons.
 
 - `twin::tests` (xlist, no GPU): each edge's barriers, copies, and the plane / subresource mapping.
 - `format::tests::depth_textures_written_as_uavs_get_a_colour_twin`, `resource::initial_tests`.
-- `twin_tests::a_uav_write_into_a_depth_texture_reaches_the_depth_on_warp` (d3d12x, WARP): D32, D16 and D32S8 made
-  as the title makes them, a console list that clears the depth, enters UAV, clears half through the UAV, leaves,
-  and enters and leaves again with no work. The host depth holds both values, with three copies (none for the
-  empty phase). `REBUILD_D3D12_DEBUG=1` runs it under the debug layer and fails on any error.
+- `twin_tests::a_uav_write_into_a_depth_texture_reaches_the_depth_on_warp` (d3d12x, WARP): D32, D16, D32S8 and the
+  console's D16S8 made as the title makes them. A console list clears the depth (and stencil), enters UAV, clears
+  half through the depth UAV (and half through the stencil UAV), leaves, then enters and leaves again with no work.
+  The host depth holds both values on each plane, with one copy per plane with a twin per edge that needs one
+  (none for the empty phase). The D16S8's 119 and 120 SRVs are made too. `REBUILD_D3D12_DEBUG=1` runs it under the
+  debug layer and fails on any error.

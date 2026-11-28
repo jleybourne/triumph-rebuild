@@ -2142,11 +2142,8 @@ fn uav_clear(s: &mut ListState, gpu: u64, cpu: usize, resource: Raw) -> Option<(
     s.work();
     let g = s.table(gpu);
     let c = s.host.cpu_descriptor(cpu);
-    // a depth texture's UAVs are views of its twin, and the clear must name the resource its view does
-    let r = match s.host.uav_twin(resource) {
-        Some(t) if !t.twin.is_null() => Some(t.twin),
-        _ => s.resource(resource),
-    };
+    // a depth texture's UAVs are views of its planes' twins, and the clear must name the resource its view does
+    let r = s.host.uav_resource(resource, cpu).or_else(|| s.resource(resource));
     match (g, c, r) {
         (Some(g), Some(c), Some(r)) => Some((D3D12_GPU_DESCRIPTOR_HANDLE { ptr: g }, D3D12_CPU_DESCRIPTOR_HANDLE { ptr: c }, r)),
         _ => {
