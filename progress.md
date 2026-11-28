@@ -133,14 +133,14 @@ fps         menus 15 → 30 at the cap, ~260 unlimited; upload pass 12.5 → 2.3
   thought to be the glyph atlas filled at run time, the same path as the black Bink stretches: video lane).
   Shader data regenerated and swapped (`translate`, `pipelines\library.bin`; old kept as `*-preremap`).
 - **depthuav (#69):** 314 depth textures written as UAVs get a colour twin copied at the title's barriers;
-  null UAVs 316 → 2 (the D16S8 one: depthuav2 lane, D32S8 + two twins). D: is the devkit scratch drive (retail
+  null UAVs 316 → 2 → 0 (#72: D16S8 as D32S8 with a twin per plane). D: is the devkit scratch drive (retail
   has none).
 - **saves (#67):** XGameSave (27 functions) and silent speech synthesis; the title asks for no unknown interface.
   Persistence in the title not yet shown (no run finished setup).
 - **polish (#68) + launcher:** the title's window can't appear; Window mode (windowed / windowed fullscreen /
   fullscreen) and Window size presets 120p–2160p (720p default); **recommend (#71):** the launcher detects the PC
   and recommends a profile (here: 4K, DLSS Quality), applied once on first run.
-- Tests: 717 green.
+- Tests: 718 green.
 
 ### 2026-11-28 — Through the menus: setup, legal terms, Finish Setup
 
