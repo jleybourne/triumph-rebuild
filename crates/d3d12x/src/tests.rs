@@ -687,17 +687,19 @@ fn a_heap_over_records_mirrors_them_when_made() {
 /// 1,000,000 on a larger heap).
 #[test]
 fn console_indices_and_alternates_never_share_host_slots() {
-    use rebuild_sir::lift::{NullKind, CONSOLE_VIEWS, NULL_BANK, WINDOW_HEAP_BASE};
+    use crate::heap::WINDOW_UAV_BASE;
+    use rebuild_sir::lift::{NullKind, CONSOLE_VIEWS, NULL_BANK, WINDOW_COUNT, WINDOW_HEAP_BASE};
     assert_eq!(Limits::TIER2.null_index(), CONSOLE_VIEWS, "the index translated shaders compare with");
-    assert_eq!(Limits::TIER2.alternate_ranges(), [CONSOLE_VIEWS + NULL_BANK..WINDOW_HEAP_BASE, 1_000_000..1_000_000]);
+    assert_eq!(WINDOW_UAV_BASE + WINDOW_COUNT, WINDOW_HEAP_BASE, "window UAVs right below the window SRVs");
+    assert_eq!(Limits::TIER2.alternate_ranges(), [CONSOLE_VIEWS + NULL_BANK..WINDOW_UAV_BASE, 1_000_000..1_000_000]);
     let big = Limits { views: 1 << 21, samplers: 2048 };
     assert_eq!(big.null_index(), CONSOLE_VIEWS);
-    assert_eq!(big.alternate_ranges(), [CONSOLE_VIEWS + NULL_BANK..WINDOW_HEAP_BASE, 1_000_000..1 << 21]);
+    assert_eq!(big.alternate_ranges(), [CONSOLE_VIEWS + NULL_BANK..WINDOW_UAV_BASE, 1_000_000..1 << 21]);
 
     let rig = rig_with(Limits::TIER2, 64 << 20);
     let r = &rig.r;
     let b = buffer(r, KIB_64);
-    let ok = |a: u32| (CONSOLE_VIEWS + NULL_BANK..WINDOW_HEAP_BASE).contains(&a);
+    let ok = |a: u32| (CONSOLE_VIEWS + NULL_BANK..WINDOW_UAV_BASE).contains(&a);
     // the title's oversized heap (pooled alternates) and a small one (fixed alternates)
     for count in [1_245_184u32, 64] {
         let (h, start) = heap(&rig, 0, count, true, true);
@@ -1269,3 +1271,45 @@ fn query_heaps_and_command_signatures_are_device_children_with_host_objects() {
     assert!(r.host_command_signature(c).is_some());
     assert_eq!((release(q), release(c)), (0, 0));
 }
+
+/// The window contract (`docs/design/memory-run.md`): sub-window k (console addresses k << 29, 512 MiB) is a raw
+/// SRV at `WINDOW_HEAP_BASE + k` and a raw UAV at `WINDOW_UAV_BASE + k` over 2^27 elements from byte 0, in every
+/// shader-visible view heap, the ones made before it was placed and after.
+#[test]
+fn window_views_are_placed_in_every_visible_heap() {
+    use crate::heap::{WINDOW_ELEMENTS, WINDOW_UAV_BASE};
+    use rebuild_sir::lift::WINDOW_HEAP_BASE;
+    let Ok(factory) = (unsafe { windows::Win32::Graphics::Dxgi::CreateDXGIFactory1::<windows::Win32::Graphics::Dxgi::IDXGIFactory4>() }) else { return };
+    let Ok(adapter) = (unsafe { factory.EnumWarpAdapter::<windows::core::IUnknown>() }) else { return };
+    let mut device: Option<ID3D12Device> = None;
+    if unsafe { D3D12CreateDevice(&adapter, windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0, &mut device) }.is_err() {
+        return;
+    }
+    let device = device.unwrap();
+    let mut buf: Option<ID3D12Resource> = None;
+    unsafe {
+        device
+            .CreateCommittedResource(&D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() }, D3D12_HEAP_FLAG_NONE, &crate::resource::buffer_desc(KIB_64, true), D3D12_RESOURCE_STATE_COMMON, None, &mut buf)
+            .unwrap()
+    };
+    let buf = buf.unwrap();
+    let rig = rig_with(Limits::TIER2, 64 << 20);
+    let r = &rig.r;
+    let (before, _) = heap(&rig, 0, 1_245_184, true, true);
+    r.place_window(9, &buf);
+    let (after, _) = heap(&rig, 0, 64, true, true);
+    let (cpu_only, _) = heap(&rig, 0, 64, false, false);
+    let raw = buf.as_raw();
+    for h in [before, after] {
+        let st = r.heap_state(h).unwrap();
+        let srv = rig.fake.at(st.host.cpu_at(WINDOW_HEAP_BASE + 9)).unwrap().describe();
+        let uav = rig.fake.at(st.host.cpu_at(WINDOW_UAV_BASE + 9)).unwrap().describe();
+        assert_eq!(srv, format!("srv raw {raw:?} fmt {} first 0 n {WINDOW_ELEMENTS}", DXGI_FORMAT_R32_TYPELESS.0));
+        assert_eq!(uav, format!("uav raw {raw:?} fmt {} first 0 n {WINDOW_ELEMENTS}", DXGI_FORMAT_R32_TYPELESS.0));
+        assert!(rig.fake.at(st.host.cpu_at(WINDOW_HEAP_BASE + 10)).is_none_or(|v| !v.describe().contains("raw")), "an unplaced sub-window stays null");
+    }
+    let st = r.heap_state(cpu_only).unwrap();
+    assert!(st.host.count < 1_000_000, "a CPU-only heap has no window range");
+    assert_eq!(r.windows_placed(), 1);
+}
+

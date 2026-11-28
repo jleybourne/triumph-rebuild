@@ -16,7 +16,10 @@
 //!   [P + NULL_BANK, W)      alternate views: a buffer descriptor's own kind (typed SRV, UAV;
 //!   and [1,000,000, views)  never a CBV: CBVs are only raw SRVs here), at the index its shadow
 //!                           entry names
-//!   [W, 1,000,000)          window views (W = `rebuild_sir::lift::WINDOW_HEAP_BASE`): never an
+//!   [U, W)                  window UAVs (U = [`WINDOW_UAV_BASE`] = W - 32,768): sub-window k's raw
+//!                           UAV at U + k (`docs/design/memory-run.md`)
+//!   [W, 1,000,000)          window views (W = `rebuild_sir::lift::WINDOW_HEAP_BASE`): sub-window k
+//!                           (console addresses k << 29, 512 MiB) as a raw SRV at W + k; never an
 //!                           alternate
 //! shadow table            per console index 16 bytes (stride, records, alternate, lead), t0 space101;
 //!                         entry P (what a shader past the range reads) is (0, 0, P, 0)
@@ -49,6 +52,11 @@ pub static NO_UAV: AtomicU64 = AtomicU64::new(0);
 use crate::slots::{Fp, Object};
 use crate::views::{HostHeap, HostView, Shadow, DSV, RTV, SAMPLERS, VIEWS};
 use crate::{HeapBinding, Inner, MemoryRange, Raw, Resources};
+
+/// Sub-window k's raw UAV is at `WINDOW_UAV_BASE + k`, its raw SRV at `WINDOW_HEAP_BASE + k`.
+pub const WINDOW_UAV_BASE: u32 = rebuild_sir::lift::WINDOW_HEAP_BASE - rebuild_sir::lift::WINDOW_COUNT;
+/// R32 elements a window view covers: 512 MiB, the most a raw view can (2^27 elements).
+pub const WINDOW_ELEMENTS: u32 = 1 << 27;
 
 /// Console descriptor sizes (device 0x78): views, samplers, RTV, DSV.
 pub const INCREMENTS: [u32; 4] = [32, 16, 128, 128];
@@ -104,13 +112,13 @@ impl Limits {
         }
     }
 
-    /// The host indices alternates may take: after the null bank, below the window range, and
+    /// The host indices alternates may take: after the null bank, below the window UAVs, and
     /// past 1,000,000 on a larger heap. Disjoint from every index a console index or a window
     /// can reach.
     pub fn alternate_ranges(&self) -> [std::ops::Range<u32>; 2] {
         let first = self.null_index() + rebuild_sir::lift::NULL_BANK;
         if self.views >= 1_000_000 {
-            [first..rebuild_sir::lift::WINDOW_HEAP_BASE, 1_000_000..self.views]
+            [first..WINDOW_UAV_BASE, 1_000_000..self.views]
         } else {
             [first..self.views, self.views..self.views]
         }
@@ -523,6 +531,15 @@ impl Inner {
         })
     }
 
+    /// Sub-window `k`'s views into one shader-visible view heap (a heap too small for the window range has none).
+    pub(crate) fn write_window(&self, heap: &HeapState, k: u32, r: &ID3D12Resource) {
+        if heap.kind != VIEWS || !heap.visible || heap.host.count < 1_000_000 || k >= rebuild_sir::lift::WINDOW_COUNT {
+            return;
+        }
+        self.host.write(heap.host.cpu_at(rebuild_sir::lift::WINDOW_HEAP_BASE + k), &HostView::raw_srv(r.as_raw(), 0, WINDOW_ELEMENTS));
+        self.host.write(heap.host.cpu_at(WINDOW_UAV_BASE + k), &HostView::raw_uav(r.as_raw(), 0, WINDOW_ELEMENTS));
+    }
+
     /// Write slot `i`'s alternate view; returns its host index (the null slot when none).
     fn place_alt(&self, heap: &HeapState, i: u32, alt: Option<HostView>) -> u32 {
         match &heap.alt {
@@ -871,6 +888,10 @@ impl Resources {
             let mut heaps = ctx.heaps.write().unwrap_or_else(|e| e.into_inner());
             let k = heaps.partition_point(|r| r.start < start);
             heaps.insert(k, Registered { start, end: start + bytes, state: state.clone() });
+        }
+        // window views, after registering (a window placed meanwhile is written by `place_window`; twice is harmless)
+        for (k, r) in ctx.windows.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            ctx.write_window(&state, *k, r);
         }
         // what the title's memory already holds (a heap placed over records)
         if placed {
@@ -1338,7 +1359,31 @@ impl Resources {
 
     /// `ListHost::memory`.
     #[inline]
+    /// Place sub-window `k`'s views (console addresses `k << 29 ..`, 512 MiB of `resource` from byte 0): a raw
+    /// SRV at `WINDOW_HEAP_BASE + k` and a raw UAV at [`WINDOW_UAV_BASE`]` + k`, in every shader-visible view
+    /// heap now and in those made later. The resource is held for the run.
+    pub fn place_window(&self, k: u32, resource: &ID3D12Resource) {
+        let ctx = &self.inner;
+        let mut windows = ctx.windows.lock().unwrap_or_else(|e| e.into_inner());
+        windows.retain(|(j, _)| *j != k);
+        windows.push((k, resource.clone()));
+        let heaps = ctx.heaps.read().unwrap_or_else(|e| e.into_inner());
+        for h in heaps.iter() {
+            ctx.write_window(&h.state, k, resource);
+        }
+    }
+
+    /// Sub-windows whose views are placed.
+    pub fn windows_placed(&self) -> usize {
+        self.inner.windows.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
     pub fn memory(&self, va: u64) -> Option<MemoryRange> {
         self.inner.memory.range(va)
+    }
+
+    /// The range holding `va` as the CPU sees it ([`crate::Memory::visible`]).
+    pub fn cpu_memory(&self, va: u64) -> Option<MemoryRange> {
+        self.inner.memory.visible(va)
     }
 }

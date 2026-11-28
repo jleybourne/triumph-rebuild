@@ -13,6 +13,7 @@ rebuild-dstorage = { path = "../dstorage" }
 rebuild-xg = { path = "../xg" }
 rebuild-gdk = { path = "../gdk" }
 rebuild-d3d12x = { path = "../d3d12x" }
+rebuild-uma = { path = "../uma" }
 rebuild-xlist = { path = "../xlist" }
 rebuild-pipelines = { path = "../pipelines" }
 rebuild-shader = { path = "../shader" }

@@ -53,6 +53,9 @@ impl<P: PipelineSource + Send + Sync> ListHost for Host<P> {
     fn memory(&self, va: u64) -> Option<MemoryRange> {
         self.resources.memory(va)
     }
+    fn cpu_memory(&self, va: u64) -> Option<MemoryRange> {
+        self.resources.cpu_memory(va)
+    }
     fn sync_descriptors(&self, start: u64, len: u64) -> u32 {
         self.resources.sync(start, len)
     }

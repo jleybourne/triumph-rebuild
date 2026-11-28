@@ -116,6 +116,12 @@ pub fn graphics_regions() -> Vec<Region> {
     with(|s| s.xmem.graphics().copied().collect())
 }
 
+/// Run `f` over the write-watched reservations while no allocation or free can run (the memory model's catch-up
+/// at device creation: what the title placed before there was a device).
+pub fn with_watched<R>(f: impl FnOnce(&[(u64, u64)]) -> R) -> R {
+    with(|s| f(&s.xmem.watched()))
+}
+
 // ------------------------------------------------------------------------------------- xmem.dll
 
 pub extern "system" fn XMemVirtualAlloc(base: *mut c_void, size: usize, kind: u32, flags: u64, protect: u32) -> *mut c_void {

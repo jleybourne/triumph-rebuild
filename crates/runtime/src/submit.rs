@@ -66,6 +66,9 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
     }
     // SAFETY: the title passes `count` list pointers.
     let lists = unsafe { std::slice::from_raw_parts(lists, count as usize) };
+    // what the CPU changed in the title's watched memory goes up first: the queue waits for it on the GPU
+    // (crate::memory; a channel send here, no copy)
+    crate::memory::flush_wait(&q.host);
     let mut batch = Batch { q, n: 0, raw: [std::ptr::null_mut(); BATCH] };
     // this submission's progress value: every host list in it is marked with it, the queue signals it at the end
     let me = q as *const Queue as usize;
