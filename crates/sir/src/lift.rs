@@ -1940,10 +1940,15 @@ impl Lifter<'_> {
             }
             "v_cvt_i32_f32" | "v_cvt_u32_f32" | "v_cvt_f16_f32" | "v_cvt_flr_i32_f32" | "v_cvt_rpi_i32_f32" => {
                 let x = f0(self)?;
+                if name == "v_cvt_f16_f32" {
+                    // a 16-bit result: rounded to nearest even (sir_f16, not the device's f32tof16: WARP truncates),
+                    // VOP3 clamp/omod, into the low half (op_sel: the high half); on GFX10 the other half is kept
+                    self.vwrite16(d, x, true);
+                    return Some(());
+                }
                 let e = match name {
                     "v_cvt_i32_f32" => format!("(uint)sir_f2i({x})"),
                     "v_cvt_u32_f32" => format!("sir_f2u({x})"),
-                    "v_cvt_f16_f32" => format!("f32tof16({x})"),
                     "v_cvt_flr_i32_f32" => format!("(uint)sir_f2i(floor({x}))"),
                     "v_cvt_rpi_i32_f32" => format!("(uint)sir_f2i(floor({x} + 0.5f))"),
                     _ => unreachable!(),

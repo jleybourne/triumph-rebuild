@@ -356,6 +356,23 @@ fn a_wave32_mask_survives_a_mask_written_to_the_next_sgpr() {
 }
 
 #[test]
+fn f32_to_f16_rounds_to_nearest_and_keeps_the_other_half() {
+    // GFX10 keeps the destination's other half on every 16-bit result, v_cvt_f16_f32 included; the rounding is
+    // the console's (nearest even), not the device's f32tof16 (WARP truncates)
+    let p = program(&[
+        vop1("v_cvt_f16_f32", 1, V + 0),
+        build(&e::VOP3A, Encoding::Vop3, "v_cvt_f16_f32", &[("vdst", 2), ("src0", V), ("opsel", 0b1000), ("clamp", 1)]),
+    ]);
+    let l = lift(&p);
+    assert!(l.unsupported.is_empty(), "{:?}", l.unsupported);
+    let b = &l.body;
+    assert!(b.contains("v1 = (v1 & 0xffff0000u) | sir_f16(asfloat(v0));"), "{b}");
+    assert!(b.contains("v2 = (v2 & 0xffffu) | (sir_f16(saturate(asfloat(v0))) << 16);"), "{b}");
+    assert!(!b.contains("f32tof16"), "{b}");
+    compile(&l, "cov_cvt_f16");
+}
+
+#[test]
 fn sixteen_bit_ops_keep_the_other_half_and_packed_ops_take_each_half() {
     let p = program(&[
         vopc("v_cmp_lt_f16", V + 0, 1),
