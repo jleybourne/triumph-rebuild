@@ -4,7 +4,7 @@
 
 use rebuild_config::{Apply, Config, Kind, Setting, Tier, Value, REGISTRY};
 
-/// The launcher's sections: the six in the top bar, and the game library (reached from Play).
+/// The launcher's sections: the seven in the top bar, and the game library (reached from Play).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Play,
@@ -13,13 +13,14 @@ pub enum Tab {
     Runs,
     Mods,
     Diagnostics,
+    Saves,
     Library,
 }
 
 impl Tab {
     /// The top bar, in order.
-    pub const TOP: [Tab; 6] = [Tab::Play, Tab::Profiles, Tab::Settings, Tab::Runs, Tab::Mods, Tab::Diagnostics];
-    pub const ALL: [Tab; 7] = [Tab::Play, Tab::Profiles, Tab::Settings, Tab::Runs, Tab::Mods, Tab::Diagnostics, Tab::Library];
+    pub const TOP: [Tab; 7] = [Tab::Play, Tab::Profiles, Tab::Settings, Tab::Runs, Tab::Mods, Tab::Saves, Tab::Diagnostics];
+    pub const ALL: [Tab; 8] = [Tab::Play, Tab::Profiles, Tab::Settings, Tab::Runs, Tab::Mods, Tab::Saves, Tab::Diagnostics, Tab::Library];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -28,6 +29,7 @@ impl Tab {
             Tab::Settings => "Settings",
             Tab::Runs => "Runs",
             Tab::Mods => "Mods",
+            Tab::Saves => "Saves",
             Tab::Diagnostics => "Diagnostics",
             Tab::Library => "Library",
         }

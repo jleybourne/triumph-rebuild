@@ -352,6 +352,8 @@ pub struct App {
     rec: Option<Recommendation>,
     mods: Vec<mods::Entry>,
     conflicts: Vec<mods::Conflict>,
+    /// Saves: the listed containers and the one open in the editor
+    saves: screens::SavesUi,
     profiles: Vec<String>,
     profile_name: String,
     import_problems: Vec<String>,
@@ -478,6 +480,7 @@ impl App {
             rec: None,
             mods: Vec::new(),
             conflicts: Vec::new(),
+            saves: screens::SavesUi::default(),
             profiles: Vec::new(),
             profile_name: String::new(),
             import_problems: Vec::new(),
@@ -1186,6 +1189,7 @@ impl App {
                         Tab::Settings => self.settings_page(ui),
                         Tab::Runs => self.runs_page(ui),
                         Tab::Mods => self.mods_page(ui),
+                        Tab::Saves => self.saves_page(ui),
                         Tab::Diagnostics => self.diagnostics_page(ui),
                         Tab::Library => self.library_page(ui),
                     }
@@ -1205,7 +1209,7 @@ impl App {
     fn keys(&mut self, ctx: &egui::Context) {
         let (tab, save, launch, check) = ctx.input_mut(|i| {
             let mut tab = None;
-            let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6];
+            let nums = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7];
             for (k, key) in nums.iter().enumerate() {
                 if i.consume_key(egui::Modifiers::COMMAND, *key) {
                     tab = Some(Tab::TOP[k]);
