@@ -548,6 +548,12 @@ impl Presenter {
         let started = self.queue.frame_started.swap(false, Ordering::AcqRel);
         let frame = self.shown_frames + 1;
         let capture = CAPTURE.swap(false, Ordering::AcqRel) || capture_frames().contains(&frame);
+        if capture {
+            // REBUILD_TRACE_ENTRY: whether the traced textures' console memory holds texel data by now
+            for (i, a) in rebuild_d3d12x::heap::traced_entries() {
+                eprintln!("entry     {i} at frame {frame}: texture at {a:#x}: {}", rebuild_d3d12x::heap::nonzero(a, 64 << 10));
+            }
+        }
         // the overlay draws after the title's image; a capture is taken before it unless REBUILD_CAPTURE_OVERLAY=1
         let overlay = crate::overlay::visible();
         let capture_overlay = capture && overlay && crate::overlay::capture_overlay();

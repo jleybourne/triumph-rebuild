@@ -596,6 +596,45 @@ enum BufferKind {
 
 /// The host resource takes unordered access (resources from the lead's model, or a null
 /// resource in the recording stand-in, which takes everything).
+/// `REBUILD_TRACE_ENTRY=<index>[,<index>...]`: where texture view entry `index` comes from (the console
+/// address its texture lives at, its description and console tiling words), and how many of its first 64 KiB of
+/// console memory are non-zero now. [`traced_entries`] gives them for later checks (`present` prints the same at
+/// captured frames: whether the title's texel data ever reaches that memory).
+fn trace_entry(rec: &Record, what: &str, address: u64, d: &D3D12_RESOURCE_DESC, words: Option<&[u32; 14]>) {
+    static WANT: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    let want = WANT.get_or_init(|| std::env::var("REBUILD_TRACE_ENTRY").map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default());
+    let Record::Entry { index, .. } = *rec else { return };
+    if !want.contains(&index) {
+        return;
+    }
+    let bytes = d.Width * u64::from(d.Height) * u64::from(d.DepthOrArraySize);
+    eprintln!(
+        "entry     {index} ({what}): texture at {address:#x}, {}x{}x{} format {} mips {} dimension {} layout {} flags {:#x} (about {bytes:#x} bytes at 1 byte a texel); console words {words:x?}; {}",
+        d.Width, d.Height, d.DepthOrArraySize, d.Format.0, d.MipLevels, d.Dimension.0, d.Layout.0, d.Flags.0, nonzero(address, 64 << 10)
+    );
+    TRACED.lock().unwrap_or_else(|e| e.into_inner()).push((index, address));
+}
+
+static TRACED: Mutex<Vec<(u32, u64)>> = Mutex::new(Vec::new());
+
+/// The texture view entries `REBUILD_TRACE_ENTRY` named, and their console addresses.
+pub fn traced_entries() -> Vec<(u32, u64)> {
+    TRACED.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// "n of m bytes non-zero" for console memory at `address` (when it is committed memory the CPU can read).
+pub fn nonzero(address: u64, bytes: usize) -> String {
+    use windows::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT};
+    let mut m = MEMORY_BASIC_INFORMATION::default();
+    if address == 0 || unsafe { VirtualQuery(Some(address as *const std::ffi::c_void), &mut m, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 || m.State != MEM_COMMIT {
+        return format!("{address:#x} is not committed memory");
+    }
+    let end = (m.BaseAddress as u64 + m.RegionSize as u64).min(address + bytes as u64);
+    // SAFETY: committed memory of this process, inside the region VirtualQuery named
+    let b = unsafe { std::slice::from_raw_parts(address as *const u8, (end - address) as usize) };
+    format!("{} of {} bytes non-zero (protect {:#x})", b.iter().filter(|x| **x != 0).count(), b.len(), m.Protect.0)
+}
+
 /// The null view of one null-bank kind: the type translated shaders declare for it, so a read past the
 /// mirrored range (or of a missing alternate) is a typed null read, never a type mismatch.
 pub(crate) fn null_view(k: rebuild_sir::lift::NullKind) -> HostView {
@@ -1058,7 +1097,9 @@ impl Resources {
                             d.Format = fmt(pc[0]);
                             HostView::Srv { resource: raw, desc: d }
                         };
-                        self.inner.entries.add(EntryView::Texture(view), 0)
+                        let rec = self.inner.entries.add(EntryView::Texture(view), 0);
+                        trace_entry(&rec, &format!("placed view, host {raw:p}"), address, &rd, Some(rw));
+                        rec
                     }
                     None => Record::Null { uav, dimension: pc[1] },
                 };
@@ -1099,6 +1140,7 @@ impl Resources {
         if let Record::Entry { index, .. } = rec {
             list.push((k, index));
         }
+        trace_entry(&rec, &format!("view of console resource {:p}, host {:p}", r as *const Resource, r.host_raw()), r.address, &r.desc, None);
         rec
     }
 
