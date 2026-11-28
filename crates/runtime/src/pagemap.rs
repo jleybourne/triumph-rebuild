@@ -149,6 +149,8 @@ pub unsafe extern "system" fn CopyPageMappingsBatchX(_this: *mut c_void, count: 
     }
     // SAFETY: the title passes `count` batches
     let batches = unsafe { std::slice::from_raw_parts(batches, count as usize) };
+    #[cfg(windows)]
+    crate::mapped::pool(pool, pool_pages);
     {
         let mut pages = PAGES.write().unwrap_or_else(|e| e.into_inner());
         if !apply(&mut pages, batches, pool, pool_pages) && REFUSED.load(Relaxed) == 1 {
@@ -157,8 +159,33 @@ pub unsafe extern "system" fn CopyPageMappingsBatchX(_this: *mut c_void, count: 
     }
     // textures over the pages read other bytes now (after the lock: cputex looks sources up here)
     #[cfg(windows)]
-    crate::cputex::remapped(&touched(batches));
+    {
+        let touched = touched(batches);
+        // the reserved textures over them follow first (their tiles, on the ring's queue), then their contents
+        crate::mapped::remapped(&touched);
+        crate::cputex::remapped(&touched);
+    }
     0
+}
+
+/// The pool pages (their CPU addresses) behind GPU pages `va..va + bytes` that are mapped, added to `out`.
+pub fn sources(va: u64, bytes: u64, out: &mut std::collections::HashSet<u64>) {
+    let pages = PAGES.read().unwrap_or_else(|e| e.into_inner());
+    for (_, &s) in pages.range(va / PAGE * PAGE..va + bytes) {
+        out.insert(s);
+    }
+}
+
+/// The pool page (its CPU address) GPU page `va` is mapped to now.
+pub fn page(va: u64) -> Option<u64> {
+    PAGES.read().unwrap_or_else(|e| e.into_inner()).get(&(va / PAGE * PAGE)).copied()
+}
+
+/// GPU pages mapped now, and the distinct pool pages behind them.
+pub fn mapped_now() -> (usize, usize) {
+    let pages = PAGES.read().unwrap_or_else(|e| e.into_inner());
+    let distinct: std::collections::HashSet<u64> = pages.values().copied().collect();
+    (pages.len(), distinct.len())
 }
 
 /// For the run report.

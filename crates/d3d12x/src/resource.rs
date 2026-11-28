@@ -63,6 +63,10 @@ pub struct Resource {
     pub view_format: u32,
     /// memory we allocated (freed with the resource)
     owned: bool,
+    /// the host texture's card bytes and where it came from, and its twins' bytes (`crate::vram`)
+    host_bytes: u64,
+    origin: crate::vram::Origin,
+    twin_bytes: [u64; 2],
     /// the heap object it is placed in (held)
     parent: Raw,
     /// view table entries naming it, by a key of the view's description (one entry per
@@ -161,6 +165,13 @@ impl Drop for Resource {
         let ctx = &self.head.common.ctx;
         if let (Some(h), false) = (&self.host, self.is_buffer()) {
             ctx.memory.texture_gone(self.address, h);
+            crate::vram::gone(self.origin, self.host_bytes, self.bytes);
+            crate::vram::untrack(h.as_raw() as usize);
+        }
+        for (t, &b) in self.twins.iter().zip(&self.twin_bytes) {
+            if t.is_some() {
+                crate::vram::gone(crate::vram::Origin::Twin, b, 0);
+            }
         }
         let entries: Vec<u32> = self.entries.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|e| e.1).collect();
         ctx.entries.release(self as *const Resource as usize, &entries);
@@ -346,7 +357,7 @@ impl Resources {
             return E_INVALIDARG;
         };
         let (address, owned, parent) = match backing {
-            Backing::Own => match ctx.memory.allocate(info.size, info.alignment, &heap) {
+            Backing::Own => match if desc.Dimension.0 == DIMENSION_BUFFER { ctx.memory.allocate(info.size, info.alignment, &heap) } else { ctx.memory.allocate_lazy(info.size, info.alignment, &heap) } {
                 Some(a) => (a, true, std::ptr::null_mut()),
                 None => {
                     ctx.counters.refused.fetch_add(1, Ordering::Relaxed);
@@ -356,11 +367,16 @@ impl Resources {
             Backing::At(a, p) => (a, false, p),
         };
         let (hd, view_format) = format::host_desc(desc);
+        // a host texture the memory model made on its own card pages (its bytes are the model's, not counted here)
+        let mut from_model = false;
         let host = if desc.Dimension.0 == DIMENSION_BUFFER {
             ctx.memory.buffer(address, desc.Width.max(1))
         } else {
-            match ctx.memory.texture(address, &hd) {
-                Some(t) => Some(t),
+            match ctx.memory.texture(address, desc, &hd, initial_layout(initial, &hd)) {
+                Some(t) => {
+                    from_model = true;
+                    Some(t)
+                }
                 None => {
                     // SAFETY: the title passes a clear value or null.
                     let clear = unsafe { clear.as_ref() }.map(|c| {
@@ -408,7 +424,33 @@ impl Resources {
             },
             _ => None,
         };
-        let twins = [make(format::twin_desc(desc)), make(format::stencil_twin_desc(desc))];
+        let twin_descs = [format::twin_desc(desc), format::stencil_twin_desc(desc)];
+        let twins = [make(twin_descs[0]), make(twin_descs[1])];
+        let mut twin_bytes = [0u64; 2];
+        for i in 0..2 {
+            if let (Some(_), Some(td)) = (&twins[i], &twin_descs[i]) {
+                twin_bytes[i] = ctx.host.bytes(td);
+                crate::vram::made(crate::vram::Origin::Twin, twin_bytes[i], 0);
+            }
+        }
+        let origin = match (owned, parent.is_null()) {
+            (true, _) => crate::vram::Origin::Committed,
+            (false, false) => crate::vram::Origin::Placed,
+            (false, true) => crate::vram::Origin::AtAddress,
+        };
+        let host_bytes = match (&host, desc.Dimension.0 == DIMENSION_BUFFER) {
+            (Some(_), false) => {
+                let b = if from_model { 0 } else { ctx.host.bytes(&hd) };
+                crate::vram::made(origin, b, info.size);
+                let gw = hd.Flags.0 & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL.0 | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0) != 0
+                    || desc.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0 != 0;
+                if let Some(h) = &host {
+                    crate::vram::track(h.as_raw() as usize, crate::vram::Live { address, console: info.size, origin, bytes: b, gpu_written: gw });
+                }
+                b
+            }
+            _ => 0,
+        };
         if desc.Dimension.0 != DIMENSION_BUFFER {
             let what = match (owned, parent.is_null()) {
                 (true, _) => "committed resource",
@@ -435,6 +477,9 @@ impl Resources {
             twins,
             view_format,
             owned,
+            host_bytes,
+            origin,
+            twin_bytes,
             parent,
             entries: Mutex::new(Vec::new()),
         });
@@ -490,7 +535,7 @@ impl Resources {
         if d.size == 0 {
             return E_INVALIDARG;
         }
-        let Some(address) = ctx.memory.allocate(d.size, d.alignment.max(KIB_64), &d.properties) else {
+        let Some(address) = ctx.memory.allocate_lazy(d.size, d.alignment.max(KIB_64), &d.properties) else {
             ctx.counters.refused.fetch_add(1, Ordering::Relaxed);
             return E_OUTOFMEMORY;
         };
