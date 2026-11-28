@@ -749,10 +749,14 @@ pub(super) fn lift(mut l: Lifter<'_>, insts: &[Instruction]) -> Lifted {
         }
         let (cur, text) = (e.cur, e.text);
         let settled = cur == exits && l.out.masks == masks;
+        // a refusal with the mask set unchanged stands: facts only shrink from pass to pass (a back edge's state
+        // joins in), so a later pass would refuse the same instruction; no more passes over a large program
+        // (a refused on-demand program took about 100 ms in up to 16 passes)
+        let refused = !l.out.unsupported.is_empty() && l.out.masks == masks;
         exits = cur;
         masks = l.out.masks.clone();
         l.out.body = text;
-        if settled {
+        if settled || refused {
             return l.out;
         }
     }

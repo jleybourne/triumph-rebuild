@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use rebuild_shader::blake3;
@@ -42,6 +42,8 @@ pub struct Program {
 
 enum Slot {
     Offered(Arc<[u8]>),
+    /// a worker is building it (others wait on `built`)
+    Building,
     Ready(Arc<Program>),
     Failed(String),
 }
@@ -59,6 +61,10 @@ pub struct Stats {
     /// Cache files refused (damaged, or another program under the name).
     pub damaged: u64,
     pub failed: u64,
+    /// Lifts run (successful or not): what `lift` is summed over.
+    pub lifted: u64,
+    /// The slowest lift, and its program.
+    pub slowest: (Duration, u64),
     /// Container parse, native program, wave class.
     pub parse: Duration,
     /// Decode, lift, HLSL.
@@ -79,6 +85,27 @@ const PARSE_NS: usize = 6;
 const LIFT_NS: usize = 7;
 const DXC_NS: usize = 8;
 const DISK_NS: usize = 9;
+const LIFTED: usize = 10;
+const DUMPED: usize = 11;
+const SLOWEST_NS: usize = 12;
+const SLOWEST_HASH: usize = 13;
+
+/// Builds (lift, HLSL, DXC) at once, whatever the pool's size: each holds a lift's working set and maybe a DXC
+/// process, beside the title's own work (the project's limit for DXC processes is 4).
+pub const BUILDERS: usize = 4;
+/// Failed or slow programs written for offline study, per session.
+const DUMPS: u64 = 4000;
+/// A lift slower than this is noted on stderr and its program dumped (`slow\`).
+const SLOW_LIFT: Duration = Duration::from_millis(500);
+
+struct Permit<'a>(&'a OnDemand);
+
+impl Drop for Permit<'_> {
+    fn drop(&mut self) {
+        *self.0.building.lock().unwrap() -= 1;
+        self.0.freed.notify_one();
+    }
+}
 
 /// The programs translated on demand this session.
 pub struct OnDemand {
@@ -86,7 +113,10 @@ pub struct OnDemand {
     dxc: OnceLock<Option<PathBuf>>,
     work: PathBuf,
     map: Mutex<HashMap<u64, Slot>>,
-    n: [AtomicU64; 10],
+    built: Condvar,
+    building: Mutex<usize>,
+    freed: Condvar,
+    n: [AtomicU64; 14],
 }
 
 /// The disk cache's default folder: `<pipelines dir>\ondemand` ([`crate::session::default_dir`]).
@@ -155,6 +185,9 @@ impl OnDemand {
             dxc: OnceLock::new(),
             work: std::env::temp_dir().join(format!("rebuild-ondemand-{}", std::process::id())),
             map: Mutex::default(),
+            built: Condvar::new(),
+            building: Mutex::new(0),
+            freed: Condvar::new(),
             n: Default::default(),
         }
     }
@@ -194,22 +227,63 @@ impl OnDemand {
     /// The program, translated (or read from disk) on this thread if it is not ready yet. Called by pool
     /// workers, never by the title's create call.
     pub fn get(&self, hash: u64) -> Result<Arc<Program>, String> {
-        let offered = match self.map.lock().unwrap().get(&hash) {
-            Some(Slot::Ready(p)) => return Ok(p.clone()),
-            Some(Slot::Failed(e)) => return Err(e.clone()),
-            Some(Slot::Offered(b)) => Some(b.clone()),
-            None => None,
+        // one build per program: a worker that finds it building waits for it (pipelines share programs, and
+        // each build costs a lift and maybe DXC)
+        let mut m = self.map.lock().unwrap();
+        let offered = loop {
+            match m.get(&hash) {
+                Some(Slot::Ready(p)) => return Ok(p.clone()),
+                Some(Slot::Failed(e)) => return Err(e.clone()),
+                Some(Slot::Building) => m = self.built.wait(m).unwrap(),
+                Some(Slot::Offered(b)) => break Some(b.clone()),
+                None => break None,
+            }
         };
-        let r = self.build(hash, offered.as_deref());
+        m.insert(hash, Slot::Building);
+        drop(m);
+        let r = {
+            // at most BUILDERS at once: lifts and DXC beside the title's own work
+            let _permit = self.permit();
+            self.build(hash, offered.as_deref())
+        };
         let slot = match &r {
             Ok(p) => Slot::Ready(p.clone()),
             Err(e) => {
                 self.add(FAILED, 1);
+                self.dump(hash, offered.as_deref(), "failed", e);
                 Slot::Failed(e.clone())
             }
         };
         self.map.lock().unwrap().insert(hash, slot);
+        self.built.notify_all();
         r
+    }
+
+    /// Waits for one of the [`BUILDERS`] build slots.
+    fn permit(&self) -> Permit<'_> {
+        let mut n = self.building.lock().unwrap();
+        while *n >= BUILDERS {
+            n = self.freed.wait(n).unwrap();
+        }
+        *n += 1;
+        Permit(self)
+    }
+
+    /// A program that failed (or lifted slowly): its container and the reason under `<dir>\<what>\`, for
+    /// `translate containers` to lift again offline (programs outside `shaders.rpf` exist only in the title's
+    /// memory). The first [`DUMPS`] only.
+    fn dump(&self, hash: u64, container: Option<&[u8]>, what: &str, reason: &str) {
+        let (Some(dir), Some(c)) = (self.dir.as_ref(), container) else { return };
+        if self.n[DUMPED].fetch_add(1, Ordering::Relaxed) >= DUMPS {
+            return;
+        }
+        let d = dir.join(what);
+        let _ = std::fs::create_dir_all(&d);
+        let _ = std::fs::write(d.join(format!("{hash:016x}.dxbc")), c);
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join("reasons.txt")) {
+            let _ = writeln!(f, "{hash:016x} {}", reason.replace('\n', " "));
+        }
     }
 
     /// Programs that failed, with the reason.
@@ -229,6 +303,8 @@ impl OnDemand {
             stale: n(STALE),
             damaged: n(DAMAGED),
             failed: n(FAILED),
+            lifted: n(LIFTED),
+            slowest: (d(SLOWEST_NS), n(SLOWEST_HASH)),
             parse: d(PARSE_NS),
             lift: d(LIFT_NS),
             dxc: d(DXC_NS),
@@ -305,7 +381,17 @@ impl OnDemand {
         let (p, isg1, osg1) = parsed?;
         let t = Instant::now();
         let h = translate::lift_hlsl(&p, &isg1, &osg1, true).map_err(|r| r.reason);
-        self.time(LIFT_NS, t);
+        let took = t.elapsed();
+        self.add(LIFT_NS, took.as_nanos() as u64);
+        self.add(LIFTED, 1);
+        if took.as_nanos() as u64 > self.n[SLOWEST_NS].load(Ordering::Relaxed) {
+            self.n[SLOWEST_NS].store(took.as_nanos() as u64, Ordering::Relaxed);
+            self.n[SLOWEST_HASH].store(hash, Ordering::Relaxed);
+        }
+        if took > SLOW_LIFT {
+            eprintln!("pipelines: on-demand lift of {hash:016x} took {:.0} ms", took.as_secs_f64() * 1e3);
+            self.dump(hash, Some(container), "slow", &format!("lift {:.0} ms", took.as_secs_f64() * 1e3));
+        }
         let h = h?;
         let hh = hlsl_hash(&h);
         let dxil = match cached {
