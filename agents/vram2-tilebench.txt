@@ -1,0 +1,8 @@
+tilebench on WARP: 20 s, 1600 creations/s, 18 batches/s of 111 pages (10 % moved or again), 20000 live textures at most, pool 32768 pages, 33 heaps of 1024 tiles, tile queue 3
+old       20.0 s: 32000 textures made (12000 gone), 360 batches, 159761 tiles remapped (16389 onto the page they had); 172669 UpdateTileMappings (8633/s; 0 for reused pages), 4.5 tiles a call, 1.4 a range; driver thread: 90.7 ms a second in mapping calls/submits, 155.2 busy; drain at the end 0.0 ms; worst lag behind the stream 14 ms
+          mapping latency p50 0.04 p99 39.59 worst 119.81 ms (20360)
+          frame latency   p50 0.07 p99 42.36 worst 113.67 ms (1201) (1201 frames, 60.0 fps); device ok
+new       20.0 s: 32000 textures made (12000 gone), 360 batches, 159761 tiles remapped (16389 onto the page they had); 114157 UpdateTileMappings (5708/s; 3454 for reused pages), 5.3 tiles a call, 1.3 a range; driver thread: 5.8 ms a second in mapping calls/submits, 52.3 busy; drain at the end 0.0 ms; worst lag behind the stream 4 ms
+          mapping latency p50 0.10 p99 3.84 worst 8.25 ms (18273)
+          frame latency   p50 0.07 p99 3.89 worst 6.42 ms (1201) (1201 frames, 60.0 fps); device ok
+          tile queue: 18273 submits, 70687 jobs (1 merged into an earlier one), 110703 UpdateTileMappings (449424 ranges, 599116 tiles; 5.4 tiles a call) in 18137 passes; 12.0 us of CPU a call on the tile thread (planning included); submit to signal 0.10 ms average, 4.1 ms worst; 0 without a heap; title waits 122 (1079 found it passed)
