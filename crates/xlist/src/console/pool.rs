@@ -16,10 +16,16 @@
 //!
 //! An allocator is reset only when every list recorded into it has finished on the GPU: an entry's allocator
 //! holds that one list alone, and the submission marks the queue and progress value of its last execution
-//! ([`HostList::executed_on`], [`HostList::executed_at`]); [`enable`] is given the test of that value. A list never
-//! executed is free at once. The pool is off until [`enable`] (the runtime's submission is the only one that marks
-//! executions, and the run asks for it with `REBUILD_LIST_POOL=1`); off, lists are reset on the recording thread onto the console
-//! allocator's host allocators as before.
+//! ([`HostList::executed_on`], [`HostList::executed_at`]); [`enable`] is given the test of that value.
+//!
+//! A list without a mark is reset at once **only if the title never closed it** since its last reset
+//! ([`HostList::sealed`]): an open list cannot have been executed. A sealed list without a mark may have been
+//! executed by a path that does not mark (the runtime's submission marks every list it is given, executed or
+//! skipped; anything else, such as a host list taken through `segments` and executed directly, does not), so it is
+//! **held**: kept alive, never reset, counted in [`HELD`]. A leak, never a reset under the GPU.
+//!
+//! The pool is off until [`enable`] (the run asks for it with `REBUILD_LIST_POOL=1`); off, lists are reset on the
+//! recording thread onto the console allocator's host allocators as before.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -39,6 +45,8 @@ struct State {
     ready: [Vec<HostList>; 4],
     /// lists the title is done with, maybe still on the GPU
     retired: Vec<HostList>,
+    /// sealed lists retired without a mark: maybe executed by a path that does not mark, so never reset
+    held: Vec<HostList>,
 }
 
 struct Pool {
@@ -59,6 +67,8 @@ pub static TAKEN: AtomicU64 = AtomicU64::new(0);
 pub static MADE: AtomicU64 = AtomicU64::new(0);
 pub static RECYCLED: AtomicU64 = AtomicU64::new(0);
 pub static DROPPED: AtomicU64 = AtomicU64::new(0);
+/// Sealed lists retired without an execution mark: held for the run, never reset.
+pub static HELD: AtomicU64 = AtomicU64::new(0);
 pub static RESET_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Turn the pool on (once) and start its recycler thread, when `REBUILD_LIST_POOL=1`. Off by default until a card
@@ -118,19 +128,20 @@ pub fn report() -> String {
     let n = r(&RECYCLED).max(1);
     let (ready, retired) = POOL.get().map_or((0, 0), Pool::sizes);
     format!(
-        "list pool {}: {} host lists taken ready, {} made; {} recycled ({ms:.1} ms of host Resets on the recycler, {:.1} µs each), {} dropped; now {ready} ready, {retired} waiting for the GPU",
+        "list pool {}: {} host lists taken ready, {} made; {} recycled ({ms:.1} ms of host Resets on the recycler, {:.1} µs each), {} dropped, {} held (closed, never marked executed); now {ready} ready, {retired} waiting for the GPU",
         if on() { "on" } else { "off" },
         r(&TAKEN),
         r(&MADE),
         r(&RECYCLED),
         ms * 1000.0 / n as f64,
-        r(&DROPPED)
+        r(&DROPPED),
+        r(&HELD)
     )
 }
 
 impl Pool {
     fn new(done: Done) -> Pool {
-        Pool { state: Mutex::new(State { ready: Default::default(), retired: Vec::new() }), wake: Condvar::new(), done }
+        Pool { state: Mutex::new(State { ready: Default::default(), retired: Vec::new(), held: Vec::new() }), wake: Condvar::new(), done }
     }
 
     fn take(&self, kind: u32, backend: &dyn Backend) -> windows::core::Result<HostList> {
@@ -186,7 +197,14 @@ impl Pool {
             while i < s.retired.len() {
                 let h = &s.retired[i];
                 let at = h.executed_at.load(Ordering::Acquire);
-                if at == 0 || (self.done)(h.executed_on.load(Ordering::Relaxed), at) {
+                if at == 0 && h.sealed.load(Ordering::Acquire) {
+                    // closed by the title and never marked: an unknown path may have it on the GPU
+                    let h = s.retired.swap_remove(i);
+                    s.held.push(h);
+                    if HELD.fetch_add(1, Ordering::Relaxed) < 4 {
+                        eprintln!("xlist     list pool: a closed host list was retired with no execution mark; held, never reset");
+                    }
+                } else if at == 0 || (self.done)(h.executed_on.load(Ordering::Relaxed), at) {
                     free.push(s.retired.swap_remove(i));
                 } else {
                     i += 1;
@@ -228,6 +246,7 @@ fn renew(h: &HostList) -> bool {
     h.executed_on.store(0, Ordering::Relaxed);
     h.executed_at.store(0, Ordering::Relaxed);
     h.bad.store(false, Ordering::Relaxed);
+    h.sealed.store(false, Ordering::Relaxed);
     h.stamp.store(super::stamps::NONE, Ordering::Relaxed);
     true
 }
@@ -288,5 +307,38 @@ mod tests {
         // a list without an allocator of its own is not kept
         p.retire(HostList::new_for_test(copy.list.clone()));
         assert_eq!(p.sizes(), (1, 0));
+    }
+
+    fn never(_: usize, _: u64) -> bool {
+        panic!("no list here carries a mark")
+    }
+
+    /// Suspect (a) of `agents/listcost.md`: a list the title closed but no submission marked may be on the GPU
+    /// through a path that does not mark, so it is held, never reset; one never closed is reset at once.
+    #[test]
+    fn a_closed_list_without_an_execution_mark_is_never_reset() {
+        let backend = fake::backend();
+        let p = Pool::new(never);
+        let sealed = p.take(0, &*backend).unwrap();
+        let (list, alloc) = (sealed.list.as_raw(), sealed.own.as_ref().unwrap().as_raw());
+        sealed.sealed.store(true, Ordering::Release);
+        let held = HELD.load(Ordering::Relaxed);
+        p.retire(sealed);
+        assert_eq!(p.recycle(), 0, "not waiting on a fence it has no value for");
+        assert_eq!(p.sizes(), (0, 0), "neither ready nor retired");
+        assert_eq!(p.state.lock().unwrap().held.len(), 1, "held");
+        assert!(HELD.load(Ordering::Relaxed) > held);
+        assert_eq!(Fake::of(alloc).count(ALLOCATOR_RESET), 0, "its allocator never reset");
+        assert_eq!(Fake::of(list).count(LIST_RESET), 0, "the list never reset");
+        // a list the title never closed cannot have been executed: renewed at once
+        let open = p.take(0, &*backend).unwrap();
+        let alloc2 = open.own.as_ref().unwrap().as_raw();
+        p.retire(open);
+        assert_eq!(p.recycle(), 0);
+        assert_eq!(p.sizes(), (1, 0));
+        assert_eq!(Fake::of(alloc2).count(ALLOCATOR_RESET), 1);
+        // renewing clears the seal with the marks
+        let again = p.take(0, &*backend).unwrap();
+        assert!(!again.sealed.load(Ordering::Relaxed));
     }
 }

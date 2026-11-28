@@ -116,6 +116,14 @@ pub fn graphics_regions() -> Vec<Region> {
     with(|s| s.xmem.graphics().copied().collect())
 }
 
+/// `addr` lies in a reservation the title made through our overrides (`VirtualAlloc`, `XMemVirtualAlloc`, the
+/// placeholders physical pages map into): every free and remap of it passes through [`VirtualFree`] or
+/// [`crate::physical`], which report it to [`crate::titlemem::changed`]. Memory outside (host heaps, the CRT's,
+/// the APU heap, the arena) can change unreported.
+pub fn title_reserved(addr: u64) -> bool {
+    with(|s| s.xmem.find(addr).is_some())
+}
+
 /// Run `f` over the write-watched reservations while no allocation or free can run (the memory model's catch-up
 /// at device creation: what the title placed before there was a device).
 pub fn with_watched<R>(f: impl FnOnce(&[(u64, u64)]) -> R) -> R {

@@ -487,6 +487,7 @@ fn a_memory_wait_cuts_the_list_and_the_state_follows() {
     assert_eq!(segs[0].waits, vec![MemoryWait { address: MEM, comparison: 7, reference: 1, wide: true }]);
     assert_eq!(segs[1].waits, vec![MemoryWait { address: MEM + 8, comparison: 3, reference: 5, wide: false }]);
     assert!(host_list(l).is_none(), "several segments: the queue uses segments()");
+    assert!(segs.iter().all(|s| s.list.sealed.load(std::sync::atomic::Ordering::Relaxed)), "the title's Close seals every part (the pool resets a sealed part only after its marked execution)");
     assert_eq!(backend.lists.load(std::sync::atomic::Ordering::Relaxed), 2);
     let (first, second) = (Fake::of(segs[0].list.list.as_raw()), Fake::of(segs[1].list.list.as_raw()));
     assert_eq!(first.count(host::CLOSE), 1);
@@ -511,6 +512,7 @@ fn a_memory_wait_cuts_the_list_and_the_state_follows() {
         method::<Wait>(l, 0x248)(l, MEM, 7, 2);
     }
     assert_eq!(segments(l).unwrap().len(), 2);
+    assert!(segments(l).unwrap().iter().all(|s| !s.list.sealed.load(std::sync::atomic::Ordering::Relaxed)), "open again: not sealed until the next Close");
     assert_eq!(backend.lists.load(std::sync::atomic::Ordering::Relaxed), 2, "no new host list");
     assert_eq!(release(l), 0);
     assert_eq!(release(a), 0);

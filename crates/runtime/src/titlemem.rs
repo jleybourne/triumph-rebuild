@@ -37,6 +37,10 @@ struct Opened {
     /// the [`GENERATION`] it was last confirmed in: while nothing was freed, decommitted or remapped since, a
     /// lookup inside it answers from here with no query of the address space
     checked: u64,
+    /// every free and remap of it is reported ([`changed`]): inside a reservation the title made through our
+    /// overrides ([`crate::exports::title_reserved`]). Only these trust range invalidation ([`ranges_on`]); any
+    /// other allocation (a host heap's, the CRT's, the APU heap's) is confirmed again after every change
+    reported: bool,
 }
 
 /// Bumped whenever memory the title's allocations could live in is freed, decommitted or remapped
@@ -210,6 +214,8 @@ pub struct TitleMemory {
     opened: Mutex<BTreeMap<u64, Opened>>,
     /// section views opened as heaps, by view number ([`sections_on`]); `None`: refused
     sections: Mutex<std::collections::HashMap<u64, Option<(ID3D12Heap, ID3D12Resource, u64)>>>,
+    /// this one's lookups that queried the address space ([`QUERIED`] counts every instance's)
+    queried: std::sync::atomic::AtomicU64,
 }
 
 // SAFETY: D3D12 objects are free-threaded; the map is locked.
@@ -257,7 +263,7 @@ fn writable(p: PAGE_PROTECTION_FLAGS) -> bool {
 
 impl TitleMemory {
     pub fn new(device: &ID3D12Device) -> Option<TitleMemory> {
-        Some(TitleMemory { device: device.cast().ok()?, opened: Mutex::new(BTreeMap::new()), sections: Mutex::new(std::collections::HashMap::new()) })
+        Some(TitleMemory { device: device.cast().ok()?, opened: Mutex::new(BTreeMap::new()), sections: Mutex::new(std::collections::HashMap::new()), queried: std::sync::atomic::AtomicU64::new(0) })
     }
 
     /// The title's allocation holding `va`, opened for the GPU.
@@ -322,7 +328,7 @@ impl TitleMemory {
             let mut opened = self.opened.lock().unwrap_or_else(|e| e.into_inner());
             if let Some((&base, o)) = opened.range_mut(..=va).next_back() {
                 if va - base < o.bytes {
-                    if o.checked != generation && untouched(base, base + o.bytes.max(o.alloc), o.checked) {
+                    if o.checked != generation && o.reported && untouched(base, base + o.bytes.max(o.alloc), o.checked) {
                         o.checked = generation;
                         UNTOUCHED.fetch_add(1, Relaxed);
                     }
@@ -338,6 +344,7 @@ impl TitleMemory {
             }
         }
         QUERIED.fetch_add(1, Relaxed);
+        self.queried.fetch_add(1, Relaxed);
         let t0 = rebuild_xlist::console::cost::now();
         let (r, why) = self.query(va, generation, hint);
         let t = rebuild_xlist::console::cost::now().wrapping_sub(t0);
@@ -377,6 +384,8 @@ impl TitleMemory {
             }
         }
         let Some((base, bytes)) = allocation(va) else { return (None, if hint == why::PAST { why::PAST } else { why::NONE }) };
+        // asked before the lock (the reservations' lock is taken by frees, which report under it)
+        let reported = crate::exports::title_reserved(base);
         let mut opened = self.opened.lock().unwrap_or_else(|e| e.into_inner());
         let mut why = why::CONFIRMED;
         if opened.get(&base).is_none_or(|o| o.bytes != bytes || o.alloc != a.size) {
@@ -389,7 +398,7 @@ impl TitleMemory {
             }
             // a stale entry for the same base (the title freed it and allocated again) is released here; work
             // already recorded holds its own references
-            opened.insert(base, Opened { bytes, alloc: a.size, gpu, checked: generation });
+            opened.insert(base, Opened { bytes, alloc: a.size, gpu, checked: generation, reported });
         }
         let Some(o) = opened.get_mut(&base) else { return (None, why) };
         o.checked = generation;
@@ -481,7 +490,8 @@ mod tests {
         }
         let m = TitleMemory::new(&device.unwrap()).expect("ID3D12Device3");
         let bytes = 2 * 65536;
-        let p = unsafe { VirtualAlloc(None, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) } as u64;
+        // the title's (through the override): only its frees are all reported, so only it trusts the ranges
+        let p = crate::exports::VirtualAlloc(std::ptr::null_mut(), bytes, (MEM_RESERVE | MEM_COMMIT).0, PAGE_READWRITE.0) as u64;
         let r = m.range(p + 100).expect("opened");
         assert_eq!((r.console, r.bytes), (p, bytes as u64));
         assert_eq!(r.map(p + 100), Some(r.host_va + 100));
@@ -523,7 +533,65 @@ mod tests {
         // cleanup only: WARP may still hold the heap it opened over the memory for a moment (the free then fails
         // with E_INVALIDARG, seen once in a full gate); a leak of 128 KiB in a test process is harmless
         for _ in 0..50 {
-            if unsafe { VirtualFree(p as *mut c_void, 0, MEM_RELEASE) }.is_ok() {
+            if crate::exports::VirtualFree(p as *mut c_void, 0, MEM_RELEASE.0).0 != 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Suspect (b) of `agents/listcost.md`: range invalidation trusts every free and remap to be reported, which holds
+    /// only inside reservations the title made through our overrides. Any other allocation (a host heap's, the
+    /// CRT's, the APU heap's) can be freed and made again unreported, so it is confirmed again after every change.
+    #[test]
+    fn only_allocations_whose_frees_are_reported_trust_range_invalidation_on_warp() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let Ok(factory) = (unsafe { windows::Win32::Graphics::Dxgi::CreateDXGIFactory1::<windows::Win32::Graphics::Dxgi::IDXGIFactory4>() }) else { return };
+        let Ok(adapter) = (unsafe { factory.EnumWarpAdapter::<windows::core::IUnknown>() }) else { return };
+        let mut device: Option<ID3D12Device> = None;
+        if unsafe { D3D12CreateDevice(&adapter, windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0, &mut device) }.is_err() {
+            return;
+        }
+        let m = TitleMemory::new(&device.unwrap()).expect("ID3D12Device3");
+        let bytes = 65536;
+        // the title's: through the VirtualAlloc override (its frees go through ours and are reported)
+        let title = crate::exports::VirtualAlloc(std::ptr::null_mut(), bytes, (MEM_RESERVE | MEM_COMMIT).0, PAGE_READWRITE.0) as u64;
+        // memory the overrides never saw
+        let host = unsafe { VirtualAlloc(None, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) } as u64;
+        assert!(title != 0 && host != 0);
+        assert!(crate::exports::title_reserved(title + 8) && !crate::exports::title_reserved(host + 8));
+        let t = m.range(title + 8).expect("opened");
+        let h = m.range(host + 8).expect("opened");
+        {
+            let o = m.opened.lock().unwrap();
+            assert!(o[&title].reported, "the title's reservation");
+            assert!(!o[&host].reported, "not one of the title's");
+        }
+        set_ranges(true);
+        // a change elsewhere: the allocation whose frees nobody reports is asked again, every time
+        for _ in 0..3 {
+            changed(0x1000, 0x2000);
+            let q = m.queried.load(Relaxed);
+            assert_eq!(m.range(host + 8).map(|x| x.host_va), Some(h.host_va));
+            assert_eq!(m.queried.load(Relaxed), q + 1, "confirmed again after a change that does not touch it");
+        }
+        // the title's answers from the cache (other tests' frees may land meanwhile: retried)
+        let kept = (0..20).any(|_| {
+            changed(0x1000, 0x2000);
+            let q = m.queried.load(Relaxed);
+            assert_eq!(m.range(title + 8).map(|x| x.host_va), Some(t.host_va));
+            m.queried.load(Relaxed) == q
+        });
+        assert!(kept, "a reported allocation untouched by the change stays confirmed");
+        // its free goes through the override, which reports it: the next lookup asks again (WARP may refuse the
+        // free while it holds the heap; reported either way)
+        let _ = crate::exports::VirtualFree(title as *mut c_void, 0, MEM_RELEASE.0);
+        let q = m.queried.load(Relaxed);
+        let _ = m.range(title + 8);
+        assert_eq!(m.queried.load(Relaxed), q + 1, "the title's free is reported");
+        drop(m);
+        for _ in 0..50 {
+            if unsafe { VirtualFree(host as *mut c_void, 0, MEM_RELEASE) }.is_ok() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));

@@ -38,6 +38,10 @@ pub struct HostList {
     pub executed_at: std::sync::atomic::AtomicU64,
     /// Its host Close failed (a call the host refused while recording): executing it would remove the device.
     pub bad: std::sync::atomic::AtomicBool,
+    /// The title closed its console list since this host list was last reset, so any path may have executed it.
+    /// The pool recycles such a list only after the execution its mark names ([`super::pool`]); one without a mark
+    /// is held, never reset.
+    pub sealed: std::sync::atomic::AtomicBool,
     /// Its timing pair in the device's timestamp ring ([`super::stamps`]): the query at its first command, the one
     /// after its last at +1. [`super::stamps::NONE`] for a list that is not timed.
     pub stamp: std::sync::atomic::AtomicU32,
@@ -71,6 +75,7 @@ impl HostList {
             executed_on: std::sync::atomic::AtomicUsize::new(0),
             executed_at: std::sync::atomic::AtomicU64::new(0),
             bad: std::sync::atomic::AtomicBool::new(false),
+            sealed: std::sync::atomic::AtomicBool::new(false),
             stamp: std::sync::atomic::AtomicU32::new(super::stamps::NONE),
         }
     }
@@ -1043,7 +1048,10 @@ impl ListState {
             let busy = SUBMITTING.load(Ordering::Relaxed) != 0;
             let t0 = cost::now();
             let next = match self.spare.pop() {
-                Some(h) => unsafe { h.list.Reset(&allocator, None) }.map(|_| h),
+                Some(h) => unsafe { h.list.Reset(&allocator, None) }.map(|_| {
+                    h.sealed.store(false, Ordering::Relaxed);
+                    h
+                }),
                 None => self.backend.list(self.kind, &allocator).map(HostList::new),
             };
             reset_kind(by_slot::SPLIT_FRESH, uses, busy || SUBMITTING.load(Ordering::Relaxed) != 0, cost::now().wrapping_sub(t0));
@@ -1699,7 +1707,12 @@ unsafe extern "system" fn get_type(this: Raw) -> u32 {
 /// list's cost goes to [`cost`].
 unsafe extern "system" fn close(this: Raw) -> HRESULT {
     let t = Tick::on(this, 3);
-    let hr = enter(this).close_current();
+    let s = enter(this);
+    let hr = s.close_current();
+    // every part may be executed from now on: none is reset by the pool unless its execution is known
+    for seg in &s.segments {
+        seg.list.sealed.store(true, std::sync::atomic::Ordering::Release);
+    }
     drop(t);
     // SAFETY: as in `enter` (the reference above is no longer used)
     unsafe { (*this.cast::<ListObject>()).ours.count_cost() };
@@ -1737,6 +1750,7 @@ unsafe extern "system" fn reset(this: Raw, allocator: Raw, pipeline: Raw) -> HRE
             s.spare.push(seg.list);
         }
         s.segments[0].waits.clear();
+        s.segments[0].list.sealed.store(false, Ordering::Relaxed);
         let p = by_slot::part(40);
         let busy = SUBMITTING.load(Ordering::Relaxed) != 0;
         let t0 = cost::now();
