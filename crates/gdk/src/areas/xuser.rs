@@ -109,8 +109,9 @@ const SANDBOX_SIGNATURE: &str = "rebuild-offline-sandbox-placeholder-signature";
 /// A placeholder `XUserGetTokenAndSignatureData`, built into the title's own result buffer at GetResult
 /// time so its `token`/`signature` pointers address that buffer.
 struct PlaceholderToken {
-    /// the token string, null-terminated (the API's `token` is `_Field_z_`)
+    /// the token string, null-terminated (the public XUser.h marks `token` `_Null_terminated_`)
     token: Vec<u8>,
+    /// the signature, null-terminated too (`signature` is `_Null_terminated_` in XUser.h)
     signature: Vec<u8>,
 }
 
@@ -121,7 +122,9 @@ impl PlaceholderToken {
     fn new() -> PlaceholderToken {
         let mut token = SANDBOX_TOKEN.as_bytes().to_vec();
         token.push(0);
-        PlaceholderToken { token, signature: SANDBOX_SIGNATURE.as_bytes().to_vec() }
+        let mut signature = SANDBOX_SIGNATURE.as_bytes().to_vec();
+        signature.push(0);
+        PlaceholderToken { token, signature }
     }
 
     fn size(&self) -> usize {
@@ -143,9 +146,10 @@ unsafe extern "system" fn token_provider(op: u32, data: *const xasync::ProviderD
             unsafe {
                 let token_ptr = b.add(PlaceholderToken::HEADER);
                 let sig_ptr = token_ptr.add(p.token.len());
-                // tokenCount is the string length without the terminating null; signatureCount its bytes.
+                // Each count is the string length without its terminating null (whether the console
+                // counts the NUL is not settled by the public header; see public-sources-review.md).
                 b.cast::<usize>().write_unaligned(p.token.len() - 1);
-                b.add(8).cast::<usize>().write_unaligned(p.signature.len());
+                b.add(8).cast::<usize>().write_unaligned(p.signature.len() - 1);
                 b.add(16).cast::<*const u8>().write_unaligned(token_ptr);
                 b.add(24).cast::<*const u8>().write_unaligned(sig_ptr);
                 token_ptr.copy_from_nonoverlapping(p.token.as_ptr(), p.token.len());
@@ -374,6 +378,10 @@ mod tests {
             assert_eq!(token, SANDBOX_TOKEN);
             let token_count = usize::from_ne_bytes(buf[0..8].try_into().unwrap());
             assert_eq!(token_count, SANDBOX_TOKEN.len());
+            // XUser.h marks `signature` `_Null_terminated_` too: it reads as a C string.
+            let sig_ptr = usize::from_ne_bytes(buf[24..32].try_into().unwrap()) as *const c_char;
+            assert_eq!(std::ffi::CStr::from_ptr(sig_ptr).to_str().unwrap(), SANDBOX_SIGNATURE);
+            assert!((sig_ptr as usize) + SANDBOX_SIGNATURE.len() < buf.as_ptr() as usize + size, "its NUL inside the buffer");
         });
         assert!(crate::discovery::contains("sandbox: XUserGetTokenAndSignatureAsync placeholder token for https://title.example/auth"));
     }

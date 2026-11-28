@@ -61,6 +61,19 @@ struct Call {
     identity: usize,
     completed: Mutex<bool>,
     done: Condvar,
+    gate: Mutex<Gate>,
+}
+
+/// When the provider's Cleanup may run. A provider commonly calls `XAsyncComplete` from inside its
+/// DoWork (or its Cancel) and keeps using its context until that op returns; the public reference
+/// implementation (libHttpClient `AsyncLib.cpp`) therefore runs Cleanup only after DoWork returns.
+/// `busy` counts DoWork / Cancel ops in flight; a Cleanup asked for meanwhile is deferred to the last
+/// one's return.
+#[derive(Default)]
+struct Gate {
+    busy: u32,
+    cleanup_due: bool,
+    cleaned: bool,
 }
 
 impl Call {
@@ -68,6 +81,49 @@ impl Call {
         let data = ProviderData { async_block: block, buffer_size: size, buffer, context: self.context as *mut c_void };
         // SAFETY: the title's (or our) provider, with the context given to `begin`.
         unsafe { (self.provider)(op, &data) }
+    }
+
+    /// Enters a DoWork / Cancel op; false once Cleanup has run or is due (the call is over).
+    fn enter(&self) -> bool {
+        let mut g = lock(&self.gate);
+        if g.cleaned || g.cleanup_due {
+            return false;
+        }
+        g.busy += 1;
+        true
+    }
+
+    /// Leaves an op entered with [`Call::enter`]; runs a Cleanup that waited for it.
+    fn leave(&self, block: *mut XAsyncBlock) {
+        let run = {
+            let mut g = lock(&self.gate);
+            g.busy -= 1;
+            let run = g.busy == 0 && g.cleanup_due && !g.cleaned;
+            g.cleaned |= run;
+            run
+        };
+        if run {
+            self.op(OP_CLEANUP, block, 0, std::ptr::null_mut());
+        }
+    }
+
+    /// The provider's Cleanup, once: now, or when the ops in flight return.
+    fn cleanup(&self, block: *mut XAsyncBlock) {
+        let run = {
+            let mut g = lock(&self.gate);
+            if g.cleaned {
+                false
+            } else if g.busy > 0 {
+                g.cleanup_due = true;
+                false
+            } else {
+                g.cleaned = true;
+                true
+            }
+        };
+        if run {
+            self.op(OP_CLEANUP, block, 0, std::ptr::null_mut());
+        }
     }
 }
 
@@ -99,13 +155,13 @@ fn status(block: *mut XAsyncBlock) -> HRESULT {
 fn end(block: *mut XAsyncBlock) {
     let removed = lock(&CALLS).remove(&(block as usize));
     if let Some(call) = removed {
-        call.op(OP_CLEANUP, block, 0, std::ptr::null_mut());
+        call.cleanup(block);
     }
 }
 
 /// `XAsyncBegin`. A failed Begin op completes the call with that failure (so the completion routine
-/// still runs) and `XAsyncBegin` itself succeeds; the console's exact choice here is unknown, this is
-/// the fork's, which ran the title. A block already in flight is refused with `E_INVALIDARG`.
+/// still runs) and `XAsyncBegin` itself succeeds, as Microsoft's public reference implementation
+/// (libHttpClient `AsyncLib.cpp`) does. A block already in flight is refused with `E_INVALIDARG` (same).
 pub unsafe fn begin(block: *mut XAsyncBlock, context: *mut c_void, identity: *const c_void, provider: Option<Provider>) -> HRESULT {
     let Some(provider) = provider else { return E_INVALIDARG };
     if block.is_null() {
@@ -117,6 +173,7 @@ pub unsafe fn begin(block: *mut XAsyncBlock, context: *mut c_void, identity: *co
         identity: identity as usize,
         completed: Mutex::new(false),
         done: Condvar::new(),
+        gate: Mutex::default(),
     });
     {
         let mut calls = lock(&CALLS);
@@ -135,16 +192,27 @@ pub unsafe fn begin(block: *mut XAsyncBlock, context: *mut c_void, identity: *co
     S_OK
 }
 
+/// The call's work on its work port. Canceled (its queue terminated): the provider gets its Cancel op,
+/// then the call completes with `E_ABORT` if the provider did not complete it (as the reference
+/// implementation does). Cleanup, if the call ends here, runs after the op returns.
 unsafe extern "system" fn do_work(block: *mut c_void, canceled: bool) {
     let block = block.cast::<XAsyncBlock>();
     let Some(call) = call(block) else { return };
-    if *lock(&call.completed) {
+    if !call.enter() {
         return;
     }
-    let hr = if canceled { E_ABORT } else { call.op(OP_DO_WORK, block, 0, std::ptr::null_mut()) };
-    if hr != E_PENDING {
-        unsafe { complete(block, hr, 0) };
+    if !*lock(&call.completed) {
+        if canceled {
+            call.op(OP_CANCEL, block, 0, std::ptr::null_mut());
+            unsafe { complete(block, E_ABORT, 0) };
+        } else {
+            let hr = call.op(OP_DO_WORK, block, 0, std::ptr::null_mut());
+            if hr != E_PENDING {
+                unsafe { complete(block, hr, 0) };
+            }
+        }
     }
+    call.leave(block);
 }
 
 /// `XAsyncSchedule`: the provider's DoWork on the block's work port, after `delay_ms`.
@@ -156,12 +224,17 @@ pub unsafe fn schedule(block: *mut XAsyncBlock, delay_ms: u32) -> HRESULT {
     queue.submit(WORK, delay_ms, block.cast(), do_work)
 }
 
-unsafe extern "system" fn run_completion(block: *mut c_void, _canceled: bool) {
-    let block = block.cast::<XAsyncBlock>();
-    // SAFETY: the title keeps its block until its completion routine has run.
-    if let Some(routine) = unsafe { (*block).callback } {
-        unsafe { routine(block) };
-    }
+/// A completion routine on its way: the block and the routine read from it before the status was
+/// published (after that the title may reuse the block, so it is not read again).
+struct Completion {
+    block: *mut XAsyncBlock,
+    routine: CompletionRoutine,
+}
+
+unsafe extern "system" fn run_completion(context: *mut c_void, _canceled: bool) {
+    // SAFETY: boxed in `complete`, run once.
+    let c = unsafe { Box::from_raw(context.cast::<Completion>()) };
+    unsafe { (c.routine)(c.block) };
 }
 
 /// `XAsyncComplete`: the first result wins; `E_PENDING` is not a result.
@@ -191,14 +264,15 @@ pub unsafe fn complete(block: *mut XAsyncBlock, result: HRESULT, required_size: 
     }
     call.done.notify_all();
     if ending {
-        call.op(OP_CLEANUP, block, 0, std::ptr::null_mut());
+        call.cleanup(block);
     }
-    if routine.is_some() {
+    if let Some(routine) = routine {
+        let context = Box::into_raw(Box::new(Completion { block, routine })).cast::<c_void>();
         match taskqueue::queue(queue) {
-            Some(q) if q.submit(COMPLETION, 0, block.cast(), run_completion) == S_OK => {}
+            Some(q) if q.submit(COMPLETION, 0, context, run_completion) == S_OK => {}
             // A terminated (or cleared) queue: the routine still runs, here; the console's choice
             // for this case is unknown.
-            _ => unsafe { run_completion(block.cast(), true) },
+            _ => unsafe { run_completion(context, true) },
         }
     }
 }
@@ -229,27 +303,31 @@ pub unsafe fn get_status(block: *mut XAsyncBlock, wait: bool) -> HRESULT {
     status(block)
 }
 
-/// `XAsyncGetResultSize`: the call's status; the size for any success code.
+/// `XAsyncGetResultSize`: the call's status; the size for any success code, else 0 (the size is
+/// always written, as the public reference implementation does).
 pub unsafe fn get_result_size(block: *mut XAsyncBlock, out: *mut usize) -> HRESULT {
     if block.is_null() || out.is_null() {
         return E_INVALIDARG;
     }
     let hr = status(block);
-    if !failed(hr) && hr != E_PENDING {
-        unsafe { out.write_unaligned(words(block).1.load(Ordering::Acquire)) };
-    }
+    let size = if !failed(hr) && hr != E_PENDING { words(block).1.load(Ordering::Acquire) } else { 0 };
+    unsafe { out.write_unaligned(size) };
     hr
 }
 
-/// `XAsyncCancel`: the provider's Cancel op, then the call completes with `E_ABORT` unless the
-/// provider completed it first.
+/// `XAsyncCancel`: the provider's Cancel op, nothing more. Cancellation is the provider's to finish:
+/// `XAsyncOp::Cancel` says the provider "should cancel all asynchronous work and then call
+/// XAsyncComplete" with `E_ABORT`; `XAsyncCancel` says cancellation "may happen synchronously,
+/// asynchronously, or not at all"; and calls started with `XAsyncRun` "can't be canceled"
+/// (learn.microsoft.com, GDK XAsync reference; docs/research/public-sources-review.md). Completing
+/// the call here instead would run the provider's Cleanup while its DoWork may still be running.
 pub unsafe fn cancel(block: *mut XAsyncBlock) {
     if let Some(call) = call(block) {
-        if *lock(&call.completed) {
+        if *lock(&call.completed) || !call.enter() {
             return;
         }
         call.op(OP_CANCEL, block, 0, std::ptr::null_mut());
-        unsafe { complete(block, E_ABORT, 0) };
+        call.leave(block);
     }
 }
 
@@ -273,7 +351,12 @@ pub unsafe fn get_result(block: *mut XAsyncBlock, identity: *const c_void, size:
     if call.identity != identity as usize {
         return E_INVALIDARG;
     }
-    if buffer.is_null() || size < need {
+    // A null buffer is an invalid argument, a short one too small (the reference implementation's
+    // order). Unlike it, the call stays alive after either, so the title may ask again.
+    if buffer.is_null() {
+        return E_INVALIDARG;
+    }
+    if size < need {
         return E_NOT_SUFFICIENT_BUFFER;
     }
     let got = call.op(OP_GET_RESULT, block, size, buffer);
@@ -357,7 +440,7 @@ pub fn bytes<T: Copy>(value: T) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::taskqueue::{Mode, INFINITE};
-    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicBool, AtomicU32};
     use std::thread::ThreadId;
     use std::time::{Duration, Instant};
 
@@ -485,13 +568,14 @@ mod tests {
 
     static CANCELS: AtomicU32 = AtomicU32::new(0);
     static CLEANUPS: AtomicU32 = AtomicU32::new(0);
-    /// Never finishes on its own.
+    /// Never finishes on its own; canceled, it completes with E_ABORT as `XAsyncOp::Cancel` asks.
     unsafe extern "system" fn forever(op: u32, data: *const ProviderData) -> HRESULT {
         match op {
             OP_BEGIN => unsafe { schedule((*data).async_block, 0) },
             OP_DO_WORK => E_PENDING,
             OP_CANCEL => {
                 CANCELS.fetch_add(1, Ordering::SeqCst);
+                unsafe { complete((*data).async_block, E_ABORT, 0) };
                 S_OK
             }
             OP_CLEANUP => {
@@ -519,6 +603,96 @@ mod tests {
         unsafe { complete(b, S_OK, 8) };
         assert_eq!(unsafe { get_status(b, false) }, E_ABORT, "the first result wins");
         unsafe { taskqueue::close(q) };
+    }
+
+    /// The documented cancelable provider ("Set up cancelability"): Cancel only signals, DoWork
+    /// notices, completes with E_ABORT and keeps using its state until it returns. Cleanup must wait
+    /// for DoWork to return, and XAsyncCancel must not complete the call itself.
+    #[test]
+    fn cancel_is_cooperative_and_cleanup_waits_for_do_work() {
+        static IN_WORK: AtomicBool = AtomicBool::new(false);
+        static SIGNAL: AtomicBool = AtomicBool::new(false);
+        static CLEANED: AtomicU32 = AtomicU32::new(0);
+        static CLEANED_IN_WORK: AtomicBool = AtomicBool::new(false);
+        unsafe extern "system" fn cooperative(op: u32, data: *const ProviderData) -> HRESULT {
+            let block = unsafe { (*data).async_block };
+            match op {
+                OP_BEGIN => unsafe { schedule(block, 0) },
+                OP_DO_WORK => {
+                    IN_WORK.store(true, Ordering::SeqCst);
+                    while !SIGNAL.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    unsafe { complete(block, E_ABORT, 0) };
+                    // Still using its state after XAsyncComplete, as providers do.
+                    std::thread::sleep(Duration::from_millis(30));
+                    IN_WORK.store(false, Ordering::SeqCst);
+                    S_OK
+                }
+                OP_CANCEL => {
+                    SIGNAL.store(true, Ordering::SeqCst);
+                    S_OK
+                }
+                OP_CLEANUP => {
+                    CLEANED_IN_WORK.fetch_or(IN_WORK.load(Ordering::SeqCst), Ordering::SeqCst);
+                    CLEANED.fetch_add(1, Ordering::SeqCst);
+                    S_OK
+                }
+                _ => S_OK,
+            }
+        }
+        let q = queue(Mode::ThreadPool, Mode::ThreadPool);
+        let mut block = XAsyncBlock::new(q, None);
+        let b = &mut block as *mut XAsyncBlock;
+        assert_eq!(unsafe { begin(b, std::ptr::null_mut(), std::ptr::null(), Some(cooperative)) }, S_OK);
+        let start = Instant::now();
+        while !IN_WORK.load(Ordering::SeqCst) {
+            assert!(start.elapsed() < Duration::from_secs(5), "DoWork never started");
+            std::thread::yield_now();
+        }
+        unsafe { cancel(b) };
+        assert_eq!(unsafe { get_status(b, true) }, E_ABORT);
+        let start = Instant::now();
+        while CLEANED.load(Ordering::SeqCst) == 0 {
+            assert!(start.elapsed() < Duration::from_secs(5), "no cleanup");
+            std::thread::yield_now();
+        }
+        assert!(!CLEANED_IN_WORK.load(Ordering::SeqCst), "Cleanup ran while DoWork was still running");
+        assert_eq!(CLEANED.load(Ordering::SeqCst), 1);
+        unsafe { taskqueue::close(q) };
+    }
+
+    /// "Basic async methods that are started with XAsyncRun can't be canceled": the work's own
+    /// result stands.
+    #[test]
+    fn xasyncrun_is_not_cancelable() {
+        unsafe extern "system" fn work(_: *mut XAsyncBlock) -> HRESULT {
+            std::thread::sleep(Duration::from_millis(30));
+            S_OK
+        }
+        let mut block = XAsyncBlock::new(std::ptr::null(), None);
+        let b = &mut block as *mut XAsyncBlock;
+        assert_eq!(unsafe { run(b, Some(work)) }, S_OK);
+        unsafe { cancel(b) };
+        assert_eq!(unsafe { get_status(b, true) }, S_OK);
+    }
+
+    #[test]
+    fn result_size_is_written_on_failure_and_a_null_buffer_is_invalid() {
+        static ID: u8 = 0;
+        let mut block = XAsyncBlock::new(std::ptr::null(), None);
+        let b = &mut block as *mut XAsyncBlock;
+        assert_eq!(unsafe { finish(b, &ID, Err(E_GAMESTORE_NETWORK_ERROR)) }, S_OK);
+        let mut size = 99;
+        assert_eq!(unsafe { get_result_size(b, &mut size) }, E_GAMESTORE_NETWORK_ERROR);
+        assert_eq!(size, 0, "written even for a failed call");
+
+        assert_eq!(unsafe { finish(b, &ID, Ok(bytes(7u32))) }, S_OK);
+        let id = (&ID as *const u8).cast();
+        assert_eq!(unsafe { get_result(b, id, 4, std::ptr::null_mut(), std::ptr::null_mut()) }, E_INVALIDARG);
+        let mut v = 0u32;
+        assert_eq!(unsafe { take(b, &ID, &mut v) }, S_OK, "still there after the refusal");
+        assert_eq!(v, 7);
     }
 
     /// Terminating the queue with a call's work still queued: the work runs canceled, the call fails

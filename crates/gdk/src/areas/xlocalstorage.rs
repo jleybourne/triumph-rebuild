@@ -33,8 +33,8 @@ unsafe extern "system" fn path_size(_: This, out: *mut usize) -> HRESULT {
     unsafe { put(out, root().len() + 1) }
 }
 
-/// `XPersistentLocalStorageGetPath`. A buffer too small fails with `E_FAIL`, the fork's reading of the
-/// Xbox documentation (the console's code is not confirmed here); nothing is written then.
+/// `XPersistentLocalStorageGetPath`. A buffer too small fails with `E_FAIL`: the public reference page
+/// gives `E_FAIL` "for Xbox devices" (PC: `ERROR_INSUFFICIENT_BUFFER`); nothing is written then.
 unsafe extern "system" fn path(_: This, size: usize, buffer: *mut u8, used: *mut usize) -> HRESULT {
     let root = root();
     if buffer.is_null() {
