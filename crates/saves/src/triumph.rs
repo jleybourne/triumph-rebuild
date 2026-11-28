@@ -120,6 +120,50 @@ pub fn scan(src: &Path) -> Result<Vec<Found>, String> {
     Ok(out)
 }
 
+/// A container folder of the older build: `<name>~<16 hex>` holding at least one `v<N>`.
+pub fn is_container_dir(p: &Path) -> bool {
+    let n = name_of(p);
+    let Some((_, hash)) = n.rsplit_once('~') else { return false };
+    hash.len() == 16
+        && hash.bytes().all(|b| b.is_ascii_hexdigit())
+        && dirs(p).iter().any(|v| name_of(v).strip_prefix('v').is_some_and(|n| n.parse::<u64>().is_ok()))
+}
+
+/// Every committed container at or under `p`, at any level: the title data folder, its `saves` folder,
+/// a user or service-configuration folder, or one container folder. The user and configuration are the
+/// two folders above each container. Refuses on the first container it cannot read.
+pub fn find(p: &Path) -> Result<Vec<Found>, String> {
+    let mut containers = Vec::new();
+    let mut level = vec![p.to_path_buf()];
+    for _ in 0..6 {
+        let mut next = Vec::new();
+        for d in level {
+            if is_container_dir(&d) {
+                containers.push(d);
+            } else {
+                next.extend(dirs(&d));
+            }
+        }
+        level = next;
+    }
+    containers.sort();
+    let mut out = Vec::new();
+    for c in containers {
+        let Ok(abs) = std::fs::canonicalize(&c) else { continue };
+        let scid = abs.parent().map(name_of).unwrap_or_default();
+        let user = abs.parent().and_then(Path::parent).map(name_of).unwrap_or_default();
+        if let Some((version, stored)) = read_container(&c)? {
+            out.push(Found { user, scid, version, stored });
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `user` / `scid` are folder names our runtime uses as they are.
+pub fn plain_names(f: &Found) -> bool {
+    plain(&f.user) && plain(&f.scid)
+}
+
 /// Imports everything [`scan`] finds into `root` (ours), all or nothing: every container is checked
 /// (names our runtime would use, `store::refuse`) before any is written.
 pub fn import(root: &Path, src: &Path, running: &dyn Fn() -> bool) -> Result<Vec<Written>, String> {

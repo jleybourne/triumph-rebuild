@@ -63,6 +63,32 @@ session scratchpad, never in git.
   (highest committed version), checks everything, then writes through `write_container`. The fork's
   folder is never touched (a test snapshots it).
 
+## Third pass: one Import (branch `agent/saveeditor3`)
+
+The owner asked for one **Import**, not "Import from Triumph". `import.rs` has `detect` (what a file or
+folder is), `plan` (checked, nothing written) and `apply` (plans again, must match, then backup and
+write). It recognises:
+
+- a storage export zip (handed to `rebuild_storage`);
+- one `.gsc` with its `.gsc.json`;
+- a decoded-save JSON;
+- a folder of per-container exports;
+- older-build saves at any level (`triumph::find`).
+
+Anything else gives "not a save or export we recognise". A folder holding both exports and
+older-build saves is refused as ambiguous.
+
+The Saves screen now has one Import (a file or a folder, or drop either on the window). It shows a
+preview of each container (added, replaced or unchanged), then **Back up and import**. The old
+per-container Import, Import JSON, Import all and Import from Triumph buttons are gone. Export is
+unchanged.
+
+The storage export preview (`import_plan_view`) is shared with Diagnostics → Storage.
+
+```
+tests   rebuild-saves +8 (import: each kind, older build at 5 levels, unknown/ambiguous, stale plan) · launcher +1 (import_previews_then_writes)
+```
+
 ## Next
 
 - names for the profile's ids and for the remaining settings members; a progress save (kinds 1/9,

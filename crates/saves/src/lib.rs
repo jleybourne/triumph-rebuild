@@ -10,6 +10,7 @@
 //! - [`body`]: the bodies of the two kinds real saves use: the player profile (id, value pairs) and
 //!   `SettingsProfileSettings` (JSON with hashed member names), edited in place
 //! - [`triumph`]: import from the owner's older build's save folders (read only)
+//! - [`import`]: the one Import: detect what a file or folder is, plan (preview), apply (backup first)
 //! - [`json`]: the small strict JSON the exports use
 //!
 //! Offline single-player saves only: nothing here talks to a network, and nothing named like online
@@ -17,6 +18,7 @@
 
 pub mod body;
 pub mod format;
+pub mod import;
 pub mod json;
 pub mod section;
 pub mod store;
