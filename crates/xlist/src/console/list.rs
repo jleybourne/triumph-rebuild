@@ -1667,6 +1667,7 @@ unsafe extern "system" fn barrier_groups(this: Raw, count: u32, groups: *const C
                         match s.resource(b.as_ptr().add(16).cast::<Raw>().read_unaligned()) {
                             Some(r) => {
                                 b.as_mut_ptr().add(16).cast::<Raw>().write_unaligned(r);
+                                whole_buffer(&mut b);
                                 buffers.push(b);
                             }
                             None => globals.push(b[..16].try_into().expect("16 bytes")),
@@ -1695,6 +1696,16 @@ unsafe extern "system" fn barrier_groups(this: Raw, count: u32, groups: *const C
         s.seg_work = true;
     }
     (s.globals, s.textures, s.buffers) = (globals, textures, buffers);
+}
+
+/// A buffer barrier over its whole buffer (`Offset` at +24 = 0, `Size` at +32 = `UINT64_MAX`). The
+/// Enhanced Barriers spec: "For now, Offset must be zero and Size must be either the buffer size in
+/// bytes or UINT64_MAX" (microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html). A title
+/// range is legal on the console but not here, and our host buffer need not be the console's size;
+/// the whole buffer is always at least as strong.
+fn whole_buffer(b: &mut [u8; 40]) {
+    b[24..32].copy_from_slice(&0u64.to_le_bytes());
+    b[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
 }
 
 /// The console's barrier layouts that a host runtime may not know, as host layouts (`LayoutBefore` at +16,
@@ -2224,5 +2235,16 @@ mod layout_tests {
         t[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
         super::host_layouts(&mut t);
         assert_eq!(u32::from_le_bytes(t[20..24].try_into().unwrap()), u32::MAX, "UNDEFINED stays");
+    }
+
+    #[test]
+    fn buffer_barriers_cover_the_whole_buffer() {
+        let mut b = [0xabu8; 40];
+        b[24..32].copy_from_slice(&0x100u64.to_le_bytes());
+        b[32..40].copy_from_slice(&0x40u64.to_le_bytes());
+        super::whole_buffer(&mut b);
+        assert_eq!(&b[..24], &[0xab; 24], "sync, access and resource untouched");
+        assert_eq!(u64::from_le_bytes(b[24..32].try_into().unwrap()), 0);
+        assert_eq!(u64::from_le_bytes(b[32..40].try_into().unwrap()), u64::MAX);
     }
 }
