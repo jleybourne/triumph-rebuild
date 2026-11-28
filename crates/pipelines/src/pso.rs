@@ -20,7 +20,7 @@ use std::ffi::CString;
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use rebuild_shader::blake3;
@@ -733,6 +733,16 @@ impl Creator for PsoCreator {
                 })
             }
             Desc::Graphics { vs, ps, state } => {
+                // REBUILD_TRACE_PSO=<vs hash>[,<vs hash>...] (or `all`): the host state each such pipeline is built with
+                static TRACE: OnceLock<Option<Vec<String>>> = OnceLock::new();
+                if let Some(t) = TRACE.get_or_init(|| std::env::var("REBUILD_TRACE_PSO").ok().map(|v| v.split(',').map(|s| s.trim().to_ascii_lowercase()).collect())) {
+                    if t.iter().any(|h| h == "all" || *h == format!("{vs:016x}")) {
+                        eprintln!(
+                            "pso       {vs:016x} {ps:x?}: raster {:?}; depth {:?}; blend0 {:?}; targets {:?} depth format {} samples {} topology {} mask {:#x}",
+                            state.raster, state.depth_stencil, state.blend[0], state.targets, state.depth_format, state.samples, state.topology, state.sample_mask
+                        );
+                    }
+                }
                 let (v, p, root) = self.programs.graphics(*vs, *ps)?;
                 let gs = if state.topology == RECT_TOPOLOGY_TYPE {
                     match self.programs.rect.get(&v, p.as_deref()) {
