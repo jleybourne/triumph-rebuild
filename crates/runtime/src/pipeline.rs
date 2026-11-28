@@ -490,8 +490,38 @@ pub unsafe extern "system" fn CreatePipelineState(_this: Raw, desc: *const c_voi
     unsafe { hand_out(request(stream::parse_stream(s, &mem, Numbering::Console, console_sizes()), &mem), iid, out) }
 }
 
-/// The host pipeline of a console one, for the lists. Waits for the pool at a pipeline's first use. A pipeline
-/// whose programs' root layout is not known has none: its draws are dropped rather than bound wrongly.
+/// What a title thread does when it binds a pipeline whose host PSO is not ready (`REBUILD_PSO_FIRST_USE`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FirstUse {
+    /// `wait` (the default): block until it exists (created on the binding thread when no worker has started it)
+    Wait,
+    /// `skip`: hurry it to the front of the pool and give the lists no pipeline, so the draws
+    /// that use it are skipped (counted) until it is ready; the title's thread never blocks on a PSO
+    Skip,
+}
+
+pub fn first_use() -> FirstUse {
+    static M: OnceLock<FirstUse> = OnceLock::new();
+    *M.get_or_init(|| match std::env::var("REBUILD_PSO_FIRST_USE").ok().as_deref().map(str::trim) {
+        Some("skip") => FirstUse::Skip,
+        _ => FirstUse::Wait,
+    })
+}
+
+/// Host PSOs the pool has made so far (for the timeline).
+pub fn made() -> u64 {
+    pool().map_or(0, |p| p.stats().created)
+}
+
+/// Pipelines queued in the pool and not started.
+pub fn queued() -> usize {
+    pool().map_or(0, |p| p.pending())
+}
+
+/// The host pipeline of a console one, for the lists. Never blocks by default: a pipeline not ready yet is
+/// hurried to the front of the pool and has no host pipeline for now (its draws are skipped and counted;
+/// [`FirstUse`]). A pipeline whose programs' root layout is not known has none: its draws are dropped rather
+/// than bound wrongly.
 pub fn host(console: Raw) -> Option<HostPipeline> {
     let p = of(console)?;
     let h = p.handle?;
@@ -499,7 +529,16 @@ pub fn host(console: Raw) -> Option<HostPipeline> {
     let pool = pool()?;
     let pso = match pool.get(h) {
         Some(pso) => pso,
-        None => pool.wait(h).ok()?,
+        None if first_use() == FirstUse::Wait => {
+            let kind = if pool.status(h) == rebuild_pipelines::pool::Status::Queued { crate::psotime::Kind::Inline } else { crate::psotime::Kind::Pool };
+            crate::psotime::wait(kind, || describe(console), || pool.wait(h)).ok()?
+        }
+        None => {
+            if pool.hurry(h) != rebuild_pipelines::pool::Status::Failed {
+                crate::psotime::pending();
+            }
+            return None;
+        }
     };
     let mut root = p.root.load(Ordering::Relaxed);
     if root == 0 {
@@ -587,7 +626,7 @@ pub fn report() -> String {
     if let Some(p) = pool() {
         let s = p.stats();
         line += &format!(
-            "; host PSOs {} made, {} failed (deduplicated {}; eager cap {}, parked {}, made at first use {}; inline {}, blocked {:.0} ms)",
+            "; host PSOs {} made, {} failed (deduplicated {}; eager cap {}, parked {}, made at first use {}; inline {}, blocked {:.0} ms; first use {:?}: hurried {}, binds skipped while pending {}, longest wait {:.0} ms)",
             s.created,
             s.failed,
             s.deduplicated,
@@ -595,7 +634,11 @@ pub fn report() -> String {
             s.parked,
             s.unparked,
             s.inline,
-            s.wait_time.as_secs_f64() * 1e3
+            s.wait_time.as_secs_f64() * 1e3,
+            first_use(),
+            s.hurried,
+            crate::psotime::totals().4,
+            crate::psotime::totals().5,
         );
     }
     if let Some(od) = pool().and_then(|p| p.creator().programs().ondemand()) {

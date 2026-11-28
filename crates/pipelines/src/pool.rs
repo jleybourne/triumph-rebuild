@@ -6,8 +6,8 @@
 //! the calling thread, so a draw never queues behind thousands of other creations.
 //!
 //! - Requests are deduplicated by [`Key`]: the same key gives the same handle and one creation.
-//! - Two queues: the title's requests first, then prewarm work ([`Pool::prewarm`]), which only uses idle
-//!   workers.
+//! - Three queues: pipelines a title thread is drawing with and found not ready ([`Pool::hurry`]), then the
+//!   title's requests, then prewarm work ([`Pool::prewarm`]), which only uses idle workers.
 //! - Handles index a slab whose segments never move, so `get` is lock-free and returns a plain reference.
 //! - Every key the title requested is kept, for the next session's prewarm ([`Pool::requested`]).
 //!
@@ -61,6 +61,8 @@ struct Slot<O> {
     requested: AtomicBool,
     /// on no queue: created at its first wait
     parked: AtomicBool,
+    /// on the urgent queue (a title thread binds it)
+    hurried: AtomicBool,
     key: OnceLock<Key>,
     desc: Mutex<Option<Desc>>,
     out: OnceLock<Result<O, String>>,
@@ -68,12 +70,13 @@ struct Slot<O> {
 
 impl<O> Default for Slot<O> {
     fn default() -> Self {
-        Slot { state: AtomicU8::new(QUEUED), requested: AtomicBool::new(false), parked: AtomicBool::new(false), key: OnceLock::new(), desc: Mutex::new(None), out: OnceLock::new() }
+        Slot { state: AtomicU8::new(QUEUED), requested: AtomicBool::new(false), parked: AtomicBool::new(false), hurried: AtomicBool::new(false), key: OnceLock::new(), desc: Mutex::new(None), out: OnceLock::new() }
     }
 }
 
 #[derive(Default)]
 struct Queues {
+    urgent: VecDeque<u32>,
     title: VecDeque<u32>,
     prewarm: VecDeque<u32>,
     stop: bool,
@@ -100,6 +103,8 @@ pub struct Stats {
     pub parked: u64,
     /// Parked pipelines created since (at a first use, or by a title request that found room).
     pub unparked: u64,
+    /// Pipelines moved to the urgent queue ([`Pool::hurry`]).
+    pub hurried: u64,
 }
 
 struct Inner<C: Creator> {
@@ -113,7 +118,7 @@ struct Inner<C: Creator> {
     done_cv: Condvar,
     waiters: AtomicU32,
     requested: Mutex<Vec<(Key, Desc)>>,
-    n: [AtomicU64; 10],
+    n: [AtomicU64; 11],
     wait_ns: AtomicU64,
     create_ns: AtomicU64,
 }
@@ -129,6 +134,7 @@ const PARKED: usize = 7;
 const UNPARKED: usize = 8;
 /// Title requests queued for the workers (not parked).
 const TITLE_QUEUED: usize = 9;
+const HURRIED: usize = 10;
 
 /// Where a new slot goes.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -180,7 +186,7 @@ impl<C: Creator> Inner<C> {
                     if q.stop {
                         return;
                     }
-                    if let Some(i) = q.title.pop_front().or_else(|| q.prewarm.pop_front()) {
+                    if let Some(i) = q.urgent.pop_front().or_else(|| q.title.pop_front()).or_else(|| q.prewarm.pop_front()) {
                         break i;
                     }
                     q = self.work.wait(q).unwrap();
@@ -372,7 +378,7 @@ impl<C: Creator> Pool<C> {
         inner.bump(BLOCKED);
         if inner.run(h.0) {
             inner.bump(INLINE);
-            if inner.slot(h.0).parked.load(Ordering::Relaxed) {
+            if s.parked.load(Ordering::Relaxed) && !s.hurried.load(Ordering::Relaxed) {
                 inner.bump(UNPARKED);
             }
         } else {
@@ -404,7 +410,24 @@ impl<C: Creator> Pool<C> {
     /// Pipelines queued and not started.
     pub fn pending(&self) -> usize {
         let q = self.inner.queues.lock().unwrap();
-        q.title.len() + q.prewarm.len()
+        q.urgent.len() + q.title.len() + q.prewarm.len()
+    }
+
+    /// A title thread wants this pipeline now and will not wait for it: if no worker has started it (queued
+    /// behind other work, or parked past the eager cap), it goes to the front, ahead of every other request.
+    /// Never blocks on creation; returns the pipeline's status.
+    pub fn hurry(&self, h: Handle) -> Status {
+        let inner = &*self.inner;
+        let s = inner.slot(h.0);
+        if s.state.load(Ordering::Acquire) == QUEUED && !s.hurried.swap(true, Ordering::AcqRel) {
+            if s.parked.load(Ordering::Relaxed) {
+                inner.bump(UNPARKED);
+            }
+            inner.bump(HURRIED);
+            inner.queues.lock().unwrap().urgent.push_back(h.0);
+            inner.work.notify_one();
+        }
+        self.status(h)
     }
 
     /// Every pipeline the title requested this session, in first-request order, with its description: what
@@ -427,6 +450,7 @@ impl<C: Creator> Pool<C> {
             prewarm_queued: n(PREWARM),
             parked: n(PARKED),
             unparked: n(UNPARKED),
+            hurried: n(HURRIED),
         }
     }
 }
@@ -436,6 +460,7 @@ impl<C: Creator> Drop for Pool<C> {
         {
             let mut q = self.inner.queues.lock().unwrap();
             q.stop = true;
+            q.urgent.clear();
             q.title.clear();
             q.prewarm.clear();
         }
@@ -518,6 +543,38 @@ mod tests {
         assert_eq!((st.parked, st.unparked, st.created, st.deduplicated), (3, 1, 3, 1));
         assert_eq!(f.total.load(Ordering::SeqCst), 3);
         assert_eq!(pool.requested().len(), 5, "every title request is recorded for the next session");
+    }
+
+    /// A pipeline a title thread binds before it is ready is hurried, never created on that thread: a parked one
+    /// is made by a worker ahead of the title's queue, and hurrying twice queues it once.
+    #[test]
+    fn hurried_pipelines_jump_every_queue_and_never_block() {
+        let f = Arc::new(Fake::new(0));
+        f.hold([0]);
+        let pool = Pool::new(f.clone(), 1);
+        let first = pool.request(cs(0).0, cs(0).1);
+        while pool.status(first) != Status::Creating {
+            std::thread::yield_now();
+        }
+        let queued: Vec<Handle> = (1..10).map(|k| pool.request_capped(cs(k).0, cs(k).1, 10)).collect();
+        let parked = pool.request_capped(cs(100).0, cs(100).1, 1);
+        assert_eq!(pool.stats().parked, 1);
+        let t = Instant::now();
+        assert_eq!(pool.hurry(parked), Status::Queued);
+        assert_eq!(pool.hurry(parked), Status::Queued);
+        assert_eq!(pool.hurry(queued[8]), Status::Queued);
+        assert!(t.elapsed() < Duration::from_millis(50), "hurry never creates on the calling thread");
+        assert_eq!(pool.get(parked), None);
+        f.release();
+        let t = Instant::now();
+        while f.total.load(Ordering::SeqCst) < 11 {
+            assert!(t.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(f.order.lock().unwrap()[..3], [0, 100, 9], "hurried ones go first, in order");
+        let st = pool.stats();
+        assert_eq!((st.hurried, st.unparked, st.inline, st.created), (2, 1, 0, 11));
+        assert_eq!(pool.hurry(parked), Status::Ready);
     }
 
     #[test]
