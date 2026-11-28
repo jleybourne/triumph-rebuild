@@ -55,6 +55,9 @@ pub fn install(d: &Drives) -> Result<Arc<Vfs>, String> {
     let profile = rebuild_gdk::profile::Profile {
         storage_drive: STORAGE,
         storage_host: Some(d.overlay.join(STORAGE.to_string())),
+        // the user's game saves (XGameSave): beside the drive, not on it, so they never count against the
+        // storage quota or show on S:
+        saves_host: Some(d.overlay.join("GameSave")),
         ..rebuild_gdk::profile::Profile::default()
     };
     rebuild_gdk::profile::configure(profile)?;

@@ -2,8 +2,10 @@
 //! functions. Slot functions take the object first (`This`), then the public API's arguments.
 
 pub mod queue;
+pub mod xaccessibility;
 pub mod xdisplay;
 pub mod xgame;
+pub mod xgamesave;
 pub mod xlocalstorage;
 pub mod xnetworking;
 pub mod xpackage;
