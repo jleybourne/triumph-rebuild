@@ -173,9 +173,11 @@ fn device_report() {
                 rebuild_xlist::console::RECTS_DROPPED.load(Relaxed)
             );
             println!(
-                "titlemem  {} of the title's allocations opened for the GPU in place, {} could not be",
+                "titlemem  {} of the title's allocations opened for the GPU in place, {} could not be; lookups: {} answered from an allocation confirmed since the last free or remap, {} queried the address space",
                 rebuild_runtime::titlemem::OPENED.load(Relaxed),
-                rebuild_runtime::titlemem::OPEN_FAILED.load(Relaxed)
+                rebuild_runtime::titlemem::OPEN_FAILED.load(Relaxed),
+                rebuild_runtime::titlemem::CACHED.load(Relaxed),
+                rebuild_runtime::titlemem::QUERIED.load(Relaxed)
             );
             println!("{}", rebuild_runtime::memory::report());
             println!("cputex    {}", rebuild_runtime::cputex::report());
