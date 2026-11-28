@@ -296,6 +296,14 @@ pub fn watched(address: u64, bytes: u64) -> bool {
     maps.watched.range(..=address).next_back().is_some_and(|(&b, &l)| address + bytes <= b + l)
 }
 
+/// `address` lies in the arena's GPU-only memory: card pages only, never committed, the CPU never writes it.
+pub fn gpu_only(address: u64) -> bool {
+    let Some(m) = MODEL.get() else { return false };
+    let maps = lock(&m.maps);
+    let in_span = maps.spans.range(..=address).next_back().is_some_and(|(&b, &l)| address < b + l);
+    in_span && !maps.watched.range(..=address).next_back().is_some_and(|(&b, &l)| address < b + l)
+}
+
 /// Before a submission's lists: everything the CPU changed goes up, and `queue` waits for it (on the GPU).
 #[inline]
 pub fn flush_wait(queue: &ID3D12CommandQueue) {
@@ -335,6 +343,221 @@ pub fn range(va: u64) -> Option<MemoryRange> {
 pub fn upload_totals() -> Option<(u64, u64, u64, u64)> {
     let t = MODEL.get()?.ring.totals();
     Some((t.bytes.load(Relaxed), t.busy_us.load(Relaxed), t.passes.load(Relaxed), t.flushes.load(Relaxed)))
+}
+
+/// Card pages in use by what they hold: (the title's watched memory, the arena's GPU-only pieces, the arena's
+/// CPU-visible pieces), in pages.
+pub fn pages_by_region() -> Option<[u64; 3]> {
+    let m = MODEL.get()?;
+    let maps = lock(&m.maps);
+    let pages: Vec<u64> = lock(&m.tiles).pages.keys().copied().collect();
+    let mut n = [0u64; 3];
+    for p in pages {
+        let i = match maps.arena.pieces.range(..=p).next_back() {
+            Some((&b, &(l, k))) if p < b + l => {
+                if k == Kind::Gpu {
+                    1
+                } else {
+                    2
+                }
+            }
+            _ => 0,
+        };
+        n[i] += 1;
+    }
+    Some(n)
+}
+
+/// Card memory the host reports for this process: (local usage, local budget, non-local usage), bytes.
+pub fn video_memory() -> Option<(u64, u64, u64)> {
+    use windows::Win32::Graphics::Dxgi::*;
+    let d = crate::device::get()?;
+    // SAFETY: plain DXGI calls on the device's own adapter
+    unsafe {
+        let luid = d.host.GetAdapterLuid();
+        let f: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
+        let a: IDXGIAdapter3 = f.EnumAdapterByLuid(luid).ok()?;
+        let mut local = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+        let mut other = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+        a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut local).ok()?;
+        a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &mut other).ok()?;
+        Some((local.CurrentUsage, local.Budget, other.CurrentUsage))
+    }
+}
+
+/// One line: what card memory holds, by kind (`REBUILD_VRAM_LOG=<seconds>` prints it while the title runs).
+pub fn vram_line() -> String {
+    vram_line_with(true)
+}
+
+fn vram_line_with(census: bool) -> String {
+    let mib = |b: u64| b >> 20;
+    let mut s = String::from("vram      ");
+    if let Some((used, budget, other)) = video_memory() {
+        s += &format!(
+            "local {} / {} MiB budget{}, non-local {} MiB; ",
+            mib(used),
+            mib(budget),
+            if rebuild_d3d12x::vram::PRESSURE.load(Relaxed) { " (at the budget)" } else { "" },
+            mib(other)
+        );
+    }
+    if let (Some(m), Some(r)) = (MODEL.get(), pages_by_region()) {
+        let heaps = lock(&m.tiles).space.heap_bytes();
+        s += &format!(
+            "tiles {} MiB of heaps, pages: title memory {} MiB, arena GPU-only {} MiB, arena CPU {} MiB; ",
+            mib(heaps),
+            mib(r[0] * P),
+            mib(r[1] * P),
+            mib(r[2] * P)
+        );
+    }
+    if let Some((used, allowed)) = card_pages() {
+        s += &format!("card pages {} / {} MiB allowed; ", used >> 20, allowed >> 20);
+    }
+    s += &format!("host textures {}", rebuild_d3d12x::vram::report());
+    s += &format!("
+vram      mapped textures: {}", crate::mapped::report());
+    if census {
+        s += &census_line();
+    }
+    s
+}
+
+/// The live host textures by (origin, GPU-written, where their console memory is): count, host MiB, console MiB,
+/// console MiB covered (the union: what the console pays), distinct start addresses.
+fn census_line() -> String {
+    use rebuild_d3d12x::vram::{live, union, Origin};
+    let all = live();
+    if all.is_empty() {
+        return String::new();
+    }
+    let region = |a: u64| -> usize {
+        if watched(a, 1) {
+            0
+        } else if crate::pagemap::source(a, 1).is_some() {
+            2
+        } else if MODEL.get().is_some_and(|m| lock(&m.maps).spans.range(..=a).next_back().is_some_and(|(&b, &l)| a < b + l)) {
+            1
+        } else {
+            3
+        }
+    };
+    const REGIONS: [&str; 4] = ["watched", "arena", "page-mapped", "other"];
+    let mut groups: BTreeMap<(u8, bool, usize), Vec<rebuild_d3d12x::vram::Live>> = BTreeMap::new();
+    for l in all {
+        groups.entry((l.origin as u8, l.gpu_written, region(l.address))).or_default().push(l);
+    }
+    let name = |o: u8| match o {
+        x if x == Origin::Committed as u8 => "committed",
+        x if x == Origin::Placed as u8 => "placed",
+        x if x == Origin::AtAddress as u8 => "at-address",
+        x if x == Origin::PlacedView as u8 => "placed-view",
+        _ => "twin",
+    };
+    let (gpu_pages, pool_pages) = crate::pagemap::mapped_now();
+    let mut s = format!(
+        "
+vram      page-mapped now: {} MiB of GPU addresses over {} MiB of pool pages
+vram      census (origin, written by: count, host MiB, console MiB, covered MiB, addresses, pool MiB under them):",
+        (gpu_pages as u64 * P) >> 20,
+        (pool_pages as u64 * P) >> 20
+    );
+    for ((o, gw, r), v) in groups {
+        let host: u64 = v.iter().map(|l| l.bytes).sum();
+        let console: u64 = v.iter().map(|l| l.console).sum();
+        let covered = union(v.iter().map(|l| (l.address, l.address + l.console)).collect());
+        let mut starts: Vec<u64> = v.iter().map(|l| l.address).collect();
+        starts.sort_unstable();
+        starts.dedup();
+        let mut pool = std::collections::HashSet::new();
+        if r == 2 {
+            for l in &v {
+                crate::pagemap::sources(l.address, l.console, &mut pool);
+            }
+        }
+        s += &format!(
+            "
+          {} {} in {}: {}, {}, {}, {}, {}, {}",
+            name(o),
+            if gw { "GPU" } else { "CPU/copy" },
+            REGIONS[r],
+            v.len(),
+            host >> 20,
+            console >> 20,
+            covered >> 20,
+            starts.len(),
+            (pool.len() as u64 * P) >> 20
+        );
+    }
+    s
+}
+
+/// Card memory in use and the budget (bytes) at the watcher's last look.
+pub static VRAM_USED: AtomicU64 = AtomicU64::new(0);
+pub static VRAM_BUDGET: AtomicU64 = AtomicU64::new(0);
+/// Times the card reached its budget (pressure on), over the run.
+pub static PRESSURE_ON: AtomicU64 = AtomicU64::new(0);
+
+/// Headroom kept under the budget: past `budget - ON`, pressure; back under `budget - OFF`, none.
+const PRESSURE_ON_MARGIN: u64 = 384 << 20;
+const PRESSURE_OFF_MARGIN: u64 = 768 << 20;
+
+/// Pressure from usage and budget, with hysteresis (`was`: the state before).
+pub fn pressure(used: u64, budget: u64, was: bool) -> bool {
+    if budget == 0 {
+        return false;
+    }
+    if was {
+        used + PRESSURE_OFF_MARGIN > budget
+    } else {
+        used + PRESSURE_ON_MARGIN > budget
+    }
+}
+
+/// Watch the card's budget (`QueryVideoMemoryInfo`, four times a second, from a thread of its own): near it, new
+/// textures nothing renders to go to system memory (`rebuild_d3d12x::vram::PRESSURE`) and textures over page-mapped
+/// memory take no new card pages (`crate::mapped`), so what the title uses stays on the card instead of the driver
+/// paging it out (frames stall at 0 when that happens). `REBUILD_VRAM_BUDGET=0` turns it off.
+pub fn start_budget_watch() {
+    if std::env::var("REBUILD_VRAM_BUDGET").is_ok_and(|v| v.trim() == "0") {
+        return;
+    }
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let _ = std::thread::Builder::new().name("vram budget".into()).spawn(|| loop {
+            if let Some((used, budget, _)) = video_memory() {
+                VRAM_USED.store(used, Relaxed);
+                VRAM_BUDGET.store(budget, Relaxed);
+                let flag = &rebuild_d3d12x::vram::PRESSURE;
+                let was = flag.load(Relaxed);
+                let now = pressure(used, budget, was);
+                if now != was {
+                    flag.store(now, Relaxed);
+                    if now && PRESSURE_ON.fetch_add(1, Relaxed) < 8 {
+                        eprintln!("vram      at the budget: {} of {} MiB in use; new textures go to system memory, streamed ones take no new card pages", used >> 20, budget >> 20);
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        });
+    });
+}
+
+/// Print [`vram_line`] every `REBUILD_VRAM_LOG` seconds (off without it), from a thread of its own.
+pub fn start_vram_log() {
+    let Some(secs) = std::env::var("REBUILD_VRAM_LOG").ok().and_then(|v| v.trim().parse::<f64>().ok()).filter(|s| *s > 0.0) else { return };
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let _ = std::thread::Builder::new().name("vram log".into()).spawn(move || {
+            let started = std::time::Instant::now();
+            for n in 1u64.. {
+                std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+                // the census (a walk over every live texture) every tenth line
+                eprintln!("[{:.1} s] {}", started.elapsed().as_secs_f64(), vram_line_with(n % 10 == 0));
+            }
+        });
+    });
 }
 
 /// The run report's lines.
@@ -532,6 +755,8 @@ struct ArenaState {
     free: [BTreeMap<u64, u64>; 2],
     /// live allocations: address -> (bytes, kind)
     allocs: HashMap<u64, (u64, Kind)>,
+    /// the arena's pieces: base -> (bytes, kind)
+    pieces: BTreeMap<u64, (u64, Kind)>,
 }
 
 pub static ARENA_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -604,6 +829,7 @@ impl Model {
                 REGIONS_ADDED.fetch_add(1, Relaxed);
             }
             maps.spans.insert(base, size);
+            maps.arena.pieces.insert(base, (size, kind));
             maps.arena.free[k].insert(base, size);
         }
         None
@@ -627,8 +853,48 @@ impl Model {
     }
 }
 
+/// `REBUILD_VRAM_LAZY=0`: textures and heaps get card pages at allocation again (for comparing runs). Read once.
+pub fn lazy_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("REBUILD_VRAM_LAZY").map_or(true, |v| v.trim() != "0"))
+}
+
+/// Allocations made without card pages (textures, heaps), and their bytes.
+pub static LAZY_ALLOCS: AtomicU64 = AtomicU64::new(0);
+pub static LAZY_BYTES: AtomicU64 = AtomicU64::new(0);
+
 impl rebuild_d3d12x::Memory for Arena {
     fn allocate(&self, bytes: u64, alignment: u64, heap: &rebuild_d3d12x::format::HeapProperties) -> Option<u64> {
+        arena_allocate(bytes, alignment, heap, true)
+    }
+
+    fn allocate_lazy(&self, bytes: u64, alignment: u64, heap: &rebuild_d3d12x::format::HeapProperties) -> Option<u64> {
+        let place = !lazy_on();
+        let at = arena_allocate(bytes, alignment, heap, place)?;
+        if !place {
+            LAZY_ALLOCS.fetch_add(1, Relaxed);
+            LAZY_BYTES.fetch_add(bytes, Relaxed);
+        }
+        Some(at)
+    }
+
+    fn free(&self, address: u64, _bytes: u64) {
+        arena_free(address)
+    }
+
+    fn range(&self, va: u64) -> Option<MemoryRange> {
+        range(va)
+    }
+
+    fn buffer(&self, address: u64, bytes: u64) -> Option<ID3D12Resource> {
+        buffer(address, bytes)
+    }
+}
+
+/// Console memory from the arena; `place`: its GPU-only pages get card pages now (a buffer the GPU may write before
+/// the CPU does), else only when a buffer is made over them ([`buffer`]).
+fn arena_allocate(bytes: u64, alignment: u64, heap: &rebuild_d3d12x::format::HeapProperties, place: bool) -> Option<u64> {
+    {
         let m = MODEL.get()?;
         let kind = kind_of(heap);
         let bytes = bytes.max(1).next_multiple_of(P);
@@ -644,8 +910,11 @@ impl rebuild_d3d12x::Memory for Arena {
                     None
                 }
                 Some(at) => {
-                    // a resource's memory gets its card pages now (the GPU may write it before the CPU does)
-                    m.place_pages(&mut lock(&m.tiles), (at..at + bytes).step_by(PAGE));
+                    // a resource's memory gets its card pages now (the GPU may write it before the CPU does);
+                    // CPU-visible memory always (the ring writes it), a texture's or a heap's only if asked
+                    if place || kind == Kind::Cpu {
+                        m.place_pages(&mut lock(&m.tiles), (at..at + bytes).step_by(PAGE));
+                    }
                     Some(at)
                 }
                 None => None,
@@ -662,8 +931,10 @@ impl rebuild_d3d12x::Memory for Arena {
         ARENA_ALLOCS.fetch_add(1, Relaxed);
         Some(at)
     }
+}
 
-    fn free(&self, address: u64, _bytes: u64) {
+fn arena_free(address: u64) {
+    {
         let Some(m) = MODEL.get() else { return };
         let mut maps = lock(&m.maps);
         let Some((bytes, kind)) = maps.arena.allocs.remove(&address) else { return };
@@ -684,14 +955,55 @@ impl rebuild_d3d12x::Memory for Arena {
             }
         }
     }
+}
 
-    fn range(&self, va: u64) -> Option<MemoryRange> {
-        range(va)
-    }
+// ------------------------------------------------- card pages by key, for crate::mapped's textures
 
-    fn buffer(&self, address: u64, bytes: u64) -> Option<ID3D12Resource> {
-        buffer(address, bytes)
+/// A range of `bytes` of console addresses of our own (the arena's GPU-only memory, no card pages): keys for card
+/// pages nobody else names (`crate::mapped`).
+pub(crate) fn key_range(bytes: u64) -> Option<u64> {
+    let m = MODEL.get()?;
+    let mut maps = lock(&m.maps);
+    let at = m.arena_take(&mut maps, Kind::Gpu, bytes.next_multiple_of(P), P)?;
+    maps.arena.allocs.insert(at, (bytes.next_multiple_of(P), Kind::Gpu));
+    Some(at)
+}
+
+/// The card page behind key page `key` (placed now if it has none). `None`: no card memory left (the budget).
+pub(crate) fn card_for(key: u64) -> Option<u32> {
+    let m = MODEL.get()?;
+    let mut t = lock(&m.tiles);
+    if !t.pages.contains_key(&key) {
+        m.place_pages(&mut t, std::iter::once(key));
     }
+    t.uma.backing(key)
+}
+
+/// Give back key page `key`'s card page.
+pub(crate) fn release_key(key: u64) {
+    if let Some(m) = MODEL.get() {
+        m.retire(&mut lock(&m.tiles), key, key + P);
+    }
+}
+
+/// Map a reserved texture's tiles (on the ring's queue: a queue that waits for the ring is ordered after it).
+pub(crate) fn map_texture_tiles(resource: &ID3D12Resource, tiles: &[rebuild_uma::space::TexTile]) -> Result<(), String> {
+    let m = MODEL.get().ok_or("no memory model")?;
+    lock(&m.tiles).space.map_tiles(resource, tiles)
+}
+
+/// Console address `a` lies in memory the model knows (watched, or the arena).
+pub(crate) fn known(a: u64) -> bool {
+    let Some(m) = MODEL.get() else { return false };
+    let maps = lock(&m.maps);
+    maps.spans.range(..=a).next_back().is_some_and(|(&b, &l)| a < b + l)
+}
+
+/// Card pages in use and allowed, bytes.
+pub fn card_pages() -> Option<(u64, u64)> {
+    let m = MODEL.get()?;
+    let t = lock(&m.tiles);
+    Some((t.uma.card_pages_used() as u64 * P, t.uma.card_pages() as u64 * P))
 }
 
 /// A reserved buffer whose byte 0 is console `address`, on the same card pages (sharing by address): what a
@@ -724,4 +1036,21 @@ pub fn buffer(address: u64, bytes: u64) -> Option<ID3D12Resource> {
     }
     ALIASED.fetch_add(1, Relaxed);
     Some(r)
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::pressure;
+
+    #[test]
+    fn pressure_starts_near_the_budget_and_ends_well_under_it() {
+        const M: u64 = 1 << 20;
+        let budget = 11_000 * M;
+        assert!(!pressure(9_000 * M, budget, false));
+        assert!(pressure(10_700 * M, budget, false), "within 384 MiB of the budget");
+        // hysteresis: stays on until 768 MiB under
+        assert!(pressure(10_400 * M, budget, true));
+        assert!(!pressure(10_200 * M, budget, true));
+        assert!(!pressure(1, 0, true), "no budget known: no pressure");
+    }
 }

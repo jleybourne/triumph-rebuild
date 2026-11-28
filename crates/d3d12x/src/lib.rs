@@ -52,6 +52,7 @@ pub mod slots;
 pub mod thunks;
 pub mod views;
 pub mod vmem;
+pub mod vram;
 
 #[cfg(test)]
 mod tests;

@@ -21,6 +21,12 @@ pub trait Memory: Send + Sync {
     /// two, at least 64 KiB), CPU-addressable at the returned address, which is also its GPU
     /// address. `None`: out of memory.
     fn allocate(&self, bytes: u64, alignment: u64, heap: &HeapProperties) -> Option<u64>;
+    /// As [`Memory::allocate`], for memory the GPU reaches only through host objects made over it (a texture's
+    /// host texture; a heap, whose buffers get their card pages from [`Memory::buffer`]): a model may give it
+    /// addresses only and no card pages of its own, so a texture's memory is not paid for twice.
+    fn allocate_lazy(&self, bytes: u64, alignment: u64, heap: &HeapProperties) -> Option<u64> {
+        self.allocate(bytes, alignment, heap)
+    }
     /// Give back what [`Memory::allocate`] returned.
     fn free(&self, address: u64, bytes: u64);
     /// The range of console GPU memory holding `va` (`ListHost::memory`; every buffer view is
@@ -34,9 +40,10 @@ pub trait Memory: Send + Sync {
     /// A host buffer whose byte 0 is console `address`, sharing its bytes (copies and barriers
     /// name it). `None`: none can be made (no GPU, or an address the model cannot alias).
     fn buffer(&self, address: u64, bytes: u64) -> Option<ID3D12Resource>;
-    /// A host texture for a console texture whose memory is at `address`, if the model keeps
-    /// textures at their addresses (tiles); `None`: this crate makes a committed one.
-    fn texture(&self, _address: u64, _desc: &D3D12_RESOURCE_DESC) -> Option<ID3D12Resource> {
+    /// A host texture for a console texture whose memory is at `address` (`console`: the title's description;
+    /// `host`: the host's), starting in barrier layout `layout`, if the model keeps such textures on its own card
+    /// pages; `None`: this crate makes a committed one.
+    fn texture(&self, _address: u64, _console: &D3D12_RESOURCE_DESC, _host: &D3D12_RESOURCE_DESC, _layout: D3D12_BARRIER_LAYOUT) -> Option<ID3D12Resource> {
         None
     }
     /// A host texture `host` was made for the console texture at `address` (`console`: the title's description,

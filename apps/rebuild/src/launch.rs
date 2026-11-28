@@ -178,6 +178,7 @@ fn device_report() {
                 rebuild_runtime::titlemem::OPEN_FAILED.load(Relaxed)
             );
             println!("{}", rebuild_runtime::memory::report());
+            println!("{}", rebuild_runtime::memory::vram_line());
             println!("cputex    {}", rebuild_runtime::cputex::report());
             println!("bink      {}", rebuild_runtime::bink::report());
             println!("pagemap   {}", rebuild_runtime::pagemap::report());

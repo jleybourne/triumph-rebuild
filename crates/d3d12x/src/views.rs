@@ -219,6 +219,10 @@ pub trait HostDevice: Send + Sync {
     fn resource_in(&self, desc: &D3D12_RESOURCE_DESC, clear: Option<&D3D12_CLEAR_VALUE>, _layout: D3D12_BARRIER_LAYOUT) -> Result<Option<ID3D12Resource>, HRESULT> {
         self.resource(desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_NONE, clear)
     }
+    /// The card bytes a host resource of `desc` takes (`GetResourceAllocationInfo`); 0 with no GPU.
+    fn bytes(&self, _desc: &D3D12_RESOURCE_DESC) -> u64 {
+        0
+    }
     /// A host query heap; `None` with no GPU (the stand-in).
     fn query_heap(&self, _desc: &D3D12_QUERY_HEAP_DESC) -> Result<Option<ID3D12QueryHeap>, HRESULT> {
         Ok(None)
@@ -285,6 +289,15 @@ impl DeviceHost {
         Ok(())
     }
 }
+
+/// System memory the GPU reads over the bus: where a resource goes when the card has no room for it.
+const SYSTEM_HEAP: D3D12_HEAP_PROPERTIES = D3D12_HEAP_PROPERTIES {
+    Type: D3D12_HEAP_TYPE_CUSTOM,
+    CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE,
+    MemoryPoolPreference: D3D12_MEMORY_POOL_L0,
+    CreationNodeMask: 0,
+    VisibleNodeMask: 0,
+};
 
 fn hr(e: windows::core::Error) -> HRESULT {
     e.code()
@@ -385,7 +398,22 @@ impl HostDevice for DeviceHost {
     fn resource(&self, desc: &D3D12_RESOURCE_DESC, heap: D3D12_HEAP_TYPE, flags: D3D12_HEAP_FLAGS, clear: Option<&D3D12_CLEAR_VALUE>) -> Result<Option<ID3D12Resource>, HRESULT> {
         let mut r: Option<ID3D12Resource> = None;
         let state = if heap == D3D12_HEAP_TYPE_UPLOAD { D3D12_RESOURCE_STATE_GENERIC_READ } else if heap == D3D12_HEAP_TYPE_READBACK { D3D12_RESOURCE_STATE_COPY_DEST } else { D3D12_RESOURCE_STATE_COMMON };
-        unsafe { self.device.CreateCommittedResource(&D3D12_HEAP_PROPERTIES { Type: heap, ..Default::default() }, flags, desc, state, clear.map(|c| c as *const _), &mut r) }.map_err(hr)?;
+        let props = if heap == D3D12_HEAP_TYPE_DEFAULT && crate::vram::to_system(desc) {
+            crate::vram::fell_back(desc);
+            SYSTEM_HEAP
+        } else {
+            D3D12_HEAP_PROPERTIES { Type: heap, ..Default::default() }
+        };
+        let made = unsafe { self.device.CreateCommittedResource(&props, flags, desc, state, clear.map(|c| c as *const _), &mut r) };
+        match made {
+            // the card is full: the same resource in system memory (slower to read, but never a null resource the
+            // title would trip on later)
+            Err(e) if heap == D3D12_HEAP_TYPE_DEFAULT && e.code() == E_OUTOFMEMORY => {
+                crate::vram::fell_back(desc);
+                unsafe { self.device.CreateCommittedResource(&SYSTEM_HEAP, flags, desc, state, clear.map(|c| c as *const _), &mut r) }.map_err(hr)?;
+            }
+            m => m.map_err(hr)?,
+        }
         Ok(r)
     }
 
@@ -408,10 +436,27 @@ impl HostDevice for DeviceHost {
             Flags: desc.Flags,
             ..Default::default()
         };
-        let heap = D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() };
+        let heap = if crate::vram::to_system(desc) {
+            crate::vram::fell_back(desc);
+            SYSTEM_HEAP
+        } else {
+            D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() }
+        };
         let mut r: Option<ID3D12Resource> = None;
-        unsafe { d10.CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d1, layout, clear.map(|c| c as *const _), None, None, &mut r) }.map_err(hr)?;
+        match unsafe { d10.CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d1, layout, clear.map(|c| c as *const _), None, None, &mut r) } {
+            // the card is full: system memory (see `resource`)
+            Err(e) if e.code() == E_OUTOFMEMORY => {
+                crate::vram::fell_back(desc);
+                unsafe { d10.CreateCommittedResource3(&SYSTEM_HEAP, D3D12_HEAP_FLAG_NONE, &d1, layout, clear.map(|c| c as *const _), None, None, &mut r) }.map_err(hr)?;
+            }
+            m => m.map_err(hr)?,
+        }
         Ok(r)
+    }
+
+    fn bytes(&self, desc: &D3D12_RESOURCE_DESC) -> u64 {
+        // SAFETY: one description
+        unsafe { self.device.GetResourceAllocationInfo(0, std::slice::from_ref(desc)) }.SizeInBytes
     }
 
     fn query_heap(&self, desc: &D3D12_QUERY_HEAP_DESC) -> Result<Option<ID3D12QueryHeap>, HRESULT> {

@@ -23,7 +23,11 @@ pub mod control;
 #[cfg(windows)]
 pub mod cputex;
 #[cfg(windows)]
+pub mod detile;
+#[cfg(windows)]
 pub mod bink;
+#[cfg(windows)]
+pub mod mapped;
 pub mod pagemap;
 pub mod drives;
 pub mod dxgi;
