@@ -7,8 +7,10 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
-/// Descriptors in the resource heap and the sampler heap.
-pub const HEAP_SLOTS: u32 = 8192;
+/// Descriptors in the resource heap and the sampler heap. The resource heap reaches every index translated code
+/// can name through `sir_vi` (console indices below `CONSOLE_VIEWS` and the null bank after them), so an index a
+/// program computes from its data lands on a view, not past the heap; the recording pass's own slots are last.
+pub const HEAP_SLOTS: u32 = rebuild_sir::lift::CONSOLE_VIEWS + rebuild_sir::lift::NULL_BANK + 56;
 pub const SAMPLER_SLOTS: u32 = 2048;
 
 pub struct Gpu {
@@ -27,6 +29,11 @@ pub struct Gpu {
     inc: usize,
     sinc: usize,
     lost: bool,
+    /// resource-heap slots written since the last `clear_heaps`, and whether the whole heap was cleared once
+    dirty: std::cell::RefCell<std::collections::BTreeSet<u32>>,
+    cleared: std::cell::Cell<bool>,
+    /// the real GPU (else WARP)
+    pub card: bool,
 }
 
 /// A borrowed resource pointer for descriptor structs that hold one without owning it.
@@ -124,7 +131,7 @@ impl Gpu {
             let rtv_inc = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) as usize;
             let inc = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) as usize;
             let sinc = device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER) as usize;
-            let g = Gpu { info, device, queue, alloc, list, fence, value: 0, heap, samplers, rtvs, dsvs, rtv_inc, inc, sinc, lost: false };
+            let g = Gpu { info, device, queue, alloc, list, fence, value: 0, heap, samplers, rtvs, dsvs, rtv_inc, inc, sinc, lost: false, dirty: Default::default(), cleared: Default::default(), card };
             g.clear_heaps();
             Ok(g)
         }
@@ -138,9 +145,12 @@ impl Gpu {
             Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
             Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 { Texture2D: D3D12_TEX2D_SRV { MipLevels: 1, ..Default::default() } },
         };
-        for k in 0..HEAP_SLOTS {
-            unsafe { self.device.CreateShaderResourceView(None, Some(&null), self.slot(k)) };
+        // the whole heap once, then only the slots written since (the heap has ~750,000)
+        let dirty: Vec<u32> = if self.cleared.get() { std::mem::take(&mut *self.dirty.borrow_mut()).into_iter().collect() } else { (0..HEAP_SLOTS).collect() };
+        for k in dirty {
+            unsafe { self.device.CreateShaderResourceView(None, Some(&null), self.slot_handle(k)) };
         }
+        self.cleared.set(true);
         for k in 0..SAMPLER_SLOTS {
             self.sampler(k, false);
         }
@@ -197,7 +207,13 @@ impl Gpu {
         unsafe { self.dsvs.GetCPUDescriptorHandleForHeapStart() }
     }
 
+    /// Resource-heap slot `k`, to write a view into (remembered, so the next `clear_heaps` resets it).
     pub fn slot(&self, k: u32) -> D3D12_CPU_DESCRIPTOR_HANDLE {
+        self.dirty.borrow_mut().insert(k);
+        self.slot_handle(k)
+    }
+
+    fn slot_handle(&self, k: u32) -> D3D12_CPU_DESCRIPTOR_HANDLE {
         D3D12_CPU_DESCRIPTOR_HANDLE { ptr: unsafe { self.heap.GetCPUDescriptorHandleForHeapStart() }.ptr + k as usize * self.inc }
     }
 

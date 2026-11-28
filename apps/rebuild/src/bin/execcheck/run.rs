@@ -1,7 +1,7 @@
 //! One program, ours and the oracle's, on the same inputs: the plan (user data, heap slots and their views),
 //! the resources, the runs, and the word-by-word comparison.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rebuild_pipelines::layout::{self, RootDesc, Sampler, StageLayout, Visibility};
 use rebuild_shader::native::{ResourceType, RootType};
@@ -65,9 +65,13 @@ pub struct Plan {
     pub notes: Vec<&'static str>,
     /// raw buffers read by index: the record size the shadow table gives (the access's size, as the oracle assumes)
     pub strides: BTreeMap<u32, u32>,
+    /// raw buffer slots the oracle reads as constant buffers: the title's root signature names the range a CBV
+    /// (the fork's translation reads a buffer through a CBV range as a CBV; ours reads every heap buffer raw)
+    pub oracle_cbv: BTreeSet<u32>,
 }
 
-pub fn plan(p: &Prog) -> Result<Plan, String> {
+/// `record`: dynamic indices are left to the recording pass ([`super::record`]): no region is filled for them.
+pub fn plan(p: &Prog, record: bool) -> Result<Plan, String> {
     let mut pl = Plan::default();
     // each table at its own place: resource tables 256 slots apart, sampler tables 64
     let mut table_base: BTreeMap<u8, (Heap, u32)> = BTreeMap::new();
@@ -126,6 +130,7 @@ pub fn plan(p: &Prog) -> Result<Plan, String> {
                 }
                 put(map, slot, u.view)?;
             }
+            None if record => pl.notes.push("recorded indices"),
             None => {
                 pl.notes.push("dynamic index");
                 match dynamic.get(&(heap, base)) {
@@ -138,6 +143,13 @@ pub fn plan(p: &Prog) -> Result<Plan, String> {
                         dynamic.insert((heap, base), u.view);
                     }
                 }
+            }
+        }
+        if let (Some(off), View::Raw, Heap::Resource) = (u.byte_off, u.view, heap) {
+            let dword = u32::try_from(off).unwrap_or(0) / 4;
+            let range = p.used.iter().filter(|r| r.root == RootType::Table && r.user_data == u.user_data && r.table_offset_dwords <= dword).max_by_key(|r| r.table_offset_dwords);
+            if range.is_some_and(|r| r.kind == ResourceType::Cbv) {
+                pl.oracle_cbv.insert(((base * 32) as i64 + off as i64) as u32 / 32);
             }
         }
         if u.shadow != 0 {
@@ -165,7 +177,7 @@ pub fn plan(p: &Prog) -> Result<Plan, String> {
         }
     }
     // an index computed from user data must land in the filled region: constants are small integers in every set
-    if !dynamic.is_empty() {
+    if !dynamic.is_empty() || pl.notes.contains(&"recorded indices") {
         for &d in &consts {
             for s in 0..SETS {
                 pl.ud[s as usize][d as usize] = word(0, 7 + s as u64, d as u64);
@@ -187,7 +199,7 @@ fn same_kind(a: View, b: View) -> bool {
 }
 
 /// Two reads of one descriptor: a load and a store of the same raw buffer are one UAV.
-fn merge(a: View, b: View) -> Result<View, String> {
+pub fn merge(a: View, b: View) -> Result<View, String> {
     Ok(match (a, b) {
         _ if a == b => a,
         (View::Raw, View::RwRaw) | (View::RwRaw, View::Raw) => View::RwRaw,
@@ -323,7 +335,8 @@ fn make(g: &Gpu, view: View, set: u32, salt: u64) -> Result<Res, String> {
     let uav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     match view {
         View::Cbv => g.resource(buffer_desc(BUFFER_BYTES, false), D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, false, words(BUFFER_BYTES as usize / 4)),
-        View::Raw | View::Typed => g.resource(buffer_desc(BUFFER_BYTES, false), srv, false, words(BUFFER_BYTES as usize / 4)),
+        // a raw buffer may also be the oracle's CBV (`Plan::oracle_cbv`)
+        View::Raw | View::Typed => g.resource(buffer_desc(BUFFER_BYTES, false), srv | D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, false, words(BUFFER_BYTES as usize / 4)),
         View::RwRaw | View::RwTyped => g.resource(buffer_desc(BUFFER_BYTES, true), uav, true, words(BUFFER_BYTES as usize / 4)),
         View::Tex(dim) => {
             let (d, _) = tex_desc(dim, false);
@@ -340,14 +353,18 @@ fn make(g: &Gpu, view: View, set: u32, salt: u64) -> Result<Res, String> {
 }
 
 fn describe(g: &Gpu, slot: u32, b: &Bound) {
+    describe_as(g, slot, &b.res, b.view);
+}
+
+fn describe_as(g: &Gpu, slot: u32, res: &Res, view: View) {
     unsafe {
-        match b.view {
+        match view {
             View::Cbv => {
-                let d = D3D12_CONSTANT_BUFFER_VIEW_DESC { BufferLocation: b.res.r.GetGPUVirtualAddress(), SizeInBytes: BUFFER_BYTES as u32 };
+                let d = D3D12_CONSTANT_BUFFER_VIEW_DESC { BufferLocation: res.r.GetGPUVirtualAddress(), SizeInBytes: BUFFER_BYTES as u32 };
                 g.device.CreateConstantBufferView(Some(&d), g.slot(slot));
             }
-            View::Raw | View::Typed | View::Tex(_) => g.device.CreateShaderResourceView(&b.res.r, Some(&srv_desc(b.view)), g.slot(slot)),
-            View::RwRaw | View::RwTyped | View::RwTex(_) => g.device.CreateUnorderedAccessView(&b.res.r, None, Some(&uav_desc(b.view)), g.slot(slot)),
+            View::Raw | View::Typed | View::Tex(_) => g.device.CreateShaderResourceView(&res.r, Some(&srv_desc(view)), g.slot(slot)),
+            View::RwRaw | View::RwTyped | View::RwTex(_) => g.device.CreateUnorderedAccessView(&res.r, None, Some(&uav_desc(view)), g.slot(slot)),
             View::Sampler | View::SamplerCmp => {}
         }
     }
@@ -457,7 +474,211 @@ impl Diff {
     }
 }
 
-/// Runs a compute program and the oracle's on every input set.
+/// What one side's run needs besides its pipeline: the stage's draw or dispatch.
+struct Draw<'a> {
+    cs: bool,
+    vsetup: Option<&'a super::vs::Setup>,
+    targets: &'a [super::ps::Target],
+    shadow: &'a ID3D12Resource,
+    groups: [u32; 3],
+}
+
+/// The resources of one input set: one per slot (a dynamic region shares one per view), then the targets (and
+/// for a vertex program the vertex and stream-output buffers).
+fn resources(g: &Gpu, pl: &Plan, set: u32, d: &Draw) -> Result<(Vec<(Vec<u32>, Bound)>, Vec<Res>), (&'static str, String)> {
+    let mut bound: Vec<(Vec<u32>, Bound)> = Vec::new();
+    let mut by_view: BTreeMap<View, usize> = BTreeMap::new();
+    let dynamic = pl.notes.contains(&"dynamic index");
+    for (slot, v) in &pl.slots {
+        if dynamic {
+            if let Some(&k) = by_view.get(v) {
+                bound[k].0.push(*slot);
+                continue;
+            }
+        }
+        let res = make(g, *v, set, *slot as u64).map_err(|e| ("input resource", e))?;
+        by_view.insert(*v, bound.len());
+        bound.push((vec![*slot], Bound { res, view: *v }));
+    }
+    let mut tres = super::ps::make_targets(g, d.targets, set).map_err(|e| ("render target", e))?;
+    if let Some(st) = d.vsetup {
+        let (vb, so) = super::vs::make(g, st, set).map_err(|e| ("vertex buffers", e))?;
+        tres.push(vb);
+        tres.push(so);
+    }
+    Ok((bound, tres))
+}
+
+/// The null bank after `CONSOLE_VIEWS` (`rebuild_sir::lift::NullKind`): a null view of each type translated code
+/// declares, where `sir_vi` sends an index past the console range.
+fn null_bank(g: &Gpu) {
+    use rebuild_sir::lift::{NullKind, CONSOLE_VIEWS};
+    for k in NullKind::all() {
+        let slot = g.slot(CONSOLE_VIEWS + k.slot());
+        let (srv, uav) = match k {
+            NullKind::Raw => (Some(View::Raw), None),
+            NullKind::Typed => (Some(View::Typed), None),
+            NullKind::Tex(d) => (Some(View::Tex(d)), None),
+            NullKind::RwRaw => (None, Some((View::RwRaw, None))),
+            NullKind::RwTyped => (None, Some((View::RwTyped, None))),
+            NullKind::RwTex(d) => (None, Some((View::RwTex(if d == 3 { 5 } else { d }), None))),
+            NullKind::RwTexUint(d) => (None, Some((View::RwTex(if d == 3 { 5 } else { d }), Some(DXGI_FORMAT_R32_UINT)))),
+        };
+        unsafe {
+            if let Some(v) = srv {
+                g.device.CreateShaderResourceView(None, Some(&srv_desc(v)), slot);
+            }
+            if let Some((v, f)) = uav {
+                let mut d = uav_desc(v);
+                if let Some(f) = f {
+                    d.Format = f;
+                }
+                g.device.CreateUnorderedAccessView(None, None, Some(&d), slot);
+            }
+        }
+    }
+}
+
+/// The heaps for a plan: cleared, then every slot's view and sampler.
+fn descriptors(g: &Gpu, pl: &Plan, bound: &[(Vec<u32>, Bound)]) {
+    g.clear_heaps();
+    null_bank(g);
+    for (slots, b) in bound {
+        for s in slots {
+            describe(g, *s, b);
+        }
+    }
+    for (s, v) in &pl.sampler_slots {
+        g.sampler(*s, *v == View::SamplerCmp);
+    }
+}
+
+/// Records one side's draw or dispatch (between `begin` and `end`).
+/// `extra`: a further root SRV (parameter, buffer) the side's root signature has (the oracle's live-slot table).
+fn record_draw(g: &Gpu, d: &Draw, pso: &ID3D12PipelineState, rs: &ID3D12RootSignature, ud: &[u32; 16], tres: &[Res], extra: Option<(u32, &ID3D12Resource)>) {
+    unsafe {
+        let l = &g.list;
+        l.SetDescriptorHeaps(&[Some(g.heap.clone()), Some(g.samplers.clone())]);
+        l.SetPipelineState(pso);
+        let ud = ud.as_ptr() as *const _;
+        if d.cs {
+            l.SetComputeRootSignature(rs);
+            l.SetComputeRoot32BitConstants(layout::param::CS_USER_DATA, 16, ud, 0);
+            l.SetComputeRootShaderResourceView(layout::param::CS_SHADOW, d.shadow.GetGPUVirtualAddress());
+            if let Some((k, b)) = extra {
+                l.SetComputeRootShaderResourceView(k, b.GetGPUVirtualAddress());
+            }
+            l.Dispatch(d.groups[0], d.groups[1], d.groups[2]);
+        } else {
+            l.SetGraphicsRootSignature(rs);
+            let user = if d.vsetup.is_some() { layout::param::VS_USER_DATA } else { layout::param::PS_USER_DATA };
+            l.SetGraphicsRoot32BitConstants(user, 16, ud, 0);
+            l.SetGraphicsRootShaderResourceView(layout::param::GFX_SHADOW, d.shadow.GetGPUVirtualAddress());
+            if let Some((k, b)) = extra {
+                l.SetGraphicsRootShaderResourceView(k, b.GetGPUVirtualAddress());
+            }
+            match d.vsetup {
+                Some(st) => super::vs::draw(g, st, &tres[0], &tres[1]),
+                None => super::ps::draw(g, d.targets, tres),
+            }
+        }
+    }
+}
+
+/// The shadow table for a plan: raw buffers read by index hold records of the access's size (what the oracle
+/// assumes), as many as fit; each slot's alternate (the view translated code reads at the entry's third word) is
+/// the slot itself; the lead (fourth word) is 0.
+fn shadow_table(pl: &Plan) -> Vec<u8> {
+    use rebuild_sir::lift::{CONSOLE_VIEWS, PAGE_TABLE_BYTE, PAGE_TABLE_PAGES, VIEW_PAGE_SHIFT};
+    // the whole shadow buffer translated code reads: an entry per console index up to CONSOLE_VIEWS, then the
+    // page table (`rebuild_sir::lift::page_index`), here every page at its own index (the harness heap is the
+    // console heap); pages past CONSOLE_VIEWS have no host page
+    let mut shadow = vec![0u8; PAGE_TABLE_BYTE as usize + PAGE_TABLE_PAGES as usize * 4];
+    for page in 0..PAGE_TABLE_PAGES {
+        let host = page << VIEW_PAGE_SHIFT;
+        let v = if host < CONSOLE_VIEWS { host } else { CONSOLE_VIEWS };
+        let at = PAGE_TABLE_BYTE as usize + page as usize * 4;
+        shadow[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    for (slot, v) in &pl.slots {
+        let at = *slot as usize * 16;
+        shadow[at + 8..at + 12].copy_from_slice(&slot.to_le_bytes());
+        if matches!(v, View::Raw | View::RwRaw) || (*v == View::Cbv && pl.strides.contains_key(slot)) {
+            let stride = pl.strides.get(slot).copied().unwrap_or(16);
+            shadow[at..at + 4].copy_from_slice(&stride.to_le_bytes());
+            shadow[at + 4..at + 8].copy_from_slice(&((BUFFER_BYTES / stride as u64) as u32).to_le_bytes());
+        }
+    }
+    shadow
+}
+
+/// The recording pass ([`super::record`]): our instrumented program on every input set, until the slots it names
+/// settle; they join the plan.
+/// `at`: the output folder and hash, so a set that never finishes is named (`current`) and `skip`ped next time.
+#[allow(clippy::too_many_arguments)]
+fn record_plan(g: &mut Gpu, pl: &mut Plan, rec_pso: &ID3D12PipelineState, rs: &ID3D12RootSignature, d: &Draw, kinds: &[View], at: (&std::path::Path, &str), skip: &[u32]) -> Result<(), (&'static str, String)> {
+    use super::record::*;
+    for _round in 0..ROUNDS {
+        let mut grew = false;
+        for set in (0..SETS).filter(|s| !skip.contains(s)) {
+            let _ = std::fs::write(super::shard_file(at.0, "current"), format!("{} {set}", at.1));
+            let (bound, tres) = resources(g, pl, set, d)?;
+            // a dummy of every kind the program names, the known table, the record
+            let mut dummies = Vec::new();
+            for v in kinds.iter().filter(|v| !matches!(v, View::Sampler | View::SamplerCmp)) {
+                let res = make(g, *v, set, 0xD0 + bit(*v) as u64).map_err(|e| ("input resource", e))?;
+                dummies.push((DUMMY_BASE + bit(*v), Bound { res, view: *v }));
+            }
+            let known = g
+                .resource(buffer_desc(WORDS as u64 * 4, false), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, false, known(pl))
+                .map_err(|e| ("known table", e))?;
+            let rec = g.resource(rec_desc(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true, vec![0u8; WORDS as usize * 4]).map_err(|e| ("record", e))?;
+            let shadow = g.upload_buffer(&shadow_table(pl)).map_err(|e| ("shadow table", e))?;
+            let d = Draw { shadow: &shadow, ..*d };
+            descriptors(g, pl, &bound);
+            for (s, b) in &dummies {
+                describe(g, *s, b);
+            }
+            unsafe {
+                let raw = |n: u32| D3D12_SHADER_RESOURCE_VIEW_DESC {
+                    Format: DXGI_FORMAT_R32_TYPELESS,
+                    ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+                    Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                    Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 { Buffer: D3D12_BUFFER_SRV { FirstElement: 0, NumElements: n, StructureByteStride: 0, Flags: D3D12_BUFFER_SRV_FLAG_RAW } },
+                };
+                g.device.CreateShaderResourceView(&known.r, Some(&raw(WORDS)), g.slot(KNOWN_SLOT));
+                let u = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                    Format: DXGI_FORMAT_R32_TYPELESS,
+                    ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+                    Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 { Buffer: D3D12_BUFFER_UAV { FirstElement: 0, NumElements: WORDS, StructureByteStride: 0, CounterOffsetInBytes: 0, Flags: D3D12_BUFFER_UAV_FLAG_RAW } },
+                };
+                g.device.CreateUnorderedAccessView(&rec.r, None, Some(&u), g.slot(REC_SLOT));
+            }
+            for (s, v) in [(SAMPLER_DUMMY, false), (SAMPLER_DUMMY + 1, true)] {
+                g.sampler(s, v);
+            }
+            let all: Vec<&Res> = bound.iter().map(|(_, b)| &b.res).chain(dummies.iter().map(|(_, b)| &b.res)).chain(tres.iter()).chain([&known, &rec]).collect();
+            g.begin();
+            for r in &all {
+                g.upload(r);
+            }
+            record_draw(g, &d, rec_pso, rs, &pl.ud[set as usize], &tres, None);
+            g.download(&rec);
+            g.end().map_err(|e| ("recording pass lost the device", e))?;
+            if g.lost() {
+                return Err(("recording pass lost the device", String::new()));
+            }
+            let words = g.read(&rec);
+            grew |= absorb(pl, &words).map_err(|e| ("untested", e))?;
+        }
+        if !grew {
+            return Ok(());
+        }
+    }
+    Err(("untested", format!("recorded indices still growing after {} rounds", super::record::ROUNDS)))
+}
+
+/// Runs a program and the oracle's on every input set.
 pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &[u32]) -> Row {
     let trace = std::env::var_os("REBUILD_EXEC_TRACE").is_some();
     let step = |s: &str| {
@@ -465,15 +686,34 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
             eprintln!("execcheck {}: {s}", p.hash);
         }
     };
-    let row = |verdict: &'static str, reason: String, detail: String| Row { hash: p.hash.clone(), stage: p.stage, single: p.single, verdict, reason, detail };
+    let row = |verdict: &'static str, reason: String, detail: String| Row { hash: p.hash.clone(), stage: p.stage, single: p.single, wave: p.wave, verdict, reason, detail };
     if o.wave > 32 {
         return row("untested", format!("the oracle needs wave size {} (no adapter here runs it)", o.wave), String::new());
     }
-    if o.root_views > 0 {
+    if o.root_views > 0 && !o.live_table {
         return row("untested", "the oracle binds root views".into(), String::new());
     }
-    let pl = match plan(p) {
-        Ok(pl) => pl,
+    // ours declares a wave size (wave-wide compute: native wave32, or wave64 doubled onto 32 lanes); WARP's waves
+    // are 4 lanes, so the pipeline cannot be made here
+    if let Some(at) = p.src.find("[WaveSize(") {
+        let n = p.src[at + 10..].split(')').next().unwrap_or("?");
+        if !g.card {
+            return row("untested", format!("ours needs wave size {n} (WARP runs 4 lanes)"), String::new());
+        }
+    }
+    // a dynamic index over several kinds of view: the slots come from the recording pass
+    let (mut pl, recording) = match plan(p, false) {
+        Ok(pl) => (pl, None),
+        Err(e) if e == "dynamic descriptor index over mixed views" && std::env::var_os("REBUILD_EXEC_NORECORD").is_none() => {
+            let pl = match plan(p, true) {
+                Ok(pl) => pl,
+                Err(e) => return row("untested", e, String::new()),
+            };
+            match super::record::instrument(&p.src) {
+                Ok(r) => (pl, Some(r)),
+                Err(e) => return row("untested", format!("dynamic descriptor index over mixed views; not instrumented: {e}"), String::new()),
+            }
+        }
         Err(e) => return row("untested", e, String::new()),
     };
     step(&format!("plan {:?}", p.uses));
@@ -495,7 +735,12 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
     } else {
         Visibility::Pixel
     };
-    let oracle_root = oracle_root(&o.statics, &ours_root, vis);
+    let mut oracle_root = oracle_root(&o.statics, &ours_root, vis);
+    // the fork's live-slot table (t255, space1): a root SRV of its own
+    let live_param = o.live_table.then(|| {
+        oracle_root.params.push(layout::Param::Srv { register: 255, space: 1, vis });
+        oracle_root.params.len() as u32 - 1
+    });
     let roots = [&ours_root, &oracle_root].map(|r| rebuild_pipelines::d3d::serialize(r).and_then(|b| g.root_signature(&b)));
     let (ours_rs, oracle_rs) = match roots {
         [Ok(a), Ok(b)] => (a, b),
@@ -503,8 +748,33 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
         [_, Err(e)] => return row("error", "the oracle's root signature refused".into(), e),
     };
     step("roots");
-    let targets = if cs { Vec::new() } else { super::ps::targets_of(&p.outputs) };
+    let mut targets = if cs { Vec::new() } else { super::ps::targets_of(&p.outputs) };
+    // a pixel program with no outputs (an alpha test that only discards): a depth buffer the rasteriser writes
+    // shows which pixels it kept, the program's one effect
+    let coverage = p.stage == "ps" && targets.is_empty();
+    if coverage {
+        targets.push(super::ps::Target::Depth);
+    }
+    let (mut kept, mut dropped) = (false, false);
     let mut vsetup = None;
+    let mut feed = Vec::new();
+    // the instrumented program (the recording pass), compiled beside ours
+    let rec_dxil = match &recording {
+        None => None,
+        Some((src, _)) => {
+            let stage = if cs {
+                rebuild_pipelines::Stage::Cs
+            } else if vsx {
+                rebuild_pipelines::Stage::Vs
+            } else {
+                rebuild_pipelines::Stage::Ps
+            };
+            match compile_rec(src, stage, out, &p.hash) {
+                Ok(b) => Some(b),
+                Err(e) => return row("error", "the recording pass did not compile".into(), e),
+            }
+        }
+    };
     let pipelines = if cs {
         (g.compute(&ours_rs, &p.dxil), g.compute(&oracle_rs, &o.dxil))
     } else if vsx {
@@ -520,42 +790,80 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
         vsetup = Some(st);
         r
     } else {
-        let vs = match super::ps::feed_vs(&p.src).and_then(|src| super::ps::compile_vs(&src, out, &p.hash)) {
+        feed = match super::ps::feed_vs(&p.src).and_then(|src| super::ps::compile_vs(&src, out, &p.hash)) {
             Ok(v) => v,
             Err(e) => return row("untested", "no feeding vertex shader".into(), e),
         };
-        (super::ps::pipeline(g, &ours_rs, &vs, &p.dxil, &targets), super::ps::pipeline(g, &oracle_rs, &vs, &o.dxil, &targets))
+        let mut theirs = super::ps::pipeline(g, &oracle_rs, &feed, &o.dxil, &targets);
+        if theirs.is_err() {
+            // the oracle packs its inputs into other registers: its own feeding vertex shader, built from its input
+            // signature (the same value per semantic and component as ours)
+            let oracle_in = rebuild_shader::Container::parse(&o.dxil)
+                .ok()
+                .and_then(|c| c.part(rebuild_shader::FourCC::ISG1).map(|x| rebuild_shader::signature::parse(x.data).unwrap_or_default()))
+                .unwrap_or_default();
+            let own = super::ps::oracle_struct(&oracle_in, &p.src)
+                .and_then(|st| super::ps::feed_vs(&st))
+                .and_then(|src| super::ps::compile_vs(&src, out, &format!("{}.oracle", p.hash)));
+            match own {
+                Ok(f) => theirs = super::ps::pipeline(g, &oracle_rs, &f, &o.dxil, &targets),
+                Err(e) => theirs = Err(format!("the oracle's feeding vertex shader: {e}")),
+            }
+        }
+        (super::ps::pipeline(g, &ours_rs, &feed, &p.dxil, &targets), theirs)
     };
     let (ours, theirs) = match pipelines {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) => return row("error", "our pipeline refused".into(), e),
         // a pixel shader: the one feeding vertex shader (built from our input struct) links to ours; the oracle packs
         // its inputs into other registers (all sampled refusals were this linkage error)
-        (_, Err(e)) if p.stage == "ps" => return row("untested", "the oracle packs its pixel inputs differently (the feeding vertex shader links to ours only)".into(), e),
+        (_, Err(e)) if p.stage == "ps" => return row("untested", "the oracle's pixel pipeline refused (E_INVALIDARG with no debug message; its signatures match ours)".into(), e),
         (_, Err(e)) => return row("error", "the oracle's pipeline refused".into(), e),
     };
     step("pipelines");
-    // the shadow table: raw buffers read by index hold records of the access's size (what the oracle assumes),
-    // as many as fit
-    let mut shadow = vec![0u8; super::gpu::HEAP_SLOTS as usize * 16];
-    for (slot, v) in &pl.slots {
-        // each slot holds the view the program reads it as, so a buffer's alternate (its own kind: the UAV or typed
-        // view translated code reads at the entry's third word) is the slot itself; the lead (fourth word) is 0
-        let at = *slot as usize * 16;
-        shadow[at + 8..at + 12].copy_from_slice(&slot.to_le_bytes());
-        if matches!(v, View::Raw | View::RwRaw) || (*v == View::Cbv && pl.strides.contains_key(slot)) {
-            let stride = pl.strides.get(slot).copied().unwrap_or(16);
-            let at = *slot as usize * 16;
-            shadow[at..at + 4].copy_from_slice(&stride.to_le_bytes());
-            shadow[at + 4..at + 8].copy_from_slice(&((BUFFER_BYTES / stride as u64) as u32).to_le_bytes());
-        }
-    }
-    let shadow = match g.upload_buffer(&shadow) {
+    let t = p.threads;
+    let groups = [(64 / t[0].max(1)).clamp(1, 4), (64 / t[1].max(1)).clamp(1, 4), 1];
+    let placeholder = match g.upload_buffer(&[0u8; 256]) {
         Ok(b) => b,
         Err(e) => return row("error", "shadow table".into(), e),
     };
-    let t = p.threads;
-    let groups = [(64 / t[0].max(1)).clamp(1, 4), (64 / t[1].max(1)).clamp(1, 4), 1];
+    if let (Some(dxil), Some((_, kinds))) = (&rec_dxil, &recording) {
+        let rec_pso = if cs {
+            g.compute(&ours_rs, dxil)
+        } else if let Some(st) = &vsetup {
+            super::vs::pipeline(g, &ours_rs, dxil, st)
+        } else {
+            super::ps::pipeline(g, &ours_rs, &feed, dxil, &targets)
+        };
+        let rec_pso = match rec_pso {
+            Ok(x) => x,
+            Err(e) => return row("error", "the recording pass's pipeline refused".into(), e),
+        };
+        let d = Draw { cs, vsetup: vsetup.as_ref(), targets: &targets, shadow: &placeholder, groups };
+        if let Err((what, e)) = record_plan(g, &mut pl, &rec_pso, &ours_rs, &d, kinds, (out, &p.hash), skip) {
+            return if what == "untested" { row("untested", e, String::new()) } else { row("crash", what.into(), e) };
+        }
+        step(&format!("recorded {} slots", pl.slots.len()));
+    }
+    let shadow = match g.upload_buffer(&shadow_table(&pl)) {
+        Ok(b) => b,
+        Err(e) => return row("error", "shadow table".into(), e),
+    };
+    let draw = Draw { cs, vsetup: vsetup.as_ref(), targets: &targets, shadow: &shadow, groups };
+    // the oracle's live-slot table: a dword per heap slot (it clamps the index to 2^21 - 1), 1 where a view is
+    let live = match live_param {
+        None => None,
+        Some(k) => {
+            let mut t = vec![0u32; 1 << 21];
+            for s in pl.slots.keys() {
+                t[*s as usize] = 1;
+            }
+            match g.upload_buffer(&bytes_of(t.into_iter())) {
+                Ok(b) => Some((k, b)),
+                Err(e) => return row("error", "live-slot table".into(), e),
+            }
+        }
+    };
     let mut diff = Diff::default();
     let mut per_set = Vec::new();
     let mut racing = false;
@@ -564,49 +872,13 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
             per_set.push(format!("set{set} did not complete"));
             continue;
         }
-        let _ = std::fs::write(out.join("current"), format!("{} {set}", p.hash));
-        // one resource per slot (a dynamic region shares one per view)
-        let mut bound: Vec<(Vec<u32>, Bound)> = Vec::new();
-        let mut by_view: BTreeMap<View, usize> = BTreeMap::new();
-        let dynamic = pl.notes.contains(&"dynamic index");
-        for (slot, v) in &pl.slots {
-            if dynamic {
-                if let Some(&k) = by_view.get(v) {
-                    bound[k].0.push(*slot);
-                    continue;
-                }
-            }
-            match make(g, *v, set, *slot as u64) {
-                Ok(res) => {
-                    by_view.insert(*v, bound.len());
-                    bound.push((vec![*slot], Bound { res, view: *v }));
-                }
-                Err(e) => return row("error", "input resource".into(), e),
-            }
-        }
-        let mut tres = match super::ps::make_targets(g, &targets, set) {
-            Ok(t) => t,
-            Err(e) => return row("error", "render target".into(), e),
+        let _ = std::fs::write(super::shard_file(out, "current"), format!("{} {set}", p.hash));
+        let (bound, tres) = match resources(g, &pl, set, &draw) {
+            Ok(x) => x,
+            Err((what, e)) => return row("error", what.into(), e),
         };
-        if let Some(st) = &vsetup {
-            match super::vs::make(g, st, set) {
-                Ok((vb, so)) => {
-                    tres.push(vb);
-                    tres.push(so);
-                }
-                Err(e) => return row("error", "vertex buffers".into(), e),
-            }
-        }
         step("resources");
-        g.clear_heaps();
-        for (slots, b) in &bound {
-            for s in slots {
-                describe(g, *s, b);
-            }
-        }
-        for (s, v) in &pl.sampler_slots {
-            g.sampler(*s, *v == View::SamplerCmp);
-        }
+        descriptors(g, &pl, &bound);
         step("descriptors");
         let all: Vec<&Res> = bound.iter().map(|(_, b)| &b.res).chain(tres.iter()).collect();
         let mut outs: Vec<Vec<Vec<u8>>> = Vec::new();
@@ -617,32 +889,21 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
                 break;
             }
             let (pso, rs) = if side == 1 { (&theirs, &oracle_rs) } else { (&ours, &ours_rs) };
+            if !pl.oracle_cbv.is_empty() && side > 0 {
+                // the oracle reads these slots as CBVs over the same bytes; ours as raw SRVs
+                for (slots, b) in &bound {
+                    for s in slots.iter().filter(|s| pl.oracle_cbv.contains(s)) {
+                        let view = if side == 1 { View::Cbv } else { b.view };
+                        describe_as(g, *s, &b.res, view);
+                    }
+                }
+            }
             g.begin();
             for r in &all {
                 g.upload(r);
             }
-            unsafe {
-                let l = &g.list;
-                l.SetDescriptorHeaps(&[Some(g.heap.clone()), Some(g.samplers.clone())]);
-                l.SetPipelineState(pso);
-                let ud = pl.ud[set as usize].as_ptr() as *const _;
-                if cs {
-                    l.SetComputeRootSignature(rs);
-                    l.SetComputeRoot32BitConstants(layout::param::CS_USER_DATA, 16, ud, 0);
-                    l.SetComputeRootShaderResourceView(layout::param::CS_SHADOW, shadow.GetGPUVirtualAddress());
-                    l.Dispatch(groups[0], groups[1], groups[2]);
-                } else if let Some(st) = &vsetup {
-                    l.SetGraphicsRootSignature(rs);
-                    l.SetGraphicsRoot32BitConstants(layout::param::VS_USER_DATA, 16, ud, 0);
-                    l.SetGraphicsRootShaderResourceView(layout::param::GFX_SHADOW, shadow.GetGPUVirtualAddress());
-                    super::vs::draw(g, st, &tres[0], &tres[1]);
-                } else {
-                    l.SetGraphicsRootSignature(rs);
-                    l.SetGraphicsRoot32BitConstants(layout::param::PS_USER_DATA, 16, ud, 0);
-                    l.SetGraphicsRootShaderResourceView(layout::param::GFX_SHADOW, shadow.GetGPUVirtualAddress());
-                    super::ps::draw(g, &targets, &tres);
-                }
-            }
+            let extra = if side == 1 { live.as_ref().map(|(k, b)| (*k, b)) } else { None };
+            record_draw(g, &draw, pso, rs, &pl.ud[set as usize], &tres, extra);
             for r in &all {
                 g.download(r);
             }
@@ -662,6 +923,8 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
             racing = true;
         }
         per_set.push(format!("set{set} {}/{}w {}d", d.changed, d.words, d.differ));
+        kept |= d.changed > 0;
+        dropped |= d.changed < d.words;
         diff.words += d.words;
         diff.changed += d.changed;
         diff.differ += d.differ;
@@ -673,7 +936,14 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
             diff.first = d.first.map(|(r, i, x, y)| (set as usize * 1000 + r, i, x, y));
         }
     }
-    let (verdict, mut reason) = diff.verdict();
+    let (mut verdict, mut reason) = diff.verdict();
+    if coverage {
+        pl.notes.push("coverage only");
+        // only coverage to compare: it counts when some set both kept and discarded pixels
+        if verdict == "match" && !(kept && dropped) {
+            (verdict, reason) = ("vacuous", "coverage only, and the sets never both keep and discard pixels".into());
+        }
+    }
     if verdict == "differ" && racing {
         reason = format!("racing writes (our own runs differ); {reason}");
     }
@@ -688,8 +958,22 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
     }
     if !pl.notes.is_empty() {
         let mut n = pl.notes.clone();
+        n.sort();
         n.dedup();
         detail += &format!(" [{}]", n.join(" "));
     }
     row(verdict, reason, detail)
+}
+
+/// Compiles the recording pass's HLSL (cached beside our program).
+fn compile_rec(src: &str, stage: rebuild_pipelines::Stage, out: &std::path::Path, hash: &str) -> Result<Vec<u8>, String> {
+    let hl = out.join(format!("{hash}.rec.{}.hlsl", stage.name()));
+    let obj = out.join(format!("{hash}.rec.{}.dxil", stage.name()));
+    if std::fs::read_to_string(&hl).is_ok_and(|old| old == src) && obj.exists() {
+        return std::fs::read(&obj).map_err(|e| e.to_string());
+    }
+    std::fs::write(&hl, src).map_err(|e| e.to_string())?;
+    let dxc = super::dxc().ok_or("no dxc")?;
+    rebuild_pipelines::translate::compile_file(&dxc, stage, &hl, &obj)?;
+    std::fs::read(&obj).map_err(|e| e.to_string())
 }

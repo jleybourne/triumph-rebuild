@@ -27,7 +27,7 @@ pub fn feed_vs(src: &str) -> Result<String, String> {
     let mut decl = String::new();
     let mut fill = String::new();
     let mut pos = None;
-    for (k, line) in body.lines().map(str::trim).filter(|l| !l.is_empty()).enumerate() {
+    for line in body.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let (lhs, sem) = line.trim_end_matches(';').split_once(':').ok_or("field without semantic")?;
         let sem = sem.trim();
         if RASTER_MADE.iter().any(|r| sem.starts_with(r)) {
@@ -42,11 +42,14 @@ pub fn feed_vs(src: &str) -> Result<String, String> {
         }
         let n: usize = ty.chars().last().and_then(|c| c.to_digit(10)).map_or(1, |d| d as usize);
         let base = ty.trim_end_matches(|c: char| c.is_ascii_digit());
+        // each component's value is a function of its semantic and its place in the element, so a feeding vertex
+        // shader built from another packing of the same semantics (the oracle's) gives the same inputs
+        let key = sem_key(sem);
         let comps: Vec<String> = (0..n)
             .map(|j| {
-                let h = (k * 7 + j * 3) as f32;
+                let h = (key * 7 + j * 3) as f32;
                 if base.contains("int") {
-                    format!("{}", (k * 5 + j + 1) % 13)
+                    format!("{}", (key * 5 + j + 1) % 13)
                 } else {
                     let (a, sx, sy) = ((h * 0.137).fract(), (h * 0.291).fract() - 0.5, (h * 0.173).fract() - 0.5);
                     format!("{a:?}f + {sx:?}f * uv.x + {sy:?}f * uv.y")
@@ -65,6 +68,58 @@ pub fn feed_vs(src: &str) -> Result<String, String> {
     Ok(format!(
         "struct In {{\n{decl}}};\nIn main(uint id : SV_VertexID) {{\n    In o = (In)0;\n    float2 uv = float2(id & 1, id >> 1);\n    float w = 1.0f + 0.75f * uv.x + 0.5f * uv.y;\n    o.{pos} = float4((uv.x * 2.0f - 1.0f) * w, (1.0f - uv.y * 2.0f) * w, (0.2f + 0.6f * uv.x) * w, w);\n{fill}    return o;\n}}\n"
     ))
+}
+
+/// A small number for a semantic (name and index): what a component's value is seeded from.
+fn sem_key(sem: &str) -> usize {
+    let u = sem.to_ascii_uppercase();
+    let name = u.trim_end_matches(|c: char| c.is_ascii_digit());
+    let index: usize = u[name.len()..].parse().unwrap_or(0);
+    let h = name.bytes().fold(0usize, |h, b| (h * 31 + b as usize) % 1009);
+    (h + index * 17) % 1009
+}
+
+/// The input struct of a pixel shader as the oracle's input signature packs it (element by element, in register
+/// order), with the interpolation modes our struct gives the same semantics: a feeding vertex shader built from it
+/// links to the oracle.
+pub fn oracle_struct(isg1: &[Element], ours: &str) -> Result<String, String> {
+    let start = ours.find("struct In {").ok_or("no input struct")?;
+    let body = &ours[start + "struct In {".len()..];
+    let body = &body[..body.find("};").ok_or("input struct not closed")?];
+    let ours_mods = |sem: &str| -> String {
+        for line in body.lines().map(str::trim) {
+            if let Some((lhs, s)) = line.trim_end_matches(';').split_once(':') {
+                if s.trim().eq_ignore_ascii_case(sem) {
+                    let w: Vec<&str> = lhs.split_whitespace().collect();
+                    return w[..w.len().saturating_sub(2)].iter().map(|m| format!("{m} ")).collect();
+                }
+            }
+        }
+        String::new()
+    };
+    let mut els: Vec<&Element> = isg1.iter().filter(|e| e.system == 0 || e.system == 1).collect();
+    els.sort_by_key(|e| (e.register, e.mask.trailing_zeros()));
+    let mut out = String::from("struct In {
+");
+    for (k, e) in els.iter().enumerate() {
+        let n = e.mask.count_ones();
+        let base = match e.comp {
+            1 => "uint",
+            2 => "int",
+            4 => "uint16_t",
+            5 => "int16_t",
+            6 => "float16_t",
+            _ => "float",
+        };
+        let ty = if n > 1 { format!("{base}{n}") } else { base.to_string() };
+        let sem = if e.system == 1 { "SV_Position".to_string() } else { format!("{}{}", e.name, e.index) };
+        let mods = if e.system == 1 { String::new() } else { ours_mods(&sem) };
+        out.push_str(&format!("    {mods}{ty} o{k} : {sem};
+"));
+    }
+    out.push_str("};
+");
+    Ok(out)
 }
 
 /// Compiles the feeding vertex shader (cached beside our program).
@@ -201,5 +256,29 @@ pub fn draw(g: &Gpu, targets: &[Target], res: &[Res]) {
         l.RSSetScissorRects(&[windows::Win32::Foundation::RECT { left: 0, top: 0, right: SIZE as i32, bottom: SIZE as i32 }]);
         l.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         l.DrawInstanced(4, 1, 0, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn el(name: &str, index: u32, system: u32, comp: u32, register: u32, mask: u8) -> Element {
+        Element { stream: 0, name: name.into(), index, system, comp, register, mask, rw: mask, min_precision: 0 }
+    }
+
+    #[test]
+    fn oracle_feed_gives_the_same_values_per_semantic() {
+        let ours = "struct In {\n    float4 pos : SV_Position;\n    float3 r1_0 : TEXCOORD0;\n    nointerpolation uint r2_0 : TEXCOORD1;\n    bool ff : SV_IsFrontFace;\n};\n";
+        // the oracle: TEXCOORD1 first, packed into the same register as TEXCOORD0's tail
+        let isg1 = [el("SV_Position", 0, 1, 3, 0, 0xf), el("TEXCOORD", 1, 0, 1, 1, 0x1), el("TEXCOORD", 0, 0, 3, 1, 0xe), el("SV_IsFrontFace", 0, 9, 1, 2, 1)];
+        let st = oracle_struct(&isg1, ours).unwrap();
+        assert!(st.contains("nointerpolation uint o1 : TEXCOORD1;"), "{st}");
+        assert!(st.contains("float3 o2 : TEXCOORD0;"), "{st}");
+        assert!(!st.contains("SV_IsFrontFace"), "{st}");
+        let (a, b) = (feed_vs(ours).unwrap(), feed_vs(&st).unwrap());
+        let value = |src: &str, field: &str| src.lines().find(|l| l.contains(&format!("o.{field} ="))).map(|l| l.split_once('=').unwrap().1.to_string());
+        assert_eq!(value(&a, "r1_0"), value(&b, "o2"));
+        assert_eq!(value(&a, "r2_0"), value(&b, "o1"));
     }
 }

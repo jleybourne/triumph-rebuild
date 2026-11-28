@@ -38,6 +38,7 @@ use rebuild_sir::lift::res::{DescUse, Heap, View};
 
 mod gpu;
 mod ps;
+mod record;
 mod run;
 mod vs;
 
@@ -59,12 +60,55 @@ fn workers() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get()).saturating_sub(4).clamp(1, 12)
 }
 
+/// `--shard k/n`: this run takes the programs whose hash is k modulo n (several runs side by side, each with
+/// its own CSV, hung list and current program in the same output folder).
+fn shard() -> Option<(u64, u64)> {
+    let v = arg("--shard")?;
+    let (k, n) = v.split_once('/')?;
+    let (k, n) = (k.parse().ok()?, n.parse().ok()?);
+    (n > 0 && k < n).then_some((k, n))
+}
+
+fn in_shard(hash: &str) -> bool {
+    shard().is_none_or(|(k, n)| u64::from_str_radix(hash.get(..8).unwrap_or("0"), 16).unwrap_or(0) % n == k)
+}
+
+/// A run file of this shard: `exec.csv` → `exec.<k>.csv`, `current` → `current.<k>`.
+pub fn shard_file(out: &Path, name: &str) -> PathBuf {
+    match shard() {
+        None => out.join(name),
+        Some((k, _)) => match name.rsplit_once('.') {
+            Some((stem, ext)) => out.join(format!("{stem}.{k}.{ext}")),
+            None => out.join(format!("{name}.{k}")),
+        },
+    }
+}
+
+/// DXC processes at once: `REBUILD_EXEC_DXC` (default 3, so another lane's DXC fits beside it), at most `MAX_DXC`.
+fn dxc_threads() -> usize {
+    std::env::var("REBUILD_EXEC_DXC").ok().and_then(|v| v.parse().ok()).unwrap_or(3).clamp(1, rebuild_pipelines::translate::MAX_DXC)
+}
+
+/// The short name of a wave mapping, for the CSV's set column ("" for agnostic programs).
+fn wave_name(w: rebuild_sir::lift::Wave) -> &'static str {
+    use rebuild_sir::lift::Wave;
+    match w {
+        Wave::Agnostic => "",
+        Wave::Native32 => "n32",
+        Wave::Partial64 => "p64",
+        Wave::Doubled => "d64",
+        _ => "other",
+    }
+}
+
 /// One translated program and what the harness needs to feed it.
 pub struct Prog {
     pub hash: String,
     pub stage: &'static str,
     /// one basic block (the v0 set) or several
     pub single: bool,
+    /// the wave mapping (`rebuild_sir::lift::Wave`): "" for agnostic programs, else `n32` / `p64` / `d64`
+    pub wave: &'static str,
     pub dxil: Vec<u8>,
     /// our HLSL (the pixel path builds its feeding vertex shader from the input struct)
     pub src: String,
@@ -83,23 +127,25 @@ pub struct Skip {
     pub hash: String,
     pub stage: &'static str,
     pub single: bool,
+    pub wave: &'static str,
     pub reason: String,
 }
 
 /// Lifts, emits and compiles (DXC only when the HLSL changed) every agnostic program of the stages asked for.
-fn prepare(walk: &census::Walk, stages: &[&'static str], out: &Path, only: Option<&BTreeSet<String>>) -> (Vec<Prog>, Vec<Skip>) {
+/// `done`: programs that already have a row (a worker restarted after a lost device): not translated again.
+fn prepare(walk: &census::Walk, stages: &[&'static str], out: &Path, only: Option<&BTreeSet<String>>, done: &BTreeSet<String>) -> (Vec<Prog>, Vec<Skip>) {
     let dxc = dxc().expect("dxc.exe (Windows SDK) or REBUILD_DXC");
     let next = AtomicUsize::new(0);
     let progs = Mutex::new(Vec::new());
     let skips = Mutex::new(Vec::new());
     std::thread::scope(|s| {
-        for _ in 0..workers().min(rebuild_pipelines::translate::MAX_DXC) {
+        for _ in 0..workers().min(dxc_threads()) {
             s.spawn(|| {
                 let mut f = Findings::default();
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(p) = walk.programs.get(i) else { break };
-                    if only.is_some_and(|set| !set.contains(&p.hash)) {
+                    if only.is_some_and(|set| !set.contains(&p.hash)) || done.contains(&p.hash) || !in_shard(&p.hash) {
                         continue;
                     }
                     let kind = match (&p.native.io, p.native.stage) {
@@ -112,17 +158,27 @@ fn prepare(walk: &census::Walk, stages: &[&'static str], out: &Path, only: Optio
                         continue;
                     }
                     let row = features::analyse(&p.native, &mut f);
-                    if row.class() != WaveClass::Agnostic || row.decode_error.is_some() {
+                    if row.decode_error.is_some() {
                         continue;
                     }
+                    // the agnostic class (as before), or with --wave the wave-wide classes only
+                    let agnostic = row.class() == WaveClass::Agnostic;
+                    if agnostic == flag("--wave") {
+                        continue;
+                    }
+                    let wave = match rebuild_shader::gfx10::decode(&p.native.patched_code()) {
+                        Ok(insts) => wave_name(rebuild_pipelines::translate::wave_of(&p.native, &insts)),
+                        Err(_) => continue,
+                    };
                     let single = row.blocks == 1;
                     if !single && flag("--v0") {
                         continue; // the straight-line set only
                     }
-                    let skip = |reason: String| skips.lock().unwrap().push(Skip { hash: p.hash.clone(), stage: kind, single, reason });
+                    let skip = |reason: String| skips.lock().unwrap().push(Skip { hash: p.hash.clone(), stage: kind, single, wave, reason });
                     match translate(p, kind, &dxc, out) {
                         Ok(mut prog) => {
                             prog.single = single;
+                            prog.wave = wave;
                             progs.lock().unwrap().push(prog);
                         }
                         Err(e) => skip(e),
@@ -175,6 +231,7 @@ fn translate(p: &census::Program, kind: &'static str, dxc: &Path, out: &Path) ->
         hash: p.hash.clone(),
         stage: kind,
         single: true,
+        wave: "",
         dxil,
         src: h.src,
         uses: h.uses,
@@ -196,6 +253,9 @@ pub struct Oracle {
     pub statics: Vec<[u32; 10]>,
     /// root CBVs, SRVs, UAVs and root-indexed views the oracle binds outside the heap
     pub root_views: usize,
+    /// the root views are exactly one SRV, `t255, space1`: the fork's table of live heap slots (a dword per slot,
+    /// read before each heap access, 0 for an empty slot), which the harness can give it
+    pub live_table: bool,
     /// `[WaveSize]` of the oracle (0: none)
     pub wave: u32,
 }
@@ -228,18 +288,24 @@ fn oracle(dir: &Path, hash: &str) -> Result<Oracle, String> {
     }
     // root CBVs, SRVs, UAVs (byte lists), then root-indexed views
     let mut root_views = 0;
+    let mut lists = Vec::new();
     for _ in 0..3 {
         let n = word(&mut at)? as usize;
         root_views += n;
+        lists.push(b.get(at..at + n).unwrap_or_default().to_vec());
         at += n;
     }
-    root_views += word(&mut at)? as usize;
+    let indexed = word(&mut at)? as usize;
+    root_views += indexed;
+    // given only with REBUILD_EXEC_LIVE: on WARP most of these programs (with every slot live) never finish a set
+    // in 30 s on either input, which costs a worker restart each; off, they stay untested (root views)
+    let live_table = std::env::var_os("REBUILD_EXEC_LIVE").is_some() && lists[0].is_empty() && lists[1] == [255] && lists[2].is_empty() && indexed == 0;
     // the wave size the oracle demands ([WaveSize]: PSV0 runtime info, minimum expected lane count)
     let wave = rebuild_shader::Container::parse(&dxil)
         .ok()
         .and_then(|c| c.part(rebuild_shader::FourCC::PSV0).and_then(|p| p.data.get(20..24).map(|w| u32::from_le_bytes(w.try_into().unwrap()))))
         .unwrap_or(0);
-    Ok(Oracle { dxil, statics, root_views, wave })
+    Ok(Oracle { dxil, statics, root_views, live_table, wave })
 }
 
 /// The result of one program.
@@ -247,6 +313,7 @@ pub struct Row {
     pub hash: String,
     pub stage: &'static str,
     pub single: bool,
+    pub wave: &'static str,
     pub verdict: &'static str,
     pub reason: String,
     pub detail: String,
@@ -255,7 +322,14 @@ pub struct Row {
 impl Row {
     fn csv(&self) -> String {
         let clean = |s: &str| s.replace([',', '\n', '\r'], ";");
-        format!("{},{},{},{},{},{}", self.hash, self.stage, if self.single { "v0" } else { "v1" }, self.verdict, clean(&self.reason), clean(&self.detail))
+        let set = if !self.wave.is_empty() {
+            self.wave
+        } else if self.single {
+            "v0"
+        } else {
+            "v1"
+        };
+        format!("{},{},{},{},{},{}", self.hash, self.stage, set, self.verdict, clean(&self.reason), clean(&self.detail))
     }
 }
 
@@ -317,11 +391,17 @@ fn main() {
         Some(f) => std::fs::read_to_string(f).unwrap_or_default().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
         None => v.split(',').map(str::to_string).collect(),
     });
-    let csv = out.join("exec.csv");
+    let csv = shard_file(&out, "exec.csv");
 
     let data = std::fs::read(&path).expect("read the shaders.rpf copy");
     let walk = census::walk(&data, workers());
-    let (mut progs, skips) = prepare(&walk, &stages, &out, only.as_ref());
+    // a worker skips what the CSV already has (the supervisor passes no such set)
+    let have: BTreeSet<String> = if flag("--worker") {
+        std::fs::read_to_string(&csv).unwrap_or_default().lines().filter_map(|l| l.split(',').next().map(str::to_string)).collect()
+    } else {
+        BTreeSet::new()
+    };
+    let (mut progs, skips) = prepare(&walk, &stages, &out, only.as_ref(), &have);
     drop(walk);
     drop(data);
     if flag("--card") {
@@ -349,7 +429,7 @@ fn main() {
         });
         // input sets that never finished, by program (the supervisor's record): skipped
         let mut hung: BTreeMap<String, Vec<u32>> = BTreeMap::new();
-        for l in std::fs::read_to_string(out.join("hung.txt")).unwrap_or_default().lines() {
+        for l in std::fs::read_to_string(shard_file(&out, "hung.txt")).unwrap_or_default().lines() {
             let mut w = l.split(' ');
             if let (Some(h), Some(k)) = (w.next(), w.next()) {
                 hung.entry(h.to_string()).or_default().extend(k.trim().parse::<u32>().ok());
@@ -357,16 +437,16 @@ fn main() {
         }
         for p in progs.iter().filter(|p| !done.contains(&p.hash)) {
             measuring_wait();
-            std::fs::write(out.join("current"), &p.hash).unwrap();
+            std::fs::write(shard_file(&out, "current"), &p.hash).unwrap();
             let row = match oracle(&odir, &p.hash) {
-                Err(e) => Row { hash: p.hash.clone(), stage: p.stage, single: p.single, verdict: "untested", reason: e, detail: String::new() },
+                Err(e) => Row { hash: p.hash.clone(), stage: p.stage, single: p.single, wave: p.wave, verdict: "untested", reason: e, detail: String::new() },
                 Ok(o) => {
                     let skip = hung.get(&p.hash).cloned().unwrap_or_default();
                     let r = run::program(&mut g, p, &o, &out, &skip);
                     if g.lost() {
                         // the device went with this input set: no row; the supervisor records the set (`current`)
                         // and runs the program again without it
-                        eprintln!("execcheck: device lost on {}: {}", std::fs::read_to_string(out.join("current")).unwrap_or_default(), r.detail);
+                        eprintln!("execcheck: device lost on {}: {}", std::fs::read_to_string(shard_file(&out, "current")).unwrap_or_default(), r.detail);
                         drop(card);
                         rebuild_cardlock::exit(3);
                     }
@@ -376,7 +456,7 @@ fn main() {
             writeln!(f, "{}", row.csv()).unwrap();
             f.flush().unwrap();
         }
-        let _ = std::fs::remove_file(out.join("current"));
+        let _ = std::fs::remove_file(shard_file(&out, "current"));
         drop(g);
         drop(card);
         return;
@@ -385,15 +465,15 @@ fn main() {
     // supervisor: the skips first, then workers until every program has a row
     if !flag("--resume") {
         let _ = std::fs::remove_file(&csv);
-        let _ = std::fs::remove_file(out.join("hung.txt"));
-        let _ = std::fs::remove_file(out.join("current"));
+        let _ = std::fs::remove_file(shard_file(&out, "hung.txt"));
+        let _ = std::fs::remove_file(shard_file(&out, "current"));
     }
     {
         let have: BTreeSet<String> =
             std::fs::read_to_string(&csv).unwrap_or_default().lines().filter_map(|l| l.split(',').next().map(str::to_string)).collect();
         let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&csv).expect("csv");
         for s in skips.iter().filter(|s| !have.contains(&s.hash)) {
-            let r = Row { hash: s.hash.clone(), stage: s.stage, single: s.single, verdict: "untested", reason: s.reason.clone(), detail: String::new() };
+            let r = Row { hash: s.hash.clone(), stage: s.stage, single: s.single, wave: s.wave, verdict: "untested", reason: s.reason.clone(), detail: String::new() };
             writeln!(f, "{}", r.csv()).unwrap();
         }
     }
@@ -408,7 +488,7 @@ fn main() {
             break;
         }
         // the worker died on a program: name it and go on
-        let cur_set = std::fs::read_to_string(out.join("current")).unwrap_or_default();
+        let cur_set = std::fs::read_to_string(shard_file(&out, "current")).unwrap_or_default();
         let (cur, set) = match cur_set.split_once(' ') {
             Some((h, k)) => (h.to_string(), k.trim().parse::<u32>().ok()),
             None => (cur_set.trim().to_string(), None),
@@ -422,12 +502,12 @@ fn main() {
         // an input set that never finished (a loop whose trip count comes from the data) or lost the device (an
         // index from the data past every view): skipped next time, unless every set has
         if let (Some(3 | 4), Some(k)) = (st.code(), set) {
-            let path = out.join("hung.txt");
+            let path = shard_file(&out, "hung.txt");
             let mut h = std::fs::read_to_string(&path).unwrap_or_default();
             h.push_str(&format!("{cur} {k} {}\n", if st.code() == Some(4) { "never finished" } else { "lost the device" }));
             std::fs::write(&path, &h).unwrap();
             if h.lines().filter(|l| l.starts_with(&cur)).count() < run::SETS as usize {
-                let _ = std::fs::remove_file(out.join("current"));
+                let _ = std::fs::remove_file(shard_file(&out, "current"));
                 continue;
             }
         }
@@ -438,6 +518,7 @@ fn main() {
                 hash: cur.clone(),
                 stage: p.map_or("?", |p| p.stage),
                 single: p.is_some_and(|p| p.single),
+                wave: p.map_or("", |p| p.wave),
                 verdict: "crash",
                 reason: if set.is_some() { "no input set completes (loops or device loss)".into() } else { "device lost".into() },
                 detail: format!("{st}"),
@@ -445,7 +526,7 @@ fn main() {
             let mut f = std::fs::OpenOptions::new().append(true).open(&csv).unwrap();
             writeln!(f, "{}", r.csv()).unwrap();
         }
-        let _ = std::fs::remove_file(out.join("current"));
+        let _ = std::fs::remove_file(shard_file(&out, "current"));
     }
     report(&csv);
 }
