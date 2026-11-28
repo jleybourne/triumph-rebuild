@@ -139,6 +139,8 @@ pub struct HeapStats {
     /// buffer views whose own kind cannot be made at their address (CBV not 256-aligned,
     /// typed not element-aligned): the alternate is null, the raw view is exact
     pub misaligned: AtomicU64,
+    /// typed buffer views with more elements than the memory holds from their start: cut to what fits
+    pub clamped: AtomicU64,
     /// views of memory the lead's model does not know
     pub unknown_memory: AtomicU64,
 }
@@ -364,10 +366,25 @@ impl Inner {
                 return Plan { primary, alt: None, shadow: [1, len as u32, 0, lead], natural: cbv };
             }
             Some((BufferKind::Raw { uav }, _)) => ([1, len as u32, 0, lead], uav.then(|| self.raw_uav(&r, start, dwords))),
-            Some((BufferKind::Structured { uav, stride }, n)) => ([stride, n, 0, lead], uav.then(|| self.raw_uav(&r, start, dwords))),
+            // records past the memory the model knows are out of range (as the raw view's length is)
+            Some((BufferKind::Structured { uav, stride }, n)) => ([stride, n.min((len / u64::from(stride.max(1))) as u32), 0, lead], uav.then(|| self.raw_uav(&r, start, dwords))),
             Some((BufferKind::Typed { uav, format }, n)) => {
                 let e = format::element(format).map_or(4, |e| e.0);
-                let v = if off % e == 0 {
+                // no more elements than the memory holds from the view's start: a view past its buffer is an
+                // invalid call that removes the device (debug #31, a title view of 1,048,576 R32_UINT over
+                // 64 KiB the model knows)
+                let asked = n;
+                let n = n.min((len / e) as u32);
+                if n < asked {
+                    heap.stats.clamped.fetch_add(1, Ordering::Relaxed);
+                }
+                let v = if n == 0 {
+                    if uav {
+                        HostView::NullUav
+                    } else {
+                        HostView::NullBuffer
+                    }
+                } else if off % e == 0 {
                     if uav {
                         if resource_uav(r.resource) {
                             HostView::typed_uav(r.resource, format, off / e, n)
