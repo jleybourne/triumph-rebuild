@@ -1552,6 +1552,7 @@ All 47 names in `crates/` and `apps/`, from a grep of the source.
 | `REBUILD_THREADS` | `crash.rs:278` | at the first fatal exception, unwind every other thread |
 | `REBUILD_WATCH` | `watch.rs:35` | hardware write watchpoint at a hex address; turns DbgHelp off |
 | `REBUILD_SAMPLER_BEATS` | `sampler.rs:30` | print the sampler's per-step heartbeat |
+| `REBUILD_PROFILE` | `profile.rs` | `<ms>` (0: the `dsrate` lines only): sample every thread every `<ms>` ms (wall clock, waits included); at the end each thread's top stacks and the busy (not waiting) frames across threads; a `dsrate` line a second (DirectStorage MiB/s, reads, where a read's time goes, worker use); `REBUILD_PROFILE_UNTIL=<s>` stops sampling at that title time (the loading screen alone) |
 | `REBUILD_TRACE_FILES` | `winfiles/src/lib.rs:394`, `dstorage/src/engine.rs:504` | log failed file opens and DirectStorage requests |
 
 **DirectStorage and BCPack:**

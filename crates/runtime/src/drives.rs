@@ -11,6 +11,7 @@
 #![cfg(windows)]
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -94,15 +95,21 @@ impl rebuild_dstorage::Pages for PhysicalPages {
     }
 }
 
+/// Page writes that waited for a frame (one per sleep), and frames never found.
+pub static FRAME_WAITS: AtomicU64 = AtomicU64::new(0);
+pub static FRAME_MISSES: AtomicU64 = AtomicU64::new(0);
+
 fn frame_with_retry(frame: usize) -> Option<*mut u8> {
     for i in 0..=RETRIES {
         if let Some(p) = crate::exports::frame_ptr(frame) {
             return Some(p);
         }
         if i < RETRIES {
+            FRAME_WAITS.fetch_add(1, Ordering::Relaxed);
             std::thread::sleep(RETRY_WAIT);
         }
     }
+    FRAME_MISSES.fetch_add(1, Ordering::Relaxed);
     None
 }
 

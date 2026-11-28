@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
-use rebuild_vfs::{OpenOptions, Vfs};
+use rebuild_vfs::Vfs;
 
 use crate::zlib::{inflate, InflateError};
 use crate::{
@@ -101,6 +101,34 @@ pub struct Stats {
     pub bcpack_refused: u64,
     /// Reads that had to wait for staging room.
     pub staging_waits: u64,
+    /// Time accounting, in nanoseconds summed over reads (timing only; no effect on behaviour).
+    pub times: Times,
+}
+
+/// Where a read's time goes, summed over every finished read (ns), and status-entry latency.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Times {
+    /// Enqueued until the queue was submitted (held reads wait for the title's `Submit`).
+    pub unsubmitted_ns: u64,
+    /// Submitted until a worker started it.
+    pub ready_ns: u64,
+    /// Reading the source (file or memory).
+    pub read_ns: u64,
+    /// Inflate and BCPack decode.
+    pub decode_ns: u64,
+    /// Writing into physical pages (frame lookups included).
+    pub pages_ns: u64,
+    /// Enqueued until finished, and the slowest one.
+    pub latency_ns: u64,
+    pub latency_max_ns: u64,
+    /// Status entries written, the sum and maximum of enqueue-to-written.
+    pub statuses: u64,
+    pub status_ns: u64,
+    pub status_max_ns: u64,
+    /// Worker time, summed over workers: running reads, waiting for the engine's lock after one, and idle.
+    pub worker_exec_ns: u64,
+    pub worker_lock_ns: u64,
+    pub worker_idle_ns: u64,
 }
 
 #[derive(Default)]
@@ -112,20 +140,40 @@ struct Counters {
     zlib_reads: AtomicU64,
     bcpack_refused: AtomicU64,
     staging_waits: AtomicU64,
+    unsubmitted_ns: AtomicU64,
+    ready_ns: AtomicU64,
+    read_ns: AtomicU64,
+    decode_ns: AtomicU64,
+    pages_ns: AtomicU64,
+    latency_ns: AtomicU64,
+    latency_max_ns: AtomicU64,
+    statuses: AtomicU64,
+    status_ns: AtomicU64,
+    status_max_ns: AtomicU64,
+    worker_exec_ns: AtomicU64,
+    worker_lock_ns: AtomicU64,
+    worker_idle_ns: AtomicU64,
+}
+
+/// Nanoseconds since the first call (a cheap shared clock for the counters).
+fn now_ns() -> u64 {
+    static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    BASE.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
 }
 
 /// A queue's id in the engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct QueueId(u64);
 
+/// Commands carry the time they were enqueued (`now_ns`), for the latency counters.
 enum Command {
-    Read(Request),
-    Status(Arc<StatusArray>, u32),
+    Read(Request, u64),
+    Status(Arc<StatusArray>, u32, u64),
 }
 
 impl Command {
     fn is_page_read(&self) -> bool {
-        matches!(self, Command::Read(r) if r.options & PAGE_DESTINATION != 0)
+        matches!(self, Command::Read(r, _) if r.options & PAGE_DESTINATION != 0)
     }
 }
 
@@ -138,7 +186,7 @@ struct Queue {
     /// Submitted reads not yet finished (waiting or running), by sequence number.
     pending: BTreeSet<u64>,
     running: usize,
-    statuses: VecDeque<(u64, Arc<StatusArray>, u32)>,
+    statuses: VecDeque<(u64, Arc<StatusArray>, u32, u64)>,
     failures: BTreeMap<u64, Hresult>,
 }
 
@@ -148,12 +196,16 @@ impl Queue {
     }
 
     /// Writes every status entry whose earlier reads have all finished.
-    fn flush(&mut self) {
-        while let Some(&(seq, _, _)) = self.statuses.front() {
+    fn flush(&mut self, c: &Counters) {
+        while let Some(&(seq, _, _, _)) = self.statuses.front() {
             if self.pending.first().is_some_and(|&p| p < seq) {
                 return;
             }
-            let (_, array, index) = self.statuses.pop_front().unwrap();
+            let (_, array, index, enqueued) = self.statuses.pop_front().unwrap();
+            let waited = now_ns().saturating_sub(enqueued);
+            c.statuses.fetch_add(1, Ordering::Relaxed);
+            c.status_ns.fetch_add(waited, Ordering::Relaxed);
+            c.status_max_ns.fetch_max(waited, Ordering::Relaxed);
             let later = self.failures.split_off(&seq);
             let first = std::mem::replace(&mut self.failures, later).into_values().next();
             if let Some(e) = array.entries.get(index as usize) {
@@ -167,6 +219,8 @@ struct Job {
     queue: u64,
     seq: u64,
     request: Request,
+    enqueued: u64,
+    submitted: u64,
 }
 
 // SAFETY: a request's pointers stay valid until the title sees it complete (the caller's promise in
@@ -209,8 +263,9 @@ impl State {
         Some((job, staging))
     }
 
-    fn submit(&mut self, id: u64, explicit: bool) {
+    fn submit(&mut self, id: u64, explicit: bool, c: &Counters) {
         let Some(q) = self.queues.get_mut(&id) else { return };
+        let now = now_ns();
         let class = q.class;
         let mut commands = if explicit { std::mem::take(&mut q.held) } else { Vec::new() };
         commands.append(&mut q.unsubmitted);
@@ -223,14 +278,15 @@ impl State {
             let seq = self.next_seq;
             self.next_seq += 1;
             match command {
-                Command::Read(request) => {
+                Command::Read(request, enqueued) => {
                     q.pending.insert(seq);
-                    reads.push(Job { queue: id, seq, request });
+                    c.unsubmitted_ns.fetch_add(now.saturating_sub(enqueued), Ordering::Relaxed);
+                    reads.push(Job { queue: id, seq, request, enqueued, submitted: now });
                 }
-                Command::Status(array, index) => q.statuses.push_back((seq, array, index)),
+                Command::Status(array, index, enqueued) => q.statuses.push_back((seq, array, index, enqueued)),
             }
         }
-        q.flush();
+        q.flush(c);
         if reads.is_empty() {
             return;
         }
@@ -316,7 +372,10 @@ impl Engine {
     /// Opens a console path for reading and registers it under `key` (the file object's address:
     /// requests name their file by it).
     pub fn open_file(&self, key: usize, path: &str) -> Result<(), Hresult> {
-        let handle = self.shared.vfs.open(path, OpenOptions::read()).map_err(|e| {
+        // overlapped: the workers' reads of one file run side by side (a synchronous handle runs them one at a time).
+        // REBUILD_DS_SYNC_READS=1 keeps the synchronous handle (for A/B measurements).
+        let opened = if sync_reads() { self.shared.vfs.open(path, rebuild_vfs::OpenOptions::read()) } else { self.shared.vfs.open_concurrent(path) };
+        let handle = opened.map_err(|e| {
             let hr = vfs_error(&e);
             if trace_on() {
                 eprintln!("dstorage  open failed ({hr:#x}): {path}");
@@ -377,14 +436,14 @@ impl Engine {
                 request.source as usize, request.offset, request.source_size, request.destination_size, request.options, request.intermediate_size
             );
         }
-        self.enqueue(queue, Command::Read(request));
+        self.enqueue(queue, Command::Read(request, now_ns()));
     }
 
     /// Adds a status entry; it reads `E_PENDING` from now until the reads before it finish.
     pub fn enqueue_status(&self, queue: QueueId, array: &Arc<StatusArray>, index: u32) -> bool {
         let Some(entry) = array.entries.get(index as usize) else { return false };
         entry.store(E_PENDING, Ordering::Release);
-        self.enqueue(queue, Command::Status(array.clone(), index));
+        self.enqueue(queue, Command::Status(array.clone(), index, now_ns()));
         true
     }
 
@@ -397,7 +456,7 @@ impl Engine {
             }
             // Full with reads held for a Submit the title cannot make while it waits here.
             if !q.held.is_empty() {
-                s.submit(queue.0, true);
+                s.submit(queue.0, true, &self.shared.counters);
                 self.shared.work.notify_all();
             }
             s = self.shared.finished.wait(s).unwrap_or_else(|e| e.into_inner());
@@ -405,14 +464,14 @@ impl Engine {
         let q = s.queues.get_mut(&queue.0).unwrap();
         q.unsubmitted.push(command);
         if q.unsubmitted.len() >= q.capacity / 2 {
-            s.submit(queue.0, false);
+            s.submit(queue.0, false, &self.shared.counters);
             self.shared.work.notify_all();
         }
     }
 
     /// The title's `Submit`: everything enqueued (and held) goes to the workers.
     pub fn submit(&self, queue: QueueId) {
-        self.shared.lock().submit(queue.0, true);
+        self.shared.lock().submit(queue.0, true, &self.shared.counters);
         self.shared.work.notify_all();
     }
 
@@ -444,6 +503,21 @@ impl Engine {
             zlib_reads: l(&c.zlib_reads),
             bcpack_refused: l(&c.bcpack_refused),
             staging_waits: l(&c.staging_waits),
+            times: Times {
+                unsubmitted_ns: l(&c.unsubmitted_ns),
+                ready_ns: l(&c.ready_ns),
+                read_ns: l(&c.read_ns),
+                decode_ns: l(&c.decode_ns),
+                pages_ns: l(&c.pages_ns),
+                latency_ns: l(&c.latency_ns),
+                latency_max_ns: l(&c.latency_max_ns),
+                statuses: l(&c.statuses),
+                status_ns: l(&c.status_ns),
+                status_max_ns: l(&c.status_max_ns),
+                worker_exec_ns: l(&c.worker_exec_ns),
+                worker_lock_ns: l(&c.worker_lock_ns),
+                worker_idle_ns: l(&c.worker_idle_ns),
+            },
         }
     }
 }
@@ -479,17 +553,27 @@ fn work(shared: &Shared) {
             return;
         }
         let Some((job, staging)) = s.take(&shared.counters) else {
+            let t = now_ns();
             s = shared.work.wait(s).unwrap_or_else(|e| e.into_inner());
+            shared.counters.worker_idle_ns.fetch_add(now_ns() - t, Ordering::Relaxed);
             continue;
         };
         drop(s);
-        let result = execute(shared, &job.request);
         let c = &shared.counters;
+        let started = now_ns();
+        c.ready_ns.fetch_add(started.saturating_sub(job.submitted), Ordering::Relaxed);
+        let result = execute(shared, &job.request);
+        let ended = now_ns();
+        c.worker_exec_ns.fetch_add(ended - started, Ordering::Relaxed);
+        let latency = ended.saturating_sub(job.enqueued);
+        c.latency_ns.fetch_add(latency, Ordering::Relaxed);
+        c.latency_max_ns.fetch_max(latency, Ordering::Relaxed);
         c.reads.fetch_add(1, Ordering::Relaxed);
         if result.is_err() {
             c.failed.fetch_add(1, Ordering::Relaxed);
         }
         s = shared.lock();
+        c.worker_lock_ns.fetch_add(now_ns() - ended, Ordering::Relaxed);
         s.staged -= staging;
         if let Some(q) = s.queues.get_mut(&job.queue) {
             q.running -= 1;
@@ -498,13 +582,18 @@ fn work(shared: &Shared) {
                 q.failures.insert(job.seq, hr);
                 trace("request failed", job.request.source as u64, hr);
             }
-            q.flush();
+            q.flush(c);
         }
         if staging > 0 {
             shared.work.notify_all();
         }
         shared.finished.notify_all();
     }
+}
+
+fn sync_reads() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("REBUILD_DS_SYNC_READS").is_some_and(|v| v == "1"))
 }
 
 fn trace_on() -> bool {
@@ -555,7 +644,9 @@ fn execute(shared: &Shared, r: &Request) -> Result<(), Hresult> {
         let n = r.source_size as usize;
         // SAFETY: the caller of `enqueue_request` keeps `destination_size` bytes valid.
         let out = unsafe { std::slice::from_raw_parts_mut(r.destination.cast::<u8>(), n) };
+        let t = now_ns();
         read_source(shared, r, out)?;
+        c.read_ns.fetch_add(now_ns() - t, Ordering::Relaxed);
         c.bytes_in.fetch_add(n as u64, Ordering::Relaxed);
         c.bytes_out.fetch_add(n as u64, Ordering::Relaxed);
         return Ok(());
@@ -568,7 +659,9 @@ fn execute(shared: &Shared, r: &Request) -> Result<(), Hresult> {
             unsafe { std::slice::from_raw_parts(r.source.cast::<u8>(), r.source_size as usize) }
         } else {
             src.resize(r.source_size as usize, 0);
+            let t = now_ns();
             read_source(shared, r, src)?;
+            c.read_ns.fetch_add(now_ns() - t, Ordering::Relaxed);
             src
         };
         c.bytes_in.fetch_add(source.len() as u64, Ordering::Relaxed);
@@ -608,8 +701,13 @@ fn execute(shared: &Shared, r: &Request) -> Result<(), Hresult> {
                 unsafe { std::slice::from_raw_parts(r.destination.cast::<u64>(), (offset + len).div_ceil(PAGE)) };
             OUT.with_borrow_mut(|out| {
                 out.resize(len, 0);
+                let t = now_ns();
                 let n = produce(out)?;
-                if pages.write(list, offset, &out[..n]) {
+                let t2 = now_ns();
+                c.decode_ns.fetch_add(t2 - t, Ordering::Relaxed);
+                let ok = pages.write(list, offset, &out[..n]);
+                c.pages_ns.fetch_add(now_ns() - t2, Ordering::Relaxed);
+                if ok {
                     Ok(n)
                 } else {
                     Err(E_INVALIDARG)
@@ -618,7 +716,10 @@ fn execute(shared: &Shared, r: &Request) -> Result<(), Hresult> {
         } else {
             // SAFETY: as above, `destination_size` bytes.
             let out = unsafe { std::slice::from_raw_parts_mut(r.destination.cast::<u8>(), len) };
-            produce(out)?
+            let t = now_ns();
+            let n = produce(out)?;
+            c.decode_ns.fetch_add(now_ns() - t, Ordering::Relaxed);
+            n
         };
         c.bytes_out.fetch_add(written as u64, Ordering::Relaxed);
         Ok(())

@@ -430,6 +430,43 @@ fn v4_shared_between_threads() {
     assert_eq!(v.open_handles(), 0);
 }
 
+/// A handle for many readers at once: every thread's reads at offsets land the right bytes, the end of the file
+/// reads short and then empty, and the handle never writes.
+#[test]
+fn v4_concurrent_reads() {
+    let w = World::new("v4c");
+    let v = w.vfs();
+    let body: Vec<u8> = (0..(1u32 << 20) + 123).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+    let h = v.open(r"T:\big.bin", OpenOptions::write(Disposition::CreateNew)).unwrap();
+    v.write_at(h, 0, &body).unwrap();
+    v.close(h).unwrap();
+    let c = v.open_concurrent(r"T:\big.bin").unwrap();
+    std::thread::scope(|s| {
+        for t in 0..8u64 {
+            let (v, body) = (&v, &body);
+            s.spawn(move || {
+                let mut buf = vec![0u8; 70_000];
+                for i in 0..64u64 {
+                    let at = ((t * 7919 + i * 104_729) * 31) % (body.len() as u64 - 70_000);
+                    assert_eq!(v.read_at(c, at, &mut buf).unwrap(), buf.len());
+                    assert_eq!(&buf[..], &body[at as usize..at as usize + buf.len()], "thread {t} read {i} at {at}");
+                }
+            });
+        }
+    });
+    let mut buf = [0u8; 200];
+    let end = body.len() as u64;
+    assert_eq!(v.read_at(c, end - 50, &mut buf).unwrap(), 50, "short at the end");
+    assert_eq!(&buf[..50], &body[body.len() - 50..]);
+    assert_eq!(v.read_at(c, end, &mut buf).unwrap(), 0);
+    assert_eq!(v.read_at(c, end + 4096, &mut buf).unwrap(), 0);
+    assert!(matches!(v.write_at(c, 0, b"x"), Err(Error::ReadOnlyHandle)));
+    v.close(c).unwrap();
+    assert!(matches!(v.open_concurrent(r"T:\missing.bin"), Err(Error::NotFound)));
+    assert!(matches!(v.open_concurrent(r"G:\Data"), Err(Error::IsADirectory)));
+    assert_eq!(v.open_handles(), 0);
+}
+
 /// The real game folder as the base (`REBUILD_GAME_DIR`; skipped when unset). Writes over the
 /// smallest files and deletes and renames others, all through the overlay, and checks that every
 /// name, size, time and attribute in the game folder, and every byte of each touched file, is the

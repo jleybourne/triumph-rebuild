@@ -17,6 +17,7 @@ mod args;
 mod crash;
 mod launch;
 mod patch;
+mod profile;
 mod sampler;
 mod watch;
 
