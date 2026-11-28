@@ -111,6 +111,9 @@ pub fn window_slot(address: u64) -> (u32, u32) {
 /// [WINDOW_HEAP_BASE, 1,000,000)              window raw SRVs (loads)
 /// ```
 pub const CONSOLE_VIEWS: u32 = 750_000;
+/// The low 16 bits of an image descriptor's word 3 as translated code reads them: `dst_sel` x, y, z, w = 4, 5, 6, 7
+/// (the identity: the host view does the console's swizzle) and base level 0 (bits 12-15).
+pub const IMAGE_WORD3_LOW: u32 = 0xFAC;
 /// Null views after [`CONSOLE_VIEWS`]: see [`NullKind::slot`].
 pub const NULL_BANK: u32 = 24;
 
@@ -406,6 +409,9 @@ struct Lifter<'a> {
     /// the current instruction keeps only bits 16 and up of its first operand (a shift right or field
     /// extract from bit 16): a descriptor's word 1 may be read as its stride
     hi16: bool,
+    /// the current instruction keeps only bits below 16 of its first operand (a field extract or a mask below bit
+    /// 16): an image descriptor's word 3 may be read for its swizzle and base level
+    lo16: bool,
     /// inside an SDWA instruction: the operands are `sir_a` / `sir_b` (selected and extended), and the op's
     /// result goes to `sir_r` (merged into the destination's selected bits afterwards)
     sdwa: bool,
@@ -440,6 +446,14 @@ impl Lifter<'_> {
                             } else {
                                 format!("(sir_shadow.Load(sir_sh(s{b})) << 16)")
                             });
+                        }
+                    }
+                    // an image descriptor's word 3 with only its low 16 bits kept: the identity swizzle (the host view
+                    // swizzles) and base level 0 (the host view starts at its own base level, so a size the code
+                    // shifts by it is the view's); the last level and the type above them are not known here
+                    if let Some((b, 3)) = self.desc_word_of(n) {
+                        if self.lo16 && self.f.descs.get(&b).is_some_and(|d| d.heap == res::Heap::Resource && d.dwords == 8) {
+                            return Some(format!("{IMAGE_WORD3_LOW}u"));
                         }
                     }
                     // a descriptor word read as data
@@ -1381,6 +1395,12 @@ impl Lifter<'_> {
         self.hi16 = match name {
             "s_lshr_b32" => self.cval(d, "ssrc1").is_some_and(|k| k & 31 >= 16),
             "s_bfe_u32" => self.cval(d, "ssrc1").is_some_and(|k| k & 31 >= 16),
+            _ => false,
+        };
+        // `s_bfe_u32 x, w, off | width << 16` (off + width <= 16) or `s_and_b32 x, w, k` (k < 2^16)
+        self.lo16 = match name {
+            "s_bfe_u32" => self.cval(d, "ssrc1").is_some_and(|k| (k & 31) + ((k >> 16) & 127) <= 16),
+            "s_and_b32" => self.cval(d, "ssrc1").is_some_and(|k| k < 1 << 16),
             _ => false,
         };
         let a = |l: &mut Self| l.usrc(d, "ssrc0");
@@ -2351,6 +2371,7 @@ impl<'a> Lifter<'a> {
             scc_live: false,
             dpp: None,
             hi16: false,
+            lo16: false,
             sdwa: false,
             code: Vec::new(),
             wave: Wave::Agnostic,
@@ -2366,6 +2387,7 @@ impl<'a> Lifter<'a> {
         for (k, i) in insts.iter().enumerate() {
             self.why = None;
             self.hi16 = false;
+            self.lo16 = false;
             self.scc_live = live.get(k).copied().unwrap_or(true);
             let start = self.out.body.len();
             self.pre.clear();
