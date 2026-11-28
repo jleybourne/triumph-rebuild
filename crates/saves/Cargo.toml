@@ -10,3 +10,7 @@ version.workspace = true
 [dependencies]
 rebuild-gdk = { path = "../gdk" }
 rebuild-vfs = { path = "../vfs" }
+
+[[bin]]
+name = "savedump"
+path = "src/bin/savedump.rs"
