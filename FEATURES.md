@@ -45,7 +45,7 @@
 | ✅ | **Bink 2 video** | the intro video plays |
 | ✅ | **Tiled textures written by the CPU** | converted from the console's tile layouts on the GPU; streamed world textures and the loading-screen artwork draw |
 | 🔄 | **Shaders** | RDNA2 shaders translated to DXIL: 12,981 of 25,694 compile, 5,195 checked bit-exact |
-| 🔄 | **Shader library built on your PC** | built once from your own copy of the game; nothing translated is shipped |
+| ✅ | **Shader library built on your PC** | built once from your own copy of the game; nothing translated is shipped |
 | ⏳ | **Upscaling** | DLSS on NVIDIA, FSR on everything else; both run standalone, wiring to the title is next |
 
 ## 🖥️ Display
@@ -114,7 +114,7 @@
 | ✅ | **Frame line** | one line a second: fps, frame time, GPU time, draws, upload, translation |
 | ✅ | **Scripted input and captures** | `REBUILD_INPUT_SCRIPT="40s:A,60s:cap"`: timed presses and full-resolution captures, without the overlays unless asked |
 | 🔄 | **Live control** | a pipe to press buttons and take captures while the game runs |
-| ✅ | **Tests** | 809 tests; GPU tests run on WARP, so no card is needed |
+| ✅ | **Tests** | 824 tests; GPU tests run on WARP, so no card is needed |
 | ✅ | **Shader checker** | every translated shader compared bit-for-bit against a reference on WARP |
 | ✅ | **Traces** | lists, textures, descriptors, Bink, files, saves: each behind its own switch |
 
