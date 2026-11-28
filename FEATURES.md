@@ -16,8 +16,8 @@
 </p>
 
 > [!NOTE]
-> **Where the game is:** the title boots, plays its intro video, and runs its first-run menus readably at its own
-> 30 fps cap (about 260 fps with the cap off). Gameplay is not reached yet. See [progress](progress.md).
+> **Where the game is:** the title boots, plays its intro video, runs its first-run menus readably at its own
+> 30 fps cap (about 260 fps with the cap off), saves, and starts loading the world. Gameplay is not reached yet. See [progress](progress.md).
 
 ---
 
@@ -30,7 +30,7 @@
 | ✅ | **Intel CPUs too** | AMD-only SSE4a instructions the title uses are emulated |
 | ✅ | **Guarded runs** | one instance at a time, a memory budget scaled to installed RAM, a watchdog, and a crash reporter |
 | ✅ | **The title's files stay untouched** | the game folder is read-only; anything the title writes goes to its own data folder |
-| 🔄 | **Gameplay** | the menus are done; the next step is driving setup through to the story start |
+| 🔄 | **Gameplay** | first-run setup completes and saves; the world starts loading; next: fitting the world in video memory |
 
 ## 🖼️ Graphics
 
@@ -43,7 +43,7 @@
 | ✅ | **Depth buffers written by compute** | every one gets a twin the shaders can write; 0 unusable views |
 | ✅ | **Textures written by the CPU** | video frames, font glyphs and UI gradients reach the GPU |
 | ✅ | **Bink 2 video** | the intro video plays |
-| 🔄 | **Tiled textures written by the CPU** | 606 textures in the console's tile layout; needed for streamed world textures |
+| ✅ | **Tiled textures written by the CPU** | converted from the console's tile layouts on the GPU; streamed world textures and the loading-screen artwork draw |
 | 🔄 | **Shaders** | RDNA2 shaders translated to DXIL: 12,981 of 25,694 compile, 5,195 checked bit-exact |
 | 🔄 | **Shader library built on your PC** | built once from your own copy of the game; nothing translated is shipped |
 | ⏳ | **Upscaling** | DLSS on NVIDIA, FSR on everything else; both run standalone, wiring to the title is next |
@@ -114,7 +114,7 @@
 | ✅ | **Frame line** | one line a second: fps, frame time, GPU time, draws, upload, translation |
 | ✅ | **Scripted input and captures** | `REBUILD_INPUT_SCRIPT="40s:A,60s:cap"`: timed presses and full-resolution captures, without the overlays unless asked |
 | 🔄 | **Live control** | a pipe to press buttons and take captures while the game runs |
-| ✅ | **Tests** | 791 tests; GPU tests run on WARP, so no card is needed |
+| ✅ | **Tests** | 795 tests; GPU tests run on WARP, so no card is needed |
 | ✅ | **Shader checker** | every translated shader compared bit-for-bit against a reference on WARP |
 | ✅ | **Traces** | lists, textures, descriptors, Bink, files, saves: each behind its own switch |
 
