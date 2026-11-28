@@ -726,6 +726,90 @@ fn dsv_key(v: &D3D12_DEPTH_STENCIL_VIEW_DESC) -> u64 {
 }
 
 /// A default SRV of a texture (the title passed no description).
+/// The host texture's mip count and array size (3D: 1), as the host made it.
+fn host_extent(r: &Resource) -> Option<(u32, u32)> {
+    r.host.as_ref().map(extent_of)
+}
+
+/// A host texture's mip count and array size (3D: 1).
+fn extent_of(h: &ID3D12Resource) -> (u32, u32) {
+    // SAFETY: a live host resource
+    let d = unsafe { h.GetDesc() };
+    let arrays = if d.Dimension.0 == DIMENSION_TEXTURE3D { 1 } else { u32::from(d.DepthOrArraySize.max(1)) };
+    (u32::from(d.MipLevels.max(1)), arrays)
+}
+
+/// A mip range clamped to `mips`: the first mip inside, the count at least 1 and inside (`u32::MAX` = all, kept).
+fn fit_mips(first: &mut u32, count: &mut u32, mips: u32) {
+    *first = (*first).min(mips - 1);
+    if *count != u32::MAX {
+        *count = (*count).clamp(1, mips - *first);
+    }
+}
+
+/// An array range clamped to `arrays`.
+fn fit_slices(first: &mut u32, size: &mut u32, arrays: u32) {
+    *first = (*first).min(arrays - 1);
+    *size = (*size).clamp(1, arrays - *first);
+}
+
+/// A texture SRV made to fit its resource (the console clamps; the host refuses and removes the device).
+pub(crate) fn fit_srv(v: &mut D3D12_SHADER_RESOURCE_VIEW_DESC, mips: u32, arrays: u32) {
+    // SAFETY: each arm reads the union member its dimension selects
+    unsafe {
+        match v.ViewDimension {
+            D3D12_SRV_DIMENSION_TEXTURE1D => fit_mips(&mut v.Anonymous.Texture1D.MostDetailedMip, &mut v.Anonymous.Texture1D.MipLevels, mips),
+            D3D12_SRV_DIMENSION_TEXTURE1DARRAY => {
+                let t = &mut v.Anonymous.Texture1DArray;
+                fit_mips(&mut t.MostDetailedMip, &mut t.MipLevels, mips);
+                fit_slices(&mut t.FirstArraySlice, &mut t.ArraySize, arrays);
+            }
+            D3D12_SRV_DIMENSION_TEXTURE2D => fit_mips(&mut v.Anonymous.Texture2D.MostDetailedMip, &mut v.Anonymous.Texture2D.MipLevels, mips),
+            D3D12_SRV_DIMENSION_TEXTURE2DARRAY => {
+                let t = &mut v.Anonymous.Texture2DArray;
+                fit_mips(&mut t.MostDetailedMip, &mut t.MipLevels, mips);
+                fit_slices(&mut t.FirstArraySlice, &mut t.ArraySize, arrays);
+            }
+            D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY => {
+                let t = &mut v.Anonymous.Texture2DMSArray;
+                fit_slices(&mut t.FirstArraySlice, &mut t.ArraySize, arrays);
+            }
+            D3D12_SRV_DIMENSION_TEXTURE3D => fit_mips(&mut v.Anonymous.Texture3D.MostDetailedMip, &mut v.Anonymous.Texture3D.MipLevels, mips),
+            D3D12_SRV_DIMENSION_TEXTURECUBE => fit_mips(&mut v.Anonymous.TextureCube.MostDetailedMip, &mut v.Anonymous.TextureCube.MipLevels, mips),
+            D3D12_SRV_DIMENSION_TEXTURECUBEARRAY => {
+                let t = &mut v.Anonymous.TextureCubeArray;
+                fit_mips(&mut t.MostDetailedMip, &mut t.MipLevels, mips);
+                t.First2DArrayFace = t.First2DArrayFace.min(arrays.saturating_sub(6));
+                t.NumCubes = t.NumCubes.clamp(1, ((arrays - t.First2DArrayFace) / 6).max(1));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A texture UAV made to fit its resource.
+pub(crate) fn fit_uav(v: &mut D3D12_UNORDERED_ACCESS_VIEW_DESC, mips: u32, arrays: u32) {
+    // SAFETY: as fit_srv
+    unsafe {
+        match v.ViewDimension {
+            D3D12_UAV_DIMENSION_TEXTURE1D => v.Anonymous.Texture1D.MipSlice = v.Anonymous.Texture1D.MipSlice.min(mips - 1),
+            D3D12_UAV_DIMENSION_TEXTURE1DARRAY => {
+                let t = &mut v.Anonymous.Texture1DArray;
+                t.MipSlice = t.MipSlice.min(mips - 1);
+                fit_slices(&mut t.FirstArraySlice, &mut t.ArraySize, arrays);
+            }
+            D3D12_UAV_DIMENSION_TEXTURE2D => v.Anonymous.Texture2D.MipSlice = v.Anonymous.Texture2D.MipSlice.min(mips - 1),
+            D3D12_UAV_DIMENSION_TEXTURE2DARRAY => {
+                let t = &mut v.Anonymous.Texture2DArray;
+                t.MipSlice = t.MipSlice.min(mips - 1);
+                fit_slices(&mut t.FirstArraySlice, &mut t.ArraySize, arrays);
+            }
+            D3D12_UAV_DIMENSION_TEXTURE3D => v.Anonymous.Texture3D.MipSlice = v.Anonymous.Texture3D.MipSlice.min(mips - 1),
+            _ => {}
+        }
+    }
+}
+
 fn default_srv(r: &Resource) -> D3D12_SHADER_RESOURCE_VIEW_DESC {
     let d = &r.desc;
     let format = DXGI_FORMAT(format::default_view_format(r.view_format, false) as i32);
@@ -952,6 +1036,10 @@ impl Resources {
                     None => default_srv(r),
                 };
                 v.Format = view_format(v.Format.0, r, false);
+                // the console clamps a view to its resource; the host removes the device for one that does not fit
+                if let Some((mips, arrays)) = host_extent(r) {
+                    fit_srv(&mut v, mips, arrays);
+                }
                 let k = srv_key(&v);
                 self.texture_entry(r, k, HostView::Srv { resource: r.host_raw(), desc: v })
             }
@@ -1001,6 +1089,9 @@ impl Resources {
                     None => default_uav(r),
                 };
                 v.Format = view_format(v.Format.0, r, false);
+                if let Some((mips, arrays)) = host_extent(r) {
+                    fit_uav(&mut v, mips, arrays);
+                }
                 let k = uav_key(&v);
                 self.texture_entry(r, k, HostView::Uav { resource: r.host_raw(), desc: v })
             }
@@ -1129,11 +1220,15 @@ impl Resources {
                             // SAFETY: 10 words are a D3D12_UNORDERED_ACCESS_VIEW_DESC.
                             let mut d: D3D12_UNORDERED_ACCESS_VIEW_DESC = unsafe { std::mem::transmute_copy(&pc) };
                             d.Format = fmt(pc[0]);
+                            let (mips, arrays) = extent_of(&t);
+                            fit_uav(&mut d, mips, arrays);
                             HostView::Uav { resource: raw, desc: d }
                         } else {
                             // SAFETY: 10 words are a D3D12_SHADER_RESOURCE_VIEW_DESC.
                             let mut d: D3D12_SHADER_RESOURCE_VIEW_DESC = unsafe { std::mem::transmute_copy(&pc) };
                             d.Format = fmt(pc[0]);
+                            let (mips, arrays) = extent_of(&t);
+                            fit_srv(&mut d, mips, arrays);
                             HostView::Srv { resource: raw, desc: d }
                         };
                         let rec = self.inner.entries.add(EntryView::Texture(view), 0);
@@ -1393,5 +1488,35 @@ impl Resources {
     /// The range holding `va` as the CPU sees it ([`crate::Memory::visible`]).
     pub fn cpu_memory(&self, va: u64) -> Option<MemoryRange> {
         self.inner.memory.visible(va)
+    }
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::{fit_srv, fit_uav};
+    use windows::Win32::Graphics::Direct3D12::*;
+
+    #[test]
+    fn a_view_wider_than_its_texture_is_clamped_to_it() {
+        // the title's view: 15 mips over a 1-mip texture (debug #31, device removed)
+        let mut v = D3D12_SHADER_RESOURCE_VIEW_DESC { ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D, ..Default::default() };
+        v.Anonymous.Texture2D = D3D12_TEX2D_SRV { MostDetailedMip: 0, MipLevels: 15, ..Default::default() };
+        fit_srv(&mut v, 1, 1);
+        unsafe { assert_eq!((v.Anonymous.Texture2D.MostDetailedMip, v.Anonymous.Texture2D.MipLevels), (0, 1)) };
+        // "all mips" stays all; a first mip or slice past the end comes back inside
+        let mut a = D3D12_SHADER_RESOURCE_VIEW_DESC { ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2DARRAY, ..Default::default() };
+        a.Anonymous.Texture2DArray = D3D12_TEX2D_ARRAY_SRV { MostDetailedMip: 9, MipLevels: u32::MAX, FirstArraySlice: 7, ArraySize: 20, ..Default::default() };
+        fit_srv(&mut a, 4, 6);
+        let t = unsafe { a.Anonymous.Texture2DArray };
+        assert_eq!((t.MostDetailedMip, t.MipLevels, t.FirstArraySlice, t.ArraySize), (3, u32::MAX, 5, 1));
+        // a view that fits is untouched
+        let mut ok = D3D12_SHADER_RESOURCE_VIEW_DESC { ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D, ..Default::default() };
+        ok.Anonymous.Texture2D = D3D12_TEX2D_SRV { MostDetailedMip: 1, MipLevels: 2, ..Default::default() };
+        fit_srv(&mut ok, 4, 1);
+        unsafe { assert_eq!((ok.Anonymous.Texture2D.MostDetailedMip, ok.Anonymous.Texture2D.MipLevels), (1, 2)) };
+        let mut u = D3D12_UNORDERED_ACCESS_VIEW_DESC { ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D, ..Default::default() };
+        u.Anonymous.Texture2D = D3D12_TEX2D_UAV { MipSlice: 5, PlaneSlice: 0 };
+        fit_uav(&mut u, 2, 1);
+        unsafe { assert_eq!(u.Anonymous.Texture2D.MipSlice, 1) };
     }
 }
