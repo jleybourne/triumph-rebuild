@@ -101,7 +101,7 @@ saves, mods) · <a href="docs/building.md">building</a> (from source, tests, the
 |:-:|:--|:--|
 | ✅ | **Controller** | through our own GameInput |
 | ✅ | **Keyboard** | mapped to the controller |
-| 🔄 | **Audio** | checking every audio path the title uses (music, effects, video sound) and filling the gaps |
+| 🔄 | **Audio** | the intro video's sound and the music play; the game's own sound engine (effects, world audio) is next |
 
 ## 🌐 Online
 
@@ -117,7 +117,7 @@ saves, mods) · <a href="docs/building.md">building</a> (from source, tests, the
 | ✅ | **Frame line** | one line a second: fps, frame time, GPU time, draws, upload, translation |
 | ✅ | **Scripted input and captures** | `REBUILD_INPUT_SCRIPT="40s:A,60s:cap"`: timed presses and full-resolution captures, without the overlays unless asked |
 | 🔄 | **Live control** | a pipe to press buttons and take captures while the game runs |
-| ✅ | **Tests** | 844 tests; GPU tests run on WARP, so no card is needed |
+| ✅ | **Tests** | 849 tests; GPU tests run on WARP, so no card is needed |
 | ✅ | **Shader checker** | every translated shader compared bit-for-bit against a reference on WARP |
 | ✅ | **Traces** | lists, textures, descriptors, Bink, files, saves: each behind its own switch |
 | ✅ | **Release zip** | `scripts/package.ps1`: the launcher, the layer, DXC and every licence, in one portable zip; refuses if the repository or the zip would hold game data ([building](docs/building.md#packaging)) |
