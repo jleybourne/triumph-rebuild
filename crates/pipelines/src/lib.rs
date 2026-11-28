@@ -19,18 +19,22 @@
 //!   the library does not hold.
 //! - [`rectgs`]: the geometry stage that draws the console's rectangle lists, made from a vertex shader's
 //!   outputs, compiled once per signature.
+//! - [`shaderlib`]: the library built on the user's machine from their own game (the launcher's "Preparing
+//!   shaders"): resumable, versioned, incremental. [`dxc`]: finding the compiler (bundled, or the SDK).
 //! - [`ondemand`]: those programs, translated on a pool worker when the title first creates them, cached on
 //!   disk for the next session.
 //! - `rootmap` (Windows): the root seam, how a translated program's user data is made from the title's root
 //!   arguments (`docs/design/root-seam.md`), read from the console program's root layout.
 
 pub mod bindings;
+pub mod dxc;
 pub mod layout;
 pub mod library;
 pub mod ondemand;
 pub mod pool;
 pub mod rectgs;
 pub mod session;
+pub mod shaderlib;
 pub mod sidecar;
 pub mod state;
 pub mod stream;

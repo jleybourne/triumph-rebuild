@@ -419,6 +419,15 @@ pub struct App {
     shots: Option<Shots>,
     /// tests: a lock file that always exists, so no D3D12 device is ever created
     lock_override: Option<PathBuf>,
+    /// "Preparing shaders": the build in progress (one game at a time), the selected game's need (read once
+    /// per game), DXC (found once at start), the workers a build starts with, whether the Preparing screen
+    /// is up, and whether Play launches when the build is done
+    shader_job: Option<rebuild_launcher::shaders::Job>,
+    shader_need: Option<(String, rebuild_launcher::shaders::Need)>,
+    shader_dxc: Result<PathBuf, String>,
+    shader_workers: usize,
+    preparing: bool,
+    launch_when_ready: bool,
 }
 
 /// What the launcher is doing that needs frames without input.
@@ -430,6 +439,8 @@ struct RepaintNeeds {
     check_pending: bool,
     game_running: bool,
     minimised: bool,
+    /// a shader library build is running (its progress is shown)
+    shaders_building: bool,
 }
 
 /// Idle is the default: with nothing moving, the launcher waits for input (an hour is "never" to egui;
@@ -447,7 +458,7 @@ fn repaint_after(n: RepaintNeeds) -> Duration {
     if n.check_pending {
         d = d.min(Duration::from_millis(100));
     }
-    if n.game_running {
+    if n.game_running || n.shaders_building {
         d = d.min(Duration::from_millis(if n.minimised { 1000 } else { 250 }));
     }
     d
@@ -551,6 +562,13 @@ impl App {
             fixture,
             preview_running: false,
             lock_override: None,
+            shader_job: None,
+            shader_need: None,
+            // fixtures and screenshots never build a library
+            shader_dxc: if fixture || shots.is_some() { Err("fixture".into()) } else { rebuild_launcher::shaders::find_dxc() },
+            shader_workers: rebuild_launcher::shaders::default_workers(),
+            preparing: false,
+            launch_when_ready: false,
             shots: shots.map(|dir| {
                 let mut plan = Vec::new();
                 for (theme, dark) in [("dark", true), ("light", false)] {
@@ -746,6 +764,9 @@ impl App {
             self.toast(Tone::Danger, e);
             return;
         }
+        // a build of the other game goes on in the background, but never launches this one
+        self.preparing = false;
+        self.launch_when_ready = false;
         self.load_game(ctx);
         let name = self.library.selected_game().map(|g| g.name.clone()).unwrap_or_default();
         self.toast(Tone::Accent, format!("Switched to {name}"));
@@ -894,8 +915,24 @@ impl App {
         ok
     }
 
-    /// Launch from Play: the saved settings, in a new session.
+    /// Launch from Play. A game whose shader library is not built yet gets the Preparing shaders screen first
+    /// (it launches when the build is done, or at once with "Play now").
     fn launch(&mut self) {
+        if self.running.is_none() && !self.fixture && matches!(self.shader_need(), Some(rebuild_launcher::shaders::Need::Build(_))) && self.start_shaders() {
+            self.preparing = true;
+            self.launch_when_ready = true;
+            self.set_tab(Tab::Play);
+            return;
+        }
+        self.launch_now();
+    }
+
+    /// Launch from Play now: the saved settings, in a new session. A shader build still running is stopped
+    /// (its DXC processes would compete with the game); it resumes next time.
+    fn launch_now(&mut self) {
+        if self.shader_job.is_some() {
+            self.stop_shaders();
+        }
         if let Err(e) = self.start_run(None, false) {
             self.toast(Tone::Danger, e);
         } else {
@@ -941,6 +978,12 @@ impl App {
         if let Some(g) = self.library.selected_game() {
             env.push((rebuild_storage::ENV_GAME_ID.into(), g.id.clone()));
             env.push((rebuild_storage::ENV_GAME_BUILD.into(), rebuild_storage::identify(&g.dir).build));
+        }
+        // the layer translates what the library lacks with the same DXC the launcher found (bundled beside it)
+        if let Ok(d) = &self.shader_dxc {
+            if std::env::var_os("REBUILD_DXC").is_none() {
+                env.push(("REBUILD_DXC".into(), d.display().to_string()));
+            }
         }
         let exe = if proof {
             PathBuf::from(self.proof_exe.trim())
@@ -1042,6 +1085,7 @@ impl App {
     }
 
     fn poll(&mut self, now: f64) {
+        self.poll_shaders();
         if let Some(t) = &mut self.tail {
             let more = t.poll();
             self.frames.extend(more.iter().filter_map(|l| frameline::parse(l)));
@@ -1113,6 +1157,7 @@ impl App {
             check_pending: self.check_rx.is_some() || self.verify_rx.is_some() || self.specs_rx.is_some(),
             game_running: self.running.is_some() || self.plan.is_some(),
             minimised,
+            shaders_building: self.shader_job.is_some(),
         })
     }
 
@@ -1193,6 +1238,14 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frame(ctx);
     }
+
+    /// Closing the launcher stops a shader build at the next program: everything on disk is kept and the next
+    /// build resumes there.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(j) = &self.shader_job {
+            j.cancel();
+        }
+    }
 }
 
 impl App {
@@ -1238,6 +1291,7 @@ impl App {
                     }
                     match self.tab {
                         Tab::Play if self.is_running() => self.running_view(ui, now),
+                        Tab::Play if self.preparing => self.preparing_view(ui),
                         Tab::Play => self.play(ui),
                         Tab::Profiles => self.profiles_page(ui),
                         Tab::Settings => self.settings_page(ui),
@@ -1735,6 +1789,63 @@ mod smoke {
         assert!(app.rec.as_ref().unwrap().matches(&app.store.model.config));
         assert!(app.dirty(), "Apply doesn't save by itself");
         run.set_tab_frames(&mut app, Tab::Play);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Adding a game starts its shader library in the background; once it is ready Play launches at once.
+    /// After Clear cache, Play shows Preparing shaders, and launches (here: tries to) when the build is done.
+    #[test]
+    fn first_play_prepares_shaders_and_a_cleared_cache_prepares_them_again() {
+        use rebuild_launcher::shaders::Need;
+        let root = std::env::temp_dir().join(format!("triumph-launcher-shaders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let a = package(&root.join("games"), "a", "Placeholder A");
+        // an archive with no programs: the build runs every step and compiles nothing
+        std::fs::write(a.join("shaders.rpf"), b"no programs in here").unwrap();
+        let dxc = root.join("dxc.exe");
+        std::fs::write(&dxc, b"stand-in").unwrap();
+        let lock = root.join("MEASURING");
+        std::fs::write(&lock, b"").unwrap();
+        let ctx = egui::Context::default();
+        let mut run = Run { ctx: ctx.clone(), t: 0.0 };
+        let mut app = App::new(&ctx, root.join("app"), None, false);
+        app.lock_override = Some(lock.clone());
+        app.shader_dxc = Ok(dxc.clone());
+        let wait = |app: &mut App, run: &mut Run| {
+            for _ in 0..500 {
+                if app.shader_job.as_ref().is_none_or(|j| j.finished()) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            run.frames(app, 2);
+        };
+        let det = library::detect(&a, &app.detectors).0;
+        assert!(app.confirm_add(&ctx, &a, &det, true));
+        assert!(app.shader_job.is_some(), "adding the game starts its build");
+        assert!(!app.preparing, "in the background");
+        wait(&mut app, &mut run);
+        assert!(app.shader_job.is_none());
+        assert!(matches!(app.shader_need(), Some(Need::Ready(_))), "{:?}", app.shader_need());
+        run.set_tab_frames(&mut app, Tab::Diagnostics);
+        // Clear cache: missing again; Play prepares, then launches
+        let store = app.game_store().unwrap();
+        app.clear_cache_for_test(&store);
+        assert!(matches!(app.shader_need(), Some(Need::Build(_))));
+        app.launch();
+        assert!(app.preparing && app.launch_when_ready && app.shader_job.is_some(), "Preparing shaders, launching when done");
+        run.frames(&mut app, 2);
+        wait(&mut app, &mut run);
+        assert!(!app.preparing && !app.launch_when_ready, "the build finished and Play went on to launch");
+        assert!(matches!(app.shader_need(), Some(Need::Ready(_))));
+        // Continue later and Play now from the screen
+        app.clear_cache_for_test(&store);
+        app.launch();
+        assert!(app.preparing);
+        app.stop_shaders();
+        app.preparing = false;
+        run.set_tab_frames(&mut app, Tab::Play);
+        drop(app);
         let _ = std::fs::remove_dir_all(&root);
     }
 

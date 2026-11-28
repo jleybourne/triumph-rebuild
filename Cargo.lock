@@ -2183,6 +2183,7 @@ dependencies = [
  "png 0.17.16",
  "rebuild-config",
  "rebuild-gdk",
+ "rebuild-pipelines",
  "rebuild-saves",
  "rebuild-storage",
  "rebuild-vfs",
@@ -2219,7 +2220,9 @@ dependencies = [
  "rebuild-sir",
  "rebuild-storage",
  "rebuild-xlist",
+ "toml 0.8.23",
  "windows",
+ "zlib-rs",
 ]
 
 [[package]]

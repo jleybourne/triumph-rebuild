@@ -87,6 +87,7 @@ impl App {
             let builds: Vec<String> = sizes.cache.iter().map(|(b, n)| format!("{b} {}", bytes(*n))).collect();
             row(ui, "Cache", format!("{}{}", bytes(sizes.cache_total), if builds.is_empty() { String::new() } else { format!(" · {}", builds.join(" · ")) }), Some(store.cache.clone()), &mut open);
             row(ui, "Logs", bytes(sizes.logs), Some(store.sessions_dir()), &mut open);
+            self.shader_storage_row(ui);
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
                 let old_builds = sizes.cache.iter().any(|(b, _)| b != &store.build && b != "bcpack");
@@ -171,7 +172,17 @@ impl App {
         refresh
     }
 
+    #[cfg(test)]
+    pub fn clear_cache_for_test(&mut self, store: &GameStore) {
+        self.clear_cache(store, false);
+    }
+
     fn clear_cache(&mut self, store: &GameStore, old_only: bool) {
+        // a shader build writing into this cache stops first; the next Play builds it again from nothing
+        if self.shader_job.as_ref().is_some_and(|j| j.game == store.id) {
+            self.stop_shaders();
+        }
+        self.shader_need = None;
         let keep = old_only.then_some(store.build.as_str());
         match store.clear_cache(keep) {
             Ok(n) => self.toast(Tone::Accent, format!("Cache cleared: {} freed (saves and settings untouched)", bytes(n))),

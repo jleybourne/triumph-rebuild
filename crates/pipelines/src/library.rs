@@ -98,7 +98,25 @@ pub struct BuildStats {
 
 /// Builds a library file from programs. `serialize` turns a root signature into its blob (the host's
 /// serializer, or a stand-in in tests); it runs on `threads` threads.
-pub fn build<F>(path: &Path, user_dwords: u32, mut programs: Vec<Input>, threads: usize, serialize: F) -> Result<BuildStats, String>
+pub fn build<F>(path: &Path, user_dwords: u32, programs: Vec<Input>, threads: usize, serialize: F) -> Result<BuildStats, String>
+where
+    F: Fn(&RootDesc) -> Result<Vec<u8>, String> + Sync,
+{
+    let (out, mut st) = encode(user_dwords, programs, threads, serialize)?;
+    let t = Instant::now();
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    // written beside, then renamed over: a reader never sees half a library
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &out).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))?;
+    st.write += t.elapsed();
+    Ok(st)
+}
+
+/// A library's bytes, as [`build`] writes them.
+pub fn encode<F>(user_dwords: u32, mut programs: Vec<Input>, threads: usize, serialize: F) -> Result<(Vec<u8>, BuildStats), String>
 where
     F: Fn(&RootDesc) -> Result<Vec<u8>, String> + Sync,
 {
@@ -180,14 +198,7 @@ where
     }
     let h = content_hash(&out[HEADER..]);
     out[0x20..0x40].copy_from_slice(&h);
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
-    }
-    // written beside, then renamed over: a reader never sees half a library
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, &out).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(BuildStats {
+    let st = BuildStats {
         programs: programs.len(),
         layouts: layouts.len(),
         compute_roots: cs.len(),
@@ -198,7 +209,8 @@ where
         file_bytes: out.len(),
         serialize: serialize_time,
         write: t.elapsed(),
-    })
+    };
+    Ok((out, st))
 }
 
 /// `f` over `items` on `threads` threads, results in order.
@@ -307,10 +319,24 @@ impl Library {
         for h in hashes {
             all.extend(h?);
         }
-        if &data[0..8] != MAGIC || u32_at(&data, 8) != VERSION {
+        let lib = Library::from_data(data, verify.then_some(all))?;
+        Ok((lib, LoadStats { bytes: len, threads, read, verified: verify, total: t0.elapsed() }))
+    }
+
+    /// A library with no programs (what the layer runs with before the launcher has built one: every program
+    /// is then translated on demand).
+    pub fn empty(user_dwords: u32) -> Library {
+        let (data, _) = encode(user_dwords, Vec::new(), 1, |_| Err("no root signatures in an empty library".to_string())).expect("an empty library encodes");
+        Library::from_data(data, None).expect("an empty library reads back")
+    }
+
+    /// The checks [`Library::load`] makes, on bytes already read (`chunks`: each 1 MiB chunk's hash, to verify
+    /// the content hash against; `None`: not verified).
+    fn from_data(data: Vec<u8>, chunks: Option<Vec<[u8; 32]>>) -> Result<Library, String> {
+        if data.len() < HEADER || &data[0..8] != MAGIC || u32_at(&data, 8) != VERSION {
             return Err("not a pipeline library of this version".into());
         }
-        if verify {
+        if let Some(all) = chunks {
             let mut h = blake3::Hasher::new();
             for c in &all {
                 h.update(c);
@@ -328,7 +354,7 @@ impl Library {
             data,
         };
         lib.check_tables()?;
-        Ok((lib, LoadStats { bytes: len, threads, read, verified: verify, total: t0.elapsed() }))
+        Ok(lib)
     }
 
     fn layouts_at(&self) -> usize {
