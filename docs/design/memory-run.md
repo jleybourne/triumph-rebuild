@@ -97,6 +97,23 @@ it across the 4 workers made it **slower** (32.7 ms a pass): concurrent calls on
 the kernel. Kept serial. To shrink it: watch less (memory the title never writes after load could leave the ring
 once it is quiet), not watch faster.
 
+**Cold slices (since #60).** GetWriteWatch costs ~0.9 ms a GiB untouched, ~1.25 ms touched, however little
+changed, plus ~86 ns a written page. The ring reads it per 64 MiB slice; a slice no write touched for 30 passes is
+read on one pass in `REBUILD_COLD_EVERY` (default 4, staggered). Nothing is lost (a page's bit waits until it is
+read): a write into a cold slice reaches the GPU at most 3 passes late (~100 ms at 30 passes a second), then the
+slice is hot again. An exact alternative (cold slices read-only, the first write caught by an exception handler)
+is not safe here: the title's own `ReadFile` goes to the host, and a kernel write into a read-only buffer fails
+instead of faulting.
+
+**Address-space queries.** `VirtualQuery` walks the page tables of the region it lands in (16 ms on 2 GiB); labels
+asked `titlemem` every frame and that was ~69 % of the render thread. `rebuild_d3d12x::vmem` answers from the
+allocation's descriptor (`QueryVirtualMemoryInformation(MemoryRegionInfo)`, 3 µs) and falls back to `VirtualQuery`
+only for partly committed allocations.
+
+Card, 30 s, same machine and hour, master vs this: 11 fps vs 30 (the title's own cap; `wait` 32.7 ms a frame);
+upload pass 20.0 ms (watch 16.9) vs 4.2 ms (watch 2.6; 1.9 GiB read, 3.1 GiB of cold slices skipped a pass);
+`titlemem` opens 346 vs 2.
+
 ## Cost
 
 Submit thread: one channel send and one queue `Wait` per `ExecuteCommandLists`. Per draw: nothing new (views are
