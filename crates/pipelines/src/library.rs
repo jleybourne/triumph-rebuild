@@ -267,6 +267,12 @@ fn read_exact_at(f: &std::fs::File, mut buf: &mut [u8], mut at: u64) -> Result<(
 }
 
 impl Library {
+    /// The library's identity: the BLAKE3 of its content, from its header (what `load` checks with `verify`).
+    /// Two builds of different programs never share it.
+    pub fn identity(&self) -> [u8; 32] {
+        self.data[0x20..0x40].try_into().unwrap()
+    }
+
     /// Reads a library on `threads` threads (each reads, and if `verify`, hashes, its own run of 1 MiB
     /// chunks), then checks its header and tables. A library that fails any check is refused whole.
     pub fn load(path: &Path, threads: usize, verify: bool) -> Result<(Library, LoadStats), String> {

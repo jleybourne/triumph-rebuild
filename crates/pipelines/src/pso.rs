@@ -790,6 +790,24 @@ pub fn default_cache_path() -> PathBuf {
     crate::session::default_dir().join("pso-cache.bin")
 }
 
+/// The cache file for one program library: `<dir>\pso-cache-<first 8 bytes of its identity>.bin`. A cache
+/// holds PSOs built from the library's DXIL and root signatures; one built from another library is refused
+/// entry by entry mid-run (debug #972, "pipeline state desc provided does not match", and a rebuild: stutter),
+/// so a new library starts a fresh file. Caches of other libraries in the folder are removed.
+pub fn cache_path_for(identity: &[u8; 32]) -> PathBuf {
+    let dir = crate::session::default_dir();
+    let name = format!("pso-cache-{}.bin", identity[..8].iter().map(|b| format!("{b:02x}")).collect::<String>());
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if n.starts_with("pso-cache") && n.ends_with(".bin") && n != name {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    dir.join(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
