@@ -28,6 +28,8 @@ pub mod detile;
 pub mod bink;
 #[cfg(windows)]
 pub mod mapped;
+#[cfg(windows)]
+pub mod tilequeue;
 pub mod pagemap;
 pub mod drives;
 pub mod dxgi;
