@@ -119,7 +119,48 @@ pub fn stats_rows(st: &Stats) -> Vec<(&'static str, String)> {
         ("Late presents", n(st.late)),
         ("Resolution", format!("{} → {}", size(st.internal), size(st.output))),
         ("Overlay CPU / GPU", format!("{} / {}", us(st.overlay_cpu_us), us(st.overlay_gpu_us))),
+        ("CPU (process)", st.cpu_pct.map_or("-".to_string(), |v| format!("{v:.0} %"))),
+        ("RAM / commit", format!("{} / {}", gb(st.ram_mb), gb(st.commit_mb))),
+        ("VRAM used / budget", st.vram_mb.map_or("-".to_string(), |(u, b)| format!("{} / {}", gb(Some(u)), gb(Some(b))))),
+        ("Upload", st.upload.map_or("-".to_string(), |(ms, mb)| format!("{ms:.1} ms, {mb:.2} MB a frame"))),
     ]
+}
+
+/// MiB as GB with one decimal.
+fn gb(mb: Option<f64>) -> String {
+    mb.map_or("-".to_string(), |m| format!("{:.1} GB", m / 1024.0))
+}
+
+/// The resource monitor while the menu is closed: performance, resources, work.
+pub fn hud_lines(st: &Stats) -> Vec<String> {
+    let mut lines = vec![hud_line(st)];
+    let mut r = Vec::new();
+    if let Some(v) = st.cpu_pct {
+        r.push(format!("cpu {v:.0}%"));
+    }
+    if st.ram_mb.is_some() {
+        r.push(format!("ram {}", gb(st.ram_mb)));
+    }
+    if let Some((u, b)) = st.vram_mb {
+        r.push(format!("vram {:.1}/{:.1} GB", u / 1024.0, b / 1024.0));
+    }
+    if !r.is_empty() {
+        lines.push(r.join("  "));
+    }
+    let mut w = Vec::new();
+    if let Some(v) = st.dispatches {
+        w.push(format!("dispatches {}", thousands(v)));
+    }
+    if let Some((ms, mb)) = st.upload {
+        w.push(format!("upload {ms:.1} ms {mb:.2} MB"));
+    }
+    if let Some(v) = st.late.filter(|v| *v > 0) {
+        w.push(format!("late {v}"));
+    }
+    if !w.is_empty() {
+        lines.push(w.join("  "));
+    }
+    lines
 }
 
 /// The one-line readout while the menu is closed.
@@ -157,10 +198,10 @@ pub fn build(menu: &Menu, stats: &Stats, open: bool, hud: bool, size: (u32, u32)
 }
 
 fn readout(p: &mut Painter, st: &Stats, size: (u32, u32)) -> [f32; 4] {
-    let line = hud_line(st);
+    let lines = hud_lines(st);
     let pad = p.px(t::HUD_PAD);
-    let w = p.font.measure(&line) as f32 + 2.0 * pad;
-    let h = p.font.line as f32 + 2.0 * pad;
+    let w = lines.iter().map(|l| p.font.measure(l)).max().unwrap_or(0) as f32 + 2.0 * pad;
+    let h = p.font.line as f32 * lines.len() as f32 + 2.0 * pad;
     let x = (size.0 as f32 - p.px(t::MARGIN) - w).max(0.0).round();
     let y = p.px(t::MARGIN).min((size.1 as f32 - h).max(0.0));
     let r = [x, y, w.min(size.0 as f32 - x), h.min(size.1 as f32 - y)];
@@ -168,7 +209,10 @@ fn readout(p: &mut Painter, st: &Stats, size: (u32, u32)) -> [f32; 4] {
     let s = p.px(t::HUD_SHADOW_SPREAD);
     p.rect(r[0] - s, r[1] - s, r[2] + 2.0 * s, r[3] + 2.0 * s, t::SHADOW, p.px(t::HUD_RADIUS) + s);
     p.rect(r[0], r[1], r[2], r[3], t::HUD, p.px(t::HUD_RADIUS));
-    p.text(x + pad, y + pad, &line, t::TEXT);
+    for (i, l) in lines.iter().enumerate() {
+        // the first line (fps, frame and GPU time) bright, the rest the dimmer text tone
+        p.text(x + pad, y + pad + p.font.line as f32 * i as f32, l, if i == 0 { t::TITLE } else { t::TEXT });
+    }
     // the reported rect spans the shadow too, clamped to the target
     let px0 = (r[0] - s).max(0.0);
     let py0 = (r[1] - s).max(0.0);

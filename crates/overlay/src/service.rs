@@ -204,7 +204,11 @@ impl<S: Source, B: Backend> Service<S, B> {
     /// Lay out again when something shown changed; publish.
     fn refresh(&mut self) {
         let open = self.input.phase() == Phase::Open;
-        let hud = self.menu.config().bool("diagnostics.overlay");
+        let hud = match std::env::var("REBUILD_HUD").ok().as_deref().map(str::trim) {
+            Some("1") => true,
+            Some("0") => false,
+            _ => self.menu.config().bool("diagnostics.overlay"),
+        };
         let Some(size) = self.shared.target().filter(|_| open || hud) else {
             if self.laid.take().is_some() || self.shared.visible() {
                 self.shared.show(None);

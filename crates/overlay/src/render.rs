@@ -684,7 +684,7 @@ mod tests {
         let mut m = menu(&b);
         m.nav(Nav::Down, &mut b);
         m.nav(Nav::Right, &mut b);
-        let stats = Stats { seq: 1, fps: Some(30.04), ms: Some(33.29), gpu: Some(21.0), wait: Some(6.1), draws: Some(4512), dispatches: Some(120), dropped: Some(0), late: Some(0), internal: Some((2560, 1440)), output: Some((3840, 2160)), overlay_cpu_us: Some(21.0), overlay_gpu_us: Some(9.0), pacing: "frame rate title (30.0 fps, the title's interval) | vsync off (tearing allowed)".into() };
+        let stats = Stats { seq: 1, fps: Some(30.04), ms: Some(33.29), gpu: Some(21.0), wait: Some(6.1), draws: Some(4512), dispatches: Some(120), dropped: Some(0), late: Some(0), internal: Some((2560, 1440)), output: Some((3840, 2160)), overlay_cpu_us: Some(21.0), overlay_gpu_us: Some(9.0), pacing: "frame rate title (30.0 fps, the title's interval) | vsync off (tearing allowed)".into(), cpu_pct: Some(23.0), ram_mb: Some(7300.0), commit_mb: Some(9100.0), vram_mb: Some((1100.0, 10900.0)), upload: Some((4.2, 0.03)) };
         for size in [(1920u32, 1080u32), (3840, 2160)] {
             let font = Arc::new(Font::bake(theme::FONT_FACE, theme::FONT_WEIGHT, theme::font_px(size.1)).expect("font"));
             for page in 0..3 {

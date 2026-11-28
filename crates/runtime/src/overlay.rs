@@ -215,6 +215,7 @@ impl Backend for Runtime {
 
     fn stats(&self) -> Stats {
         let l = crate::framelog::latest().unwrap_or_default();
+        let r = crate::resources::sample();
         let f = |cell: &AtomicU64| Some(f64::from_bits(cell.load(Ordering::Relaxed))).filter(|v| *v > 0.0);
         Stats {
             seq: l.t,
@@ -231,6 +232,11 @@ impl Backend for Runtime {
             overlay_cpu_us: f(&CPU_NS).map(|ns| ns / 1000.0),
             overlay_gpu_us: f(&GPU_US),
             pacing: frame::describe(),
+            cpu_pct: r.cpu_pct,
+            ram_mb: r.ram_mb,
+            commit_mb: r.commit_mb,
+            vram_mb: r.vram_mb,
+            upload: l.upload,
         }
     }
 }

@@ -44,6 +44,15 @@ pub struct Stats {
     pub overlay_gpu_us: Option<f64>,
     /// the pacing in words (`frame::describe`)
     pub pacing: String,
+    /// the process's CPU time as a share of every logical processor, %
+    pub cpu_pct: Option<f64>,
+    /// working set and private commit, MiB
+    pub ram_mb: Option<f64>,
+    pub commit_mb: Option<f64>,
+    /// the card's local memory in use by the process and its budget, MiB
+    pub vram_mb: Option<(f64, f64)>,
+    /// the upload ring: ms a pass and MB a frame
+    pub upload: Option<(f64, f64)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

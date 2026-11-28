@@ -273,7 +273,7 @@ pub fn override_export(name: &str) -> Option<u64> {
         "GetModuleFileNameA" => GetModuleFileNameA as *const (),
         "FreeLibrary" => FreeLibrary as *const (),
         // network: ours only while the offline online-mode sandbox is on, else None (the host's)
-        other => return crate::sandbox::override_export(other).or_else(|| crate::exports::override_export(other)),
+        other => return crate::titlewindow::override_export(other).or_else(|| crate::sandbox::override_export(other)).or_else(|| crate::exports::override_export(other)),
     };
     Some(f as usize as u64)
 }

@@ -38,7 +38,10 @@ pub mod pipeline;
 pub mod registry;
 pub mod overlay;
 pub mod present;
+pub mod resources;
 pub mod sandbox;
+#[cfg(windows)]
+pub mod titlewindow;
 pub mod titlemem;
 #[cfg(windows)]
 pub mod memory;
@@ -66,6 +69,12 @@ pub enum Tier {
 /// Host functions whose meaning differs on the console, by function name (any DLL that exports it:
 /// the same function is reached through several API-set names).
 pub const OVERRIDES: &[(&str, &str)] = &[
+    // the title's own windows stay hidden: the frame is presented into ours (titlewindow.rs)
+    ("CreateWindowExW", "window"),
+    ("CreateWindowExA", "window"),
+    ("ShowWindow", "window"),
+    ("ShowWindowAsync", "window"),
+    ("SetWindowPos", "window"),
     // the console's device type: the registry value OEM\ConsoleMode (registry.rs)
     ("RegOpenKeyW", "registry"),
     // traced only with REBUILD_TRACE_READS (winfiles::trace); otherwise the host's
