@@ -402,7 +402,13 @@ fn vram_line_with(census: bool) -> String {
             "local {} / {} MiB budget{}, non-local {} MiB; ",
             mib(used),
             mib(budget),
-            if rebuild_d3d12x::vram::PRESSURE.load(Relaxed) { " (at the budget)" } else { "" },
+            if rebuild_d3d12x::vram::PRESSURE.load(Relaxed) {
+                " (at the budget)"
+            } else if rebuild_d3d12x::vram::NEAR.load(Relaxed) {
+                " (near the budget)"
+            } else {
+                ""
+            },
             mib(other)
         );
     }
@@ -419,6 +425,13 @@ fn vram_line_with(census: bool) -> String {
     if let Some((used, allowed)) = card_pages() {
         s += &format!("card pages {} / {} MiB allowed; ", used >> 20, allowed >> 20);
     }
+    s += &format!(
+        "budget watch: {} reads ({} on a budget event), near {} times, at {} times; ",
+        BUDGET_READS.load(Relaxed),
+        BUDGET_EVENTS.load(Relaxed),
+        NEAR_ON.load(Relaxed),
+        PRESSURE_ON.load(Relaxed)
+    );
     s += &format!("host textures {}", rebuild_d3d12x::vram::report());
     s += &format!("
 vram      mapped textures: {}", crate::mapped::report());
@@ -471,6 +484,38 @@ vram      census (origin, written by: count, host MiB, console MiB, covered MiB,
         (gpu_pages as u64 * P) >> 20,
         (pool_pages as u64 * P) >> 20
     );
+    // across origins, by region: what overlaps on the console (the most aliasing could save), and textures the GPU
+    // does not write that lie over one it does (a view of a target's memory with a host texture of its own)
+    let mut regions: [Vec<rebuild_d3d12x::vram::Live>; 4] = Default::default();
+    for v in groups.values() {
+        for l in v {
+            regions[region(l.address)].push(*l);
+        }
+    }
+    for (r, v) in regions.iter().enumerate().filter(|(_, v)| !v.is_empty()) {
+        let host: u64 = v.iter().map(|l| l.bytes).sum();
+        let console: u64 = v.iter().map(|l| l.console).sum();
+        let covered = union(v.iter().map(|l| (l.address, l.address + l.console)).collect());
+        let mut written: Vec<(u64, u64)> = v.iter().filter(|l| l.gpu_written).map(|l| (l.address, l.address + l.console)).collect();
+        written.sort_unstable();
+        let longest = written.iter().map(|w| w.1 - w.0).max().unwrap_or(0);
+        let over_written = |a: u64, e: u64| {
+            let lo = written.partition_point(|w| w.0 < a.saturating_sub(longest));
+            written[lo..].iter().take_while(|w| w.0 < e).any(|w| w.1 > a)
+        };
+        let (n, bytes) = v.iter().filter(|l| !l.gpu_written && over_written(l.address, l.address + l.console)).fold((0u64, 0u64), |(n, b), l| (n + 1, b + l.bytes));
+        s += &format!(
+            "
+vram      {} memory, all origins: {} textures, host {} MiB, console {} MiB, covered {} MiB; not GPU-written over a GPU-written one: {} ({} host MiB)",
+            REGIONS[r],
+            v.len(),
+            host >> 20,
+            console >> 20,
+            covered >> 20,
+            n,
+            bytes >> 20
+        );
+    }
     for ((o, gw, r), v) in groups {
         let host: u64 = v.iter().map(|l| l.bytes).sum();
         let console: u64 = v.iter().map(|l| l.console).sum();
@@ -504,52 +549,110 @@ vram      census (origin, written by: count, host MiB, console MiB, covered MiB,
 /// Card memory in use and the budget (bytes) at the watcher's last look.
 pub static VRAM_USED: AtomicU64 = AtomicU64::new(0);
 pub static VRAM_BUDGET: AtomicU64 = AtomicU64::new(0);
-/// Times the card reached its budget (pressure on), over the run.
+/// Times the card came near its budget, and reached it (pressure on), over the run.
+pub static NEAR_ON: AtomicU64 = AtomicU64::new(0);
 pub static PRESSURE_ON: AtomicU64 = AtomicU64::new(0);
+/// Budget readings, and of them those a budget-change event woke.
+pub static BUDGET_READS: AtomicU64 = AtomicU64::new(0);
+pub static BUDGET_EVENTS: AtomicU64 = AtomicU64::new(0);
 
-/// Headroom kept under the budget: past `budget - ON`, pressure; back under `budget - OFF`, none.
-const PRESSURE_ON_MARGIN: u64 = 384 << 20;
-const PRESSURE_OFF_MARGIN: u64 = 768 << 20;
+/// Headroom kept under the budget, (on, off): past `budget - on` the level is on, back under `budget - off` off.
+/// Near: new sampled textures go to system memory. At: streamed textures take no new card pages either.
+const NEAR_MARGIN: (u64, u64) = (1 << 30, 1536 << 20);
+const PRESSURE_MARGIN: (u64, u64) = (384 << 20, 768 << 20);
 
-/// Pressure from usage and budget, with hysteresis (`was`: the state before).
-pub fn pressure(used: u64, budget: u64, was: bool) -> bool {
-    if budget == 0 {
-        return false;
-    }
-    if was {
-        used + PRESSURE_OFF_MARGIN > budget
-    } else {
-        used + PRESSURE_ON_MARGIN > budget
-    }
+/// A level from usage and budget, with hysteresis (`was`: the state before; `margin`: (on, off)).
+fn level(used: u64, budget: u64, was: bool, margin: (u64, u64)) -> bool {
+    budget != 0 && used + if was { margin.1 } else { margin.0 } > budget
 }
 
-/// Watch the card's budget (`QueryVideoMemoryInfo`, four times a second, from a thread of its own): near it, new
-/// textures nothing renders to go to system memory (`rebuild_d3d12x::vram::PRESSURE`) and textures over page-mapped
-/// memory take no new card pages (`crate::mapped`), so what the title uses stays on the card instead of the driver
-/// paging it out (frames stall at 0 when that happens). `REBUILD_VRAM_BUDGET=0` turns it off.
+/// Pressure (at the budget) from usage and budget, with hysteresis.
+pub fn pressure(used: u64, budget: u64, was: bool) -> bool {
+    level(used, budget, was, PRESSURE_MARGIN)
+}
+
+/// Near the budget, with hysteresis.
+pub fn near(used: u64, budget: u64, was: bool) -> bool {
+    level(used, budget, was, NEAR_MARGIN)
+}
+
+/// Watch the card's budget (`QueryVideoMemoryInfo` on every budget-change event the adapter signals, and four times
+/// a second, from a thread of its own) and act before the budget is reached:
+///
+/// - **near** it (1 GiB left): new textures nothing renders to go to system memory (`rebuild_d3d12x::vram::NEAR`),
+///   so the room left goes to what the GPU writes and to the streamed textures' pages;
+/// - **at** it (384 MiB left): streamed textures take no new card pages either (`crate::mapped`), new ones are made
+///   in system memory.
+///
+/// What the GPU writes (targets, depth, UAV textures and their heaps) has the high residency priority
+/// (`rebuild_d3d12x::views`), so past the budget the driver demotes sampled textures to system memory first instead
+/// of paging targets out (frames stall at 0 when that happens). `REBUILD_VRAM_BUDGET=0` turns the watcher off.
 pub fn start_budget_watch() {
     if std::env::var("REBUILD_VRAM_BUDGET").is_ok_and(|v| v.trim() == "0") {
         return;
     }
     static STARTED: std::sync::Once = std::sync::Once::new();
     STARTED.call_once(|| {
-        let _ = std::thread::Builder::new().name("vram budget".into()).spawn(|| loop {
-            if let Some((used, budget, _)) = video_memory() {
-                VRAM_USED.store(used, Relaxed);
-                VRAM_BUDGET.store(budget, Relaxed);
-                let flag = &rebuild_d3d12x::vram::PRESSURE;
-                let was = flag.load(Relaxed);
-                let now = pressure(used, budget, was);
-                if now != was {
-                    flag.store(now, Relaxed);
-                    if now && PRESSURE_ON.fetch_add(1, Relaxed) < 8 {
-                        eprintln!("vram      at the budget: {} of {} MiB in use; new textures go to system memory, streamed ones take no new card pages", used >> 20, budget >> 20);
+        let _ = std::thread::Builder::new().name("vram budget".into()).spawn(|| {
+            // the device comes after the watcher starts: the event is asked for once it is there
+            let (mut event, mut asked) = (None, false);
+            loop {
+                if !asked && crate::device::get().is_some() {
+                    asked = true;
+                    event = budget_event();
+                }
+                if let Some((used, budget, _)) = video_memory() {
+                    BUDGET_READS.fetch_add(1, Relaxed);
+                    VRAM_USED.store(used, Relaxed);
+                    VRAM_BUDGET.store(budget, Relaxed);
+                    let near_flag = &rebuild_d3d12x::vram::NEAR;
+                    let was = near_flag.load(Relaxed);
+                    let now = near(used, budget, was);
+                    if now != was {
+                        near_flag.store(now, Relaxed);
+                        if now && NEAR_ON.fetch_add(1, Relaxed) < 8 {
+                            eprintln!("vram      near the budget: {} of {} MiB in use; new sampled textures go to system memory", used >> 20, budget >> 20);
+                        }
+                    }
+                    let flag = &rebuild_d3d12x::vram::PRESSURE;
+                    let was = flag.load(Relaxed);
+                    let now = pressure(used, budget, was);
+                    if now != was {
+                        flag.store(now, Relaxed);
+                        if now && PRESSURE_ON.fetch_add(1, Relaxed) < 8 {
+                            eprintln!("vram      at the budget: {} of {} MiB in use; streamed textures take no new card pages", used >> 20, budget >> 20);
+                        }
                     }
                 }
+                match event {
+                    // SAFETY: an event of ours, for the run
+                    Some(e) => {
+                        if unsafe { windows::Win32::System::Threading::WaitForSingleObject(e, 250) } == windows::Win32::Foundation::WAIT_OBJECT_0 {
+                            BUDGET_EVENTS.fetch_add(1, Relaxed);
+                        }
+                    }
+                    None => std::thread::sleep(std::time::Duration::from_millis(250)),
+                }
             }
-            std::thread::sleep(std::time::Duration::from_millis(250));
         });
     });
+}
+
+/// An event the adapter signals when the card's budget changes (`None`: no device yet, or not registered).
+fn budget_event() -> Option<windows::Win32::Foundation::HANDLE> {
+    use windows::Win32::Graphics::Dxgi::*;
+    let d = crate::device::get()?;
+    // SAFETY: plain DXGI and event calls; the event and the registration live for the run
+    unsafe {
+        let luid = d.host.GetAdapterLuid();
+        let f: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
+        let a: IDXGIAdapter3 = f.EnumAdapterByLuid(luid).ok()?;
+        let e = windows::Win32::System::Threading::CreateEventW(None, false, false, None).ok()?;
+        a.RegisterVideoMemoryBudgetChangeNotificationEvent(e).ok()?;
+        // the adapter keeps the registration while it lives: hold it for the run
+        std::mem::forget(a);
+        Some(e)
+    }
 }
 
 /// Print [`vram_line`] every `REBUILD_VRAM_LOG` seconds (off without it), from a thread of its own.
@@ -1106,6 +1209,22 @@ pub fn buffer(address: u64, bytes: u64) -> Option<ID3D12Resource> {
 #[cfg(test)]
 mod budget_tests {
     use super::pressure;
+
+    #[test]
+    fn near_comes_a_gigabyte_before_the_budget_and_before_pressure() {
+        use super::near;
+        const M: u64 = 1 << 20;
+        let budget = 11_050 * M;
+        // vram2's v2-c peak (10.8 GB of 11.05): near and at the budget both
+        assert!(near(10_800 * M, budget, false) && pressure(10_800 * M, budget, false));
+        // 10.1 GB: near only (new sampled textures go to system memory), streamed pages still come
+        assert!(near(10_100 * M, budget, false) && !pressure(10_100 * M, budget, false));
+        assert!(!near(9_900 * M, budget, false));
+        // hysteresis: off again only 1.5 GiB under
+        assert!(near(9_600 * M, budget, true));
+        assert!(!near(9_400 * M, budget, true));
+        assert!(!near(1, 0, true), "no budget known");
+    }
 
     #[test]
     fn pressure_starts_near_the_budget_and_ends_well_under_it() {

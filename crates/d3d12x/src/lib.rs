@@ -38,6 +38,7 @@
 
 #![cfg(windows)]
 
+pub mod alias;
 pub mod format;
 pub mod heap;
 pub mod host;
