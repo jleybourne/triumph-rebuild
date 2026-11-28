@@ -34,7 +34,26 @@ struct Opened {
     alloc: u64,
     /// `None`: it could not be opened (kept so it is not tried again)
     gpu: Option<(ID3D12Heap, ID3D12Resource, u64)>,
+    /// the [`GENERATION`] it was last confirmed in: while nothing was freed, decommitted or remapped since, a
+    /// lookup inside it answers from here with no query of the address space
+    checked: u64,
 }
+
+/// Bumped whenever memory the title's allocations could live in is freed, decommitted or remapped
+/// ([`changed`]): an opened allocation confirmed in the current generation is still the same allocation.
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The title freed, decommitted or remapped memory (`VirtualFree`, physical pages mapped or unmapped): every
+/// opened allocation is confirmed again at its next lookup. A few relaxed adds a frame at most; a lookup between
+/// two changes skips the address-space query (`QueryVirtualMemoryInformation`, and `VirtualQuery` for mapped views,
+/// 112 µs a GPU-timestamp label on the card, `runs/build6-lists.md`).
+pub fn changed() {
+    GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
+/// Lookups answered without a query of the address space, and those that queried it.
+pub static CACHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static QUERIED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub struct TitleMemory {
     device: ID3D12Device3,
@@ -113,6 +132,20 @@ impl TitleMemory {
     }
 
     fn lookup(&self, va: u64) -> Option<MemoryRange> {
+        use std::sync::atomic::Ordering::{Acquire, Relaxed};
+        // fastest: an allocation confirmed since the last free, decommit or remap that covers `va`
+        let generation = GENERATION.load(Acquire);
+        {
+            let opened = self.opened.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((&base, o)) = opened.range(..=va).next_back() {
+                if o.checked == generation && va - base < o.bytes {
+                    CACHED.fetch_add(1, Relaxed);
+                    let (_, buffer, gpu_va) = o.gpu.as_ref()?;
+                    return Some(MemoryRange { console: base, bytes: o.bytes, host_va: *gpu_va, resource: buffer.as_raw(), resource_offset: 0 });
+                }
+            }
+        }
+        QUERIED.fetch_add(1, Relaxed);
         // fast path: the allocation's descriptor (3 µs, never VirtualQuery: labels come here every frame) names it;
         // an opened one of the same size that still covers `va` is used as is
         let a = rebuild_d3d12x::vmem::allocation_of(va)?;
@@ -121,8 +154,9 @@ impl TitleMemory {
         }
         let alloc_base = a.base;
         {
-            let opened = self.opened.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(o) = opened.get(&alloc_base).filter(|o| o.alloc == a.size && va - alloc_base < o.bytes) {
+            let mut opened = self.opened.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(o) = opened.get_mut(&alloc_base).filter(|o| o.alloc == a.size && va - alloc_base < o.bytes) {
+                o.checked = generation;
                 let (_, buffer, gpu_va) = o.gpu.as_ref()?;
                 return Some(MemoryRange { console: alloc_base, bytes: o.bytes, host_va: *gpu_va, resource: buffer.as_raw(), resource_offset: 0 });
             }
@@ -138,9 +172,10 @@ impl TitleMemory {
             }
             // a stale entry for the same base (the title freed it and allocated again) is released here; work
             // already recorded holds its own references
-            opened.insert(base, Opened { bytes, alloc: a.size, gpu });
+            opened.insert(base, Opened { bytes, alloc: a.size, gpu, checked: generation });
         }
-        let o = opened.get(&base)?;
+        let o = opened.get_mut(&base)?;
+        o.checked = generation;
         let (_, buffer, gpu_va) = o.gpu.as_ref()?;
         Some(MemoryRange { console: base, bytes: o.bytes, host_va: *gpu_va, resource: buffer.as_raw(), resource_offset: 0 })
     }
@@ -236,6 +271,22 @@ mod tests {
         assert!(!r.resource.is_null());
         let again = m.range(p + 65_000).unwrap();
         assert_eq!((again.host_va, again.resource), (r.host_va, r.resource), "opened once");
+        // confirmed: the next lookups answer from the opened allocation, with no query of the address space
+        // (other tests may free memory meanwhile, which only sends a lookup to the query: retried)
+        use std::sync::atomic::Ordering::Relaxed;
+        let cached = (0..20).any(|_| {
+            let c = CACHED.load(Relaxed);
+            assert_eq!(m.range(p + 8).map(|x| x.host_va), Some(r.host_va));
+            CACHED.load(Relaxed) > c
+        });
+        assert!(cached, "answered from the opened allocation");
+        // a free anywhere: the next lookup queries again (and finds the same allocation, still there)
+        changed();
+        let q1 = QUERIED.load(Relaxed);
+        assert_eq!(m.range(p + 8).map(|x| x.host_va), Some(r.host_va));
+        assert!(QUERIED.load(Relaxed) > q1, "queried after a change");
+        // outside every opened allocation: never answered from the cache
+        assert!(m.range(p + bytes as u64 + 16).is_none_or(|x| x.console != p));
         assert!(m.range(0x10).is_none());
         drop(m);
         // cleanup only: WARP may still hold the heap it opened over the memory for a moment (the free then fails

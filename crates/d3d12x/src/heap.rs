@@ -1321,11 +1321,17 @@ impl Resources {
             return t.clone();
         }
         let (hd, _) = format::host_desc(rd);
-        let t = ctx.memory.texture(address, &hd).or_else(|| ctx.host.resource(&hd, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_NONE, None).ok().flatten());
+        let model = ctx.memory.texture(address, rd, &hd, D3D12_BARRIER_LAYOUT_COMMON);
+        let from_model = model.is_some();
+        let t = model.or_else(|| ctx.host.resource(&hd, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_FLAG_NONE, None).ok().flatten());
         trace_texture("placed view", address, rd);
         // no console resource names it, so no barrier of the title's: it stays in the common state it starts in
         if let Some(h) = &t {
             ctx.memory.texture_made(address, rd, h, D3D12_BARRIER_LAYOUT_COMMON);
+            let (b, c) = (if from_model { 0 } else { ctx.host.bytes(&hd) }, format::footprint(rd).map_or(0, |i| i.size));
+            crate::vram::made(crate::vram::Origin::PlacedView, b, c);
+            let gw = rd.Flags.0 & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL.0 | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0) != 0;
+            crate::vram::track(h.as_raw() as usize, crate::vram::Live { address, console: c, origin: crate::vram::Origin::PlacedView, bytes: b, gpu_written: gw });
         }
         placed.insert((address, *rw), t.clone());
         t

@@ -110,6 +110,11 @@ impl Uma {
         self.windows * WINDOW
     }
 
+    /// Card pages allowed in all.
+    pub fn card_pages(&self) -> usize {
+        self.card_pages
+    }
+
     pub fn card_pages_used(&self) -> usize {
         self.used_card_pages
     }
