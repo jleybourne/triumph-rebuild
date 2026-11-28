@@ -315,11 +315,12 @@ evidence. The coordinator adds a one-line pointer under "For the lead" in
 ## 8. Current state (updated by the lead every step)
 
 ```
-updated   2026-11-28 (afternoon): the title's menus run on the card (start screen, first-run setup, legal terms,
-          Finish Setup) through scripted input; text missing letters (UI descriptors above index 750k); ~21 fps
-progress  70 % (progress.md) · shaders 12,981 / 25,694 compile, 5,195 counted
-tests     669 green: cargo test --release --no-fail-fast
-lanes     descremap, saves, titlemem-fast2, polish, depthuav
+updated   2026-11-28 (evening): menus at 30 fps (the title's cap; ~260 unlimited); merged #66 fps, #67 saves,
+          #68 polish, #69 depth twins, #70 view remap (data swapped), #71 launcher recommendation; body text still
+          missing letters, black Bink stretches (video lane)
+progress  71 % (progress.md) · shaders 12,981 / 25,694 compile, 5,195 counted
+tests     717 green: cargo test --release --no-fail-fast
+lanes     video (Bink + glyph atlas: CPU/compute-written textures), shadercount, depthuav2 (D16S8)
 ```
 
 | build | state | where | proof |

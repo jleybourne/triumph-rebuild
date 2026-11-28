@@ -1,8 +1,8 @@
 # Progress
 
 ```
-overall   ██████████████░░░░░░  70 %   work toward 30 fps, weighted by build step
-fps       card: ~21 fps in menus (47 ms a frame, GPU ~2 ms: our CPU overhead) · target 30 · baseline 7.6
+overall   ██████████████░░░░░░  71 %   work toward 30 fps, weighted by build step
+fps       card: 30 fps in menus at the title's cap (~260 unlimited; upload pass 2.3 ms, GPU ~2 ms) · target 30 · baseline 7.6
 updated   2026-11-28
 ```
 
@@ -13,7 +13,7 @@ and becomes the number that counts.
 
 | track | progress | | note |
 |---|---|--:|---|
-| **Build 5 · first frame** | `███████████████████░` | 95 % | the title's menus on the card: start screen, first-run setup, legal terms, Finish Setup; text missing letters (descriptor remap running) |
+| **Build 5 · first frame** | `███████████████████░` | 95 % | the title's menus on the card at 30 fps (start screen → setup → Navigation Experience → legal terms → Finish Setup); body text missing letters, black video stretches (video lane) |
 | shaders compiled (every class) | `██████████░░░░░░░░░░` | 12,981 / 25,694 | pixel 9,965 · vertex 1,672 · compute 1,344 · of them wave-wide 4,182 ([wave64](runs/build4-wave64.md)) · agnostic 8,799 / 9,128 ([v1](runs/build4-v1.md)) |
 | shaders counted | `████░░░░░░░░░░░░░░░░` | 5,195 / 25,694 | bit-exact vs the oracle on WARP ([exec](runs/build4-exec.md)) |
 | runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
@@ -36,7 +36,7 @@ and becomes the number that counts.
 | 5 | device, lists, descriptors, present | `██████████████░░░░░░` | 70 % | 12 | 60 s on the card, no hang; loading screen black (draw 1 missing) |
 | 6 | list translation | `██░░░░░░░░░░░░░░░░░░` | 10 % | 8 | translator core measured |
 | 7 | upscaler: DLSS + FSR | `██████░░░░░░░░░░░░░░` | 30 % | 10 | both standalone; wiring to the title open |
-| 8 | frame pacing | `░░░░░░░░░░░░░░░░░░░░` | 0 % | 6 | 30 fps on NVIDIA closes here |
+| 8 | frame pacing | `████░░░░░░░░░░░░░░░░` | 20 % | 6 | menus hold the 30 cap (cold slices); 30 fps on NVIDIA in gameplay closes here |
 | 9 | AMD validation by testers | `░░░░░░░░░░░░░░░░░░░░` | 0 % | 6 | 30 fps on AMD closes here |
 | | **total** | `████████████░░░░░░░░` | **61 %** | 100 | 61.65 points earned |
 
@@ -118,6 +118,29 @@ Older entries are never edited.
 
 > The three entries below (58, 59, 61 %) were missing; they are filled in afterwards from the commits that moved
 > the header (`6292f20`, `bafec7c`, `71c075d`). The points behind each step were not recorded.
+
+### 2026-11-28 — Menus at 30 fps; saves, depth twins, view remap, launcher recommendation
+
+```
+[██████████████░░░░░░]  71 %   (Build 8 0 % → 20 %: menus hold the title's 30 fps cap)
+fps         menus 15 → 30 at the cap, ~260 unlimited; upload pass 12.5 → 2.3 ms; 29 fps average over a 75 s run
+```
+
+- **fps (#66):** titlemem lookups fixed for mapped views (#64's black: 2 of 346 allocations opened); cold slices
+  stop scanning watched memory nobody writes (`crates/uma/src/cold.rs`, kernel writes guarded in `kwrite.rs`).
+- **remap (#70):** console view indices up to 1,245,184 map onto the host's 749,568 slots in 256-view pages; 82,983
+  binds past 750k that read nothing now resolve. Text unchanged, so the missing letters have another cause (now
+  thought to be the glyph atlas filled at run time, the same path as the black Bink stretches: video lane).
+  Shader data regenerated and swapped (`translate`, `pipelines\library.bin`; old kept as `*-preremap`).
+- **depthuav (#69):** 314 depth textures written as UAVs get a colour twin copied at the title's barriers;
+  null UAVs 316 → 2 (the D16S8 one: depthuav2 lane, D32S8 + two twins). D: is the devkit scratch drive (retail
+  has none).
+- **saves (#67):** XGameSave (27 functions) and silent speech synthesis; the title asks for no unknown interface.
+  Persistence in the title not yet shown (no run finished setup).
+- **polish (#68) + launcher:** the title's window can't appear; Window mode (windowed / windowed fullscreen /
+  fullscreen) and Window size presets 120p–2160p (720p default); **recommend (#71):** the launcher detects the PC
+  and recommends a profile (here: 4K, DLSS Quality), applied once on first run.
+- Tests: 717 green.
 
 ### 2026-11-28 — Through the menus: setup, legal terms, Finish Setup
 
