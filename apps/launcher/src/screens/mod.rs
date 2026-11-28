@@ -7,7 +7,10 @@ mod mods;
 mod play;
 mod profiles;
 mod runs;
+mod saves;
 mod settings;
+
+pub use saves::SavesUi;
 
 use crate::ui::icons as icon;
 use crate::ui::theme as th;

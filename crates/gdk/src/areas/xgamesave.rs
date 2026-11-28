@@ -249,6 +249,53 @@ fn store(path: &Path, c: &Stored) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+/// The container file for tools that read and write saves while the title is not running (the
+/// launcher's save editor, `crates/saves`): the runtime's own encoding, file naming and all-or-nothing
+/// write, so a tool can never produce a file the runtime reads differently.
+pub mod file {
+    use super::{disk, read_index, store, Stored};
+    use std::path::{Path, PathBuf};
+
+    /// The container files' extension.
+    pub const EXTENSION: &str = super::EXT;
+
+    /// The file's bytes for `c`, exactly as the runtime writes them.
+    pub fn encode(c: &Stored) -> Vec<u8> {
+        super::encode(c)
+    }
+
+    /// One whole container file: refused if anything is malformed, or if bytes follow its last blob.
+    pub fn decode(bytes: &[u8]) -> std::io::Result<Stored> {
+        let mut r = bytes;
+        let index = read_index(&mut r)?;
+        let mut blobs = Vec::with_capacity(index.blobs.len());
+        for (name, size) in index.blobs {
+            let size = usize::try_from(size).map_err(|_| super::bad("blob too big"))?;
+            if r.len() < size {
+                return Err(super::bad("file ends inside a blob"));
+            }
+            let (data, rest) = r.split_at(size);
+            blobs.push((name, data.to_vec()));
+            r = rest;
+        }
+        if !r.is_empty() {
+            return Err(super::bad("bytes after the last blob"));
+        }
+        Ok(Stored { name: index.name, display: index.display, modified: index.modified, blobs })
+    }
+
+    /// The file the runtime keeps container `name` in, inside a provider folder.
+    pub fn path(dir: &Path, name: &str) -> PathBuf {
+        super::container_file(dir, name)
+    }
+
+    /// Writes `c` to `path` as the runtime does: beside it, flushed, renamed over (all or nothing).
+    pub fn write(path: &Path, c: &Stored) -> std::io::Result<()> {
+        let _disk = disk();
+        store(path, c)
+    }
+}
+
 /// Every container in `dir`, by name.
 fn containers(dir: &Path) -> Vec<Index> {
     let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
@@ -1273,5 +1320,31 @@ mod tests {
         assert!(!p.is_null());
         unsafe { taskqueue::close(q) };
         done(&dir);
+    }
+
+    /// The tools' view of a container file is the runtime's: decode inverts encode, refuses a file cut
+    /// short or with bytes after its last blob, and `file::write` lands where the runtime reads.
+    #[test]
+    fn the_file_api_is_the_runtimes() {
+        let c = Stored {
+            name: "SettingsProfileSettings".into(),
+            display: "Profile Settings".into(),
+            modified: 1_764_000_000,
+            blobs: vec![("Save Game Header".into(), vec![6; 0x128]), ("Save Game Data".into(), vec![1, 2, 3])],
+        };
+        let bytes = file::encode(&c);
+        assert_eq!(file::decode(&bytes).unwrap(), c);
+        assert!(file::decode(&bytes[..bytes.len() - 1]).is_err());
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(file::decode(&longer).is_err());
+        let dir = std::env::temp_dir().join(format!("rebuild-gdk-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = file::path(&dir, &c.name);
+        assert_eq!(path, container_file(&dir, &c.name));
+        file::write(&path, &c).unwrap();
+        assert_eq!(load(&path).unwrap(), c);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

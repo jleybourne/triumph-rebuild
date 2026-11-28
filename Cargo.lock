@@ -2173,6 +2173,8 @@ dependencies = [
  "embed-resource",
  "png 0.17.16",
  "rebuild-config",
+ "rebuild-gdk",
+ "rebuild-saves",
  "rebuild-vfs",
  "rfd",
  "toml 0.8.23",
@@ -2231,6 +2233,14 @@ dependencies = [
  "rebuild-xg",
  "rebuild-xlist",
  "windows",
+]
+
+[[package]]
+name = "rebuild-saves"
+version = "0.1.0"
+dependencies = [
+ "rebuild-gdk",
+ "rebuild-vfs",
 ]
 
 [[package]]
