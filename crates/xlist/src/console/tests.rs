@@ -51,8 +51,12 @@ struct TestHost {
     traps: Mutex<Vec<(&'static str, usize)>>,
     waits: Mutex<Vec<MemoryWait>>,
     labels: Mutex<Vec<(LabelWrite, Option<u64>)>>,
+    /// how many more times [`LATE`] is asked for before its host pipeline is ready
+    late_misses: std::sync::atomic::AtomicU32,
 }
 
+/// A pipeline whose host object is not ready for its first `late_misses` lookups (the pool is still making it).
+const LATE: Raw = 0x1A7E as Raw;
 const HEAP: Raw = 0xD000 as Raw;
 const BAD: Raw = 0xBAD as Raw;
 const MEM: u64 = 0x2_0000_0000;
@@ -60,6 +64,9 @@ const MEM_HOST: u64 = 0x7_0000_0000;
 
 impl PipelineSource for TestHost {
     fn pipeline(&self, console: Raw) -> Option<HostPipeline> {
+        if console == LATE && self.late_misses.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |n| n.checked_sub(1)).is_ok() {
+            return None;
+        }
         (console != BAD).then_some(HostPipeline { pso: (console as usize | 0x8000_0000) as Raw, root_signature: 0x5160 as Raw, compute: false, user: None, topology: 0, rects: false })
     }
 }
@@ -291,6 +298,33 @@ struct ConsoleBarrier {
     a: Raw,
     b: u64,
     c: u64,
+}
+
+/// A pipeline whose PSO is not ready yet (the source never blocks): its draws are skipped, and the title setting the
+/// same pipeline again asks the source again rather than eliding, so it is drawn with once ready.
+#[test]
+fn a_pipeline_not_ready_is_asked_again_when_set_again() {
+    let h = Arc::new(TestHost::default());
+    h.late_misses.store(2, std::sync::atomic::Ordering::Relaxed);
+    let (l, a, _backend) = fake_list(h.clone());
+    unsafe {
+        method::<unsafe extern "system" fn(Raw, Raw)>(l, 0xc8)(l, LATE);
+        method::<unsafe extern "system" fn(Raw, u32, u32, u32, i32, u32)>(l, 0x68)(l, 3, 1, 0, 0, 0);
+        method::<unsafe extern "system" fn(Raw, Raw)>(l, 0xc8)(l, LATE);
+        method::<unsafe extern "system" fn(Raw, u32, u32, u32, i32, u32)>(l, 0x68)(l, 3, 1, 0, 0, 0);
+        method::<unsafe extern "system" fn(Raw, Raw)>(l, 0xc8)(l, LATE);
+        method::<unsafe extern "system" fn(Raw, u32, u32, u32, i32, u32)>(l, 0x68)(l, 3, 1, 0, 0, 0);
+        // set again once ready: elided as before
+        method::<unsafe extern "system" fn(Raw, Raw)>(l, 0xc8)(l, LATE);
+    }
+    let f = fake::host_of(l);
+    assert_eq!(f.count(host::SET_PIPELINE_STATE), 1);
+    assert_eq!(f.arg(host::SET_PIPELINE_STATE, 0), 0x8000_1A7E);
+    assert_eq!(f.count(host::DRAW_INDEXED), 1, "the draws before it was ready are skipped");
+    let st = stats(l).unwrap();
+    assert_eq!((st.draws, st.elided), (1, 1));
+    release(l);
+    release(a);
 }
 
 #[test]

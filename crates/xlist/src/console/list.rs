@@ -679,7 +679,8 @@ impl ListState {
     }
 
     fn set_pipeline(&mut self, console: Raw) {
-        if console == self.sh.console_pipeline {
+        // a pipeline that had no host object is asked again (its PSO may be ready now: the source never blocks)
+        if console == self.sh.console_pipeline && !self.sh.pso_missing {
             self.stats.elided += 1;
             return;
         }

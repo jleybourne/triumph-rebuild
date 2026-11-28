@@ -154,13 +154,68 @@ fn library() -> Library {
     Library::empty(rebuild_pipelines::layout::USER_DATA_DWORDS)
 }
 
-/// The pool, made at device creation on the host device.
+/// The adapter and driver the host device runs on: vendor, device and the user-mode driver version (`None` when
+/// DXGI does not say).
+fn driver(device: &windows::Win32::Graphics::Direct3D12::ID3D12Device) -> Option<(u32, u32, i64)> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory2, IDXGIAdapter1, IDXGIDevice, IDXGIFactory4, DXGI_CREATE_FACTORY_FLAGS};
+    // SAFETY: plain DXGI queries on the device's own adapter
+    unsafe {
+        let f: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
+        let a: IDXGIAdapter1 = f.EnumAdapterByLuid(device.GetAdapterLuid()).ok()?;
+        let d = a.GetDesc1().ok()?;
+        let umd = a.CheckInterfaceSupport(&IDXGIDevice::IID).ok()?;
+        Some((d.VendorId, d.DeviceId, umd))
+    }
+}
+
+/// The persisted pipelines' identity: the program library's (the translator's output for this game build's
+/// programs; the folder is already per build) and the adapter and driver. A new driver or translator starts a
+/// fresh cache file instead of having each entry refused mid-run.
+fn cache_identity(lib: &Library, drv: Option<(u32, u32, i64)>) -> [u8; 32] {
+    let mut b = lib.identity().to_vec();
+    if let Some((v, d, umd)) = drv {
+        b.extend(v.to_le_bytes());
+        b.extend(d.to_le_bytes());
+        b.extend(umd.to_le_bytes());
+    }
+    *rebuild_shader::blake3::hash(&b).as_bytes()
+}
+
+/// The record of the pipelines earlier sessions bound (prewarmed at start), its file, and the last save (when,
+/// and how many had been bound by then).
+struct Usage {
+    path: PathBuf,
+    earlier: rebuild_pipelines::session::Record,
+    saved: Mutex<(std::time::Instant, u64)>,
+}
+static USAGE: OnceLock<Usage> = OnceLock::new();
+/// Pipelines a title thread bound for the first time (the record is saved when this grows).
+static BOUND: AtomicU64 = AtomicU64::new(0);
+/// Pipelines prewarmed from the record at start.
+static PREWARMED: AtomicU64 = AtomicU64::new(0);
+
+/// The pool, made at device creation on the host device. The pipeline cache and the usage record live in the
+/// game's per-build `pipelines` cache folder (`rebuild_storage`), named by [`cache_identity`]; the pipelines the
+/// last sessions bound are queued as prewarm work (idle workers only, behind the title's own requests).
 pub fn start(device: &windows::Win32::Graphics::Direct3D12::ID3D12Device) {
     POOL.get_or_init(|| {
         let lib = library();
-        // the cache file is the library's own: a new library starts a fresh one
-        let cache = match PsoCache::open(device, &rebuild_pipelines::pso::cache_path_for(&lib.identity())) {
-            Ok(c) => Some(c),
+        let drv = driver(device);
+        let id = cache_identity(&lib, drv);
+        let cache = match PsoCache::open(device, &rebuild_pipelines::pso::cache_path_for(&id)) {
+            Ok(c) => {
+                let r = &c.report;
+                eprintln!(
+                    "pipelines: cache {} ({} pipelines, {:.1} MB; read {:.0} ms, opened {:.0} ms{}); driver {drv:x?}",
+                    r.path.display(),
+                    r.keys,
+                    r.bytes as f64 / 1e6,
+                    r.read.as_secs_f64() * 1e3,
+                    r.create.as_secs_f64() * 1e3,
+                    r.refused.as_deref().map_or(String::new(), |w| format!("; refused: {w}"))
+                );
+                Some(c)
+            }
             Err(e) => {
                 eprintln!("pipelines: no pipeline cache: {e}");
                 None
@@ -169,8 +224,52 @@ pub fn start(device: &windows::Win32::Graphics::Direct3D12::ID3D12Device) {
         let threads = default_threads(cpu_core_limit());
         // programs outside the library: translated on the workers, cached in `<pipelines dir>\ondemand`
         let programs = Programs::new(device, lib, None).with_ondemand(OnDemand::new(Some(ondemand::default_dir())));
-        Some(Pool::new(PsoCreator::new(device, programs, cache), threads))
+        let pool = Pool::new(PsoCreator::new(device, programs, cache), threads);
+        let hex: String = id[..8].iter().map(|b| format!("{b:02x}")).collect();
+        let path = rebuild_pipelines::session::default_dir().join(format!("pso-used-{hex}.bin"));
+        let (earlier, why) = rebuild_pipelines::session::Record::load(&path);
+        if let Some(why) = why {
+            eprintln!("pipelines: usage record {why}");
+        }
+        if prewarm_on() {
+            for e in &earlier.entries {
+                pool.prewarm(e.key, e.desc.clone());
+            }
+            PREWARMED.store(earlier.entries.len() as u64, Ordering::Relaxed);
+        }
+        eprintln!(
+            "pipelines: {} bound in earlier sessions ({} sessions), {} prewarmed; {threads} workers; first use: {:?}",
+            earlier.entries.len(),
+            earlier.sessions,
+            PREWARMED.load(Ordering::Relaxed),
+            first_use()
+        );
+        let _ = USAGE.set(Usage { path, earlier, saved: Mutex::new((std::time::Instant::now(), 0)) });
+        Some(pool)
     });
+}
+
+/// `REBUILD_PSO_PREWARM=0` turns off creating the last sessions' bound pipelines at start.
+fn prewarm_on() -> bool {
+    std::env::var("REBUILD_PSO_PREWARM").map_or(true, |v| v.trim() != "0")
+}
+
+/// Once a second (the frame-line thread): saves the usage record when new pipelines were bound and 20 s passed
+/// since the last save (a run that ends in a crash keeps all but its last seconds).
+pub fn tick() {
+    let (Some(pool), Some(u)) = (pool(), USAGE.get()) else { return };
+    let bound = BOUND.load(Ordering::Relaxed);
+    let Ok(mut saved) = u.saved.try_lock() else { return };
+    if bound == saved.1 || saved.0.elapsed() < std::time::Duration::from_secs(20) {
+        return;
+    }
+    let t = std::time::Instant::now();
+    let rec = u.earlier.merge(&pool.used());
+    match rec.save(&u.path) {
+        Ok(()) => eprintln!("pipelines: usage record saved ({} pipelines, {bound} bound this session) in {:.0} ms", rec.entries.len(), t.elapsed().as_secs_f64() * 1e3),
+        Err(e) => eprintln!("pipelines: usage record: {e}"),
+    }
+    *saved = (std::time::Instant::now(), bound);
 }
 
 fn pool() -> Option<&'static Pool<PsoCreator>> {
@@ -350,12 +449,12 @@ unsafe fn hand_out(m: Made, iid: *const GUID, out: *mut Raw) -> i32 {
 
 /// 0x58 CreateComputePipelineState.
 pub unsafe extern "system" fn CreateComputePipelineState(_this: Raw, desc: *const c_void, iid: *const GUID, out: *mut Raw) -> i32 {
-    unsafe { create_compute(desc.cast(), iid, out) }
+    crate::psotime::creation(|| unsafe { create_compute(desc.cast(), iid, out) })
 }
 
 /// 0x1f0 CreateComputePipelineStateX: the extensions (console options) are not needed to build the program.
 pub unsafe extern "system" fn CreateComputePipelineStateX(_this: Raw, desc: *const c_void, _ext_count: u32, _exts: *const c_void, iid: *const GUID, out: *mut Raw) -> i32 {
-    unsafe { create_compute(desc.cast(), iid, out) }
+    crate::psotime::creation(|| unsafe { create_compute(desc.cast(), iid, out) })
 }
 
 /// Console subobject sizes for types from 25, as `type:bytes` pairs (the whole subobject, a multiple of 8) in
@@ -475,7 +574,7 @@ pub unsafe extern "system" fn CreateGraphicsPipelineState(_this: Raw, desc: *con
     // SAFETY: the title passes a whole description, and what it points at is live for the call
     let d = unsafe { std::slice::from_raw_parts(desc as *const u8, stream::graphics_desc::SIZE) };
     let mem = unsafe { Capture::new() };
-    unsafe { hand_out(request(stream::parse_graphics(d, &mem), &mem), iid, out) }
+    crate::psotime::creation(|| unsafe { hand_out(request(stream::parse_graphics(d, &mem), &mem), iid, out) })
 }
 
 /// 0x2b0 CreatePipelineState: a pipeline state stream, console subobject numbering.
@@ -487,19 +586,62 @@ pub unsafe extern "system" fn CreatePipelineState(_this: Raw, desc: *const c_voi
     // SAFETY: the title passes `size` bytes of stream, and what it points at is live for the call
     let s = unsafe { std::slice::from_raw_parts(d.stream, d.size) };
     let mem = unsafe { Capture::new() };
-    unsafe { hand_out(request(stream::parse_stream(s, &mem, Numbering::Console, console_sizes()), &mem), iid, out) }
+    crate::psotime::creation(|| unsafe { hand_out(request(stream::parse_stream(s, &mem, Numbering::Console, console_sizes()), &mem), iid, out) })
 }
 
-/// The host pipeline of a console one, for the lists. Waits for the pool at a pipeline's first use. A pipeline
-/// whose programs' root layout is not known has none: its draws are dropped rather than bound wrongly.
+/// What a title thread does when it binds a pipeline whose host PSO is not ready (`REBUILD_PSO_FIRST_USE`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FirstUse {
+    /// `wait`: block until it exists (created on the binding thread when no worker has started it); the old way:
+    /// 67 s of the title's threads blocked over a world load, and a stall the title's watchdog ends
+    Wait,
+    /// `skip` (the default): hurry it to the front of the pool and give the lists no pipeline, so the draws
+    /// that use it are skipped (counted) until it is ready; the title's thread never blocks on a PSO
+    Skip,
+}
+
+pub fn first_use() -> FirstUse {
+    static M: OnceLock<FirstUse> = OnceLock::new();
+    *M.get_or_init(|| match std::env::var("REBUILD_PSO_FIRST_USE").ok().as_deref().map(str::trim) {
+        Some("wait") => FirstUse::Wait,
+        _ => FirstUse::Skip,
+    })
+}
+
+/// Host PSOs the pool has made so far (for the timeline).
+pub fn made() -> u64 {
+    pool().map_or(0, |p| p.stats().created)
+}
+
+/// Pipelines queued in the pool and not started.
+pub fn queued() -> usize {
+    pool().map_or(0, |p| p.pending())
+}
+
+/// The host pipeline of a console one, for the lists. Never blocks by default: a pipeline not ready yet is
+/// hurried to the front of the pool and has no host pipeline for now (its draws are skipped and counted;
+/// [`FirstUse`]). A pipeline whose programs' root layout is not known has none: its draws are dropped rather
+/// than bound wrongly.
 pub fn host(console: Raw) -> Option<HostPipeline> {
     let p = of(console)?;
     let h = p.handle?;
     let user = p.user?;
     let pool = pool()?;
+    if pool.mark_used(h) {
+        BOUND.fetch_add(1, Ordering::Relaxed);
+    }
     let pso = match pool.get(h) {
         Some(pso) => pso,
-        None => pool.wait(h).ok()?,
+        None if first_use() == FirstUse::Wait => {
+            let kind = if pool.status(h) == rebuild_pipelines::pool::Status::Queued { crate::psotime::Kind::Inline } else { crate::psotime::Kind::Pool };
+            crate::psotime::wait(kind, || describe(console), || pool.wait(h)).ok()?
+        }
+        None => {
+            if pool.hurry(h) != rebuild_pipelines::pool::Status::Failed {
+                crate::psotime::pending();
+            }
+            return None;
+        }
     };
     let mut root = p.root.load(Ordering::Relaxed);
     if root == 0 {
@@ -587,7 +729,7 @@ pub fn report() -> String {
     if let Some(p) = pool() {
         let s = p.stats();
         line += &format!(
-            "; host PSOs {} made, {} failed (deduplicated {}; eager cap {}, parked {}, made at first use {}; inline {}, blocked {:.0} ms)",
+            "; host PSOs {} made, {} failed (deduplicated {}; eager cap {}, parked {}, made at first use {}; inline {}, blocked {:.0} ms; first use {:?}: hurried {}, binds skipped while pending {}, longest wait {:.0} ms; the title's creation calls {} in {:.0} ms, slowest {:.1} ms)",
             s.created,
             s.failed,
             s.deduplicated,
@@ -595,7 +737,27 @@ pub fn report() -> String {
             s.parked,
             s.unparked,
             s.inline,
-            s.wait_time.as_secs_f64() * 1e3
+            s.wait_time.as_secs_f64() * 1e3,
+            first_use(),
+            s.hurried,
+            crate::psotime::totals().4,
+            crate::psotime::totals().5,
+            crate::psotime::creations().0,
+            crate::psotime::creations().1,
+            crate::psotime::creations().2,
+        );
+    }
+    if let Some(p) = pool() {
+        let c = p.creator().stats().total();
+        line += &format!(
+            "; PSO cache: {} loaded ({:.2} ms each), {} created by the driver ({:.1} ms each), {} mismatched; bound this session {}, prewarmed from the last {}",
+            c.from_cache,
+            c.load_ms(),
+            c.created,
+            c.create_ms(),
+            c.cache_mismatch,
+            BOUND.load(Ordering::Relaxed),
+            PREWARMED.load(Ordering::Relaxed),
         );
     }
     if let Some(od) = pool().and_then(|p| p.creator().programs().ondemand()) {

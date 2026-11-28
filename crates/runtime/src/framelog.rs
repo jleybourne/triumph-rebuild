@@ -458,6 +458,7 @@ fn run() {
     let run_seconds: Option<u64> = std::env::var("REBUILD_RUN_SECONDS").ok().and_then(|v| v.trim().parse().ok()).filter(|&s| s > 0);
     let request = session.as_ref().map(|s| s.join("capture.request"));
     let mut prev = counts();
+    let mut prev_pso = crate::psotime::mark();
     let mut prev_t = base().elapsed();
     let mut header = String::new();
     loop {
@@ -476,6 +477,11 @@ fn run() {
             let _ = writeln!(w, "{}", format(&l));
             let _ = w.flush();
         }
+        // the pipeline timeline beside the frame rate, on stderr (the run log)
+        let pso = crate::psotime::mark();
+        eprintln!("{}", crate::psotime::line(l.t, l.fps, &prev_pso, &pso));
+        prev_pso = pso;
+        crate::pipeline::tick();
         *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
         prev = now;
         prev_t = now_t;

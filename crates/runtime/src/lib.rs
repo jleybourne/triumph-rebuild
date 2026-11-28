@@ -48,6 +48,7 @@ pub mod modules;
 pub mod physical;
 pub mod overlap;
 pub mod pipeline;
+pub mod psotime;
 pub mod registry;
 pub mod overlay;
 pub mod fullscreen;
