@@ -14,8 +14,14 @@
 //! Here such a texture is a **reserved** host texture. Each of its host tiles stands for one 64 KiB page of its
 //! console footprint (mip by mip, slice by slice, from `rebuild_xg`'s layout of the console texture), and is mapped
 //! to the card page of the **pool page** that console page is mapped to now, or left unmapped (reads zero) while the
-//! console page is unmapped. Two textures over the same pool pages share card pages, as on the console. A host tile
-//! with no console page of its own (the host's layout is larger there) gets a card page of its own.
+//! console page is unmapped. Two textures over the same pool pages share card pages, as on the console.
+//!
+//! A host tile with no console page of its own (the host's layout is larger there: a narrow mip padded to whole
+//! 64 KiB tiles, slices sharing a page, the packed mips) is **derived**: its bytes come from the console pages of
+//! the mips it holds, so it is keyed by the pool pages under those pages now, the texture's layout and its place in
+//! it. It is unmapped (NULL, no card memory) while none of those pages is mapped, and textures of one layout over
+//! the same pool pages share it. Before (vram2, run `v2-c`) each such tile had a card page of its own for the
+//! texture's life, mapped or not: 11,190 tiles, ~700 MiB.
 //!
 //! ```text
 //! d3d12x makes a texture       Memory::texture -> texture(): reserved, tiles mapped to what is mapped now
@@ -54,7 +60,11 @@ pub static UNALIGNED: AtomicU64 = AtomicU64::new(0);
 pub static NO_LAYOUT: AtomicU64 = AtomicU64::new(0);
 pub static CREATE_FAILED: AtomicU64 = AtomicU64::new(0);
 pub static TILES: AtomicU64 = AtomicU64::new(0);
-pub static PRIVATE: AtomicU64 = AtomicU64::new(0);
+/// Derived tiles (no console page of their own) planned; their key lookups that found the key named already
+/// (shared with another tile), and that found none of their pages mapped (left NULL).
+pub static DERIVED: AtomicU64 = AtomicU64::new(0);
+pub static DERIVED_SHARED: AtomicU64 = AtomicU64::new(0);
+pub static DERIVED_NULL: AtomicU64 = AtomicU64::new(0);
 pub static NO_CARD: AtomicU64 = AtomicU64::new(0);
 /// Tiles left unmapped because the card was at its budget.
 pub static HELD_BACK: AtomicU64 = AtomicU64::new(0);
@@ -90,14 +100,40 @@ pub fn enabled() -> bool {
 enum Source {
     /// the console page at this GPU address
     Console(u64),
-    /// none: a card page of its own
-    Private,
+    /// no console page of its own: its bytes come from the `pages` console pages from GPU address `first` (the
+    /// mips it holds); `slot`: its place among the texture's derived tiles
+    Derived { first: u64, pages: u32, slot: u32 },
+}
+
+impl Source {
+    /// The tile's bytes come from a page in `touched`.
+    fn over(&self, touched: &HashSet<u64>) -> bool {
+        match *self {
+            Source::Console(va) => touched.contains(&va),
+            Source::Derived { first, pages, .. } => (0..u64::from(pages)).any(|i| touched.contains(&(first + i * P))),
+        }
+    }
+}
+
+/// A derived tile's identity: the pool pages under its console pages now (`None`: unmapped), the texture's start
+/// inside its page, the tile's slot, and the texture's layout (host and console descriptions). Equal identities
+/// hold equal bytes, so they share one card page.
+type Derived = (Box<[Option<u64>]>, u64, u32, u64);
+
+/// What a key of our own stands for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Own {
+    /// a texture starting inside a page: (pool page, offset)
+    Inner((u64, u64)),
+    Derived(Derived),
 }
 
 struct Tex {
     resource: ID3D12Resource,
     address: u64,
     bytes: u64,
+    /// its layout's signature (derived tiles' keys)
+    sig: u64,
     /// per host tile, in the texture's tile order: its coordinate, what it stands for, and the key page it is
     /// mapped to now (`None`: unmapped)
     tiles: Vec<(TexTile, Source, Option<u64>)>,
@@ -118,7 +154,7 @@ struct State {
     refs: HashMap<u64, u32>,
     /// pool CPU base -> (pool pages, key base)
     pools: BTreeMap<u64, (u64, u64)>,
-    /// key pages of our own (private tiles, and pool pages seen from inside: below): free ones, and the rest of the
+    /// key pages of our own (derived tiles, and pool pages seen from inside: below): free ones, and the rest of the
     /// current range
     private_free: Vec<u64>,
     private_next: u64,
@@ -127,8 +163,10 @@ struct State {
     /// pool page *and* the start's offset in it, so textures at one address share card pages (a slot streamed into
     /// again) and neighbours in one page do not
     inner: HashMap<(u64, u64), u64>,
-    /// keys of our own -> what they stand for (an `inner` key, or none: a private tile)
-    own: HashMap<u64, Option<(u64, u64)>>,
+    /// derived tiles' identities -> their keys
+    derived: HashMap<Derived, u64>,
+    /// keys of our own -> what they stand for
+    own: HashMap<u64, Own>,
     /// small textures (64 KiB or less on the host) that start inside a page: placed at 4 KiB in heaps of our own,
     /// so one costs its size, not a whole 64 KiB tile. Heaps, the next free byte of the last, free slots by size,
     /// and the live ones (host pointer -> heap, offset, size)
@@ -149,8 +187,8 @@ impl State {
         }
         if self.small_heaps.is_empty() || self.small_next + size > SMALL_HEAP {
             let mut h: Option<ID3D12Heap> = None;
-            // at the card's budget, a new heap is system memory (read over the bus, never paged)
-            let properties = if rebuild_d3d12x::vram::PRESSURE.load(Relaxed) {
+            // near the card's budget, a new heap is system memory (read over the bus, never paged)
+            let properties = if rebuild_d3d12x::vram::demote() {
                 D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_CUSTOM, CPUPageProperty: D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE, MemoryPoolPreference: D3D12_MEMORY_POOL_L0, ..Default::default() }
             } else {
                 D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() }
@@ -244,9 +282,9 @@ impl State {
         (off < pages * P).then_some((cpu, key + off / P * P))
     }
 
-    /// The key page a tile standing for `src` of a texture starting `inside` bytes into a page names now. `None`:
-    /// unmapped (or no key left).
-    fn key_of(&mut self, src: Source, inside: u64) -> Option<u64> {
+    /// The key page a tile standing for `src` of a texture starting `inside` bytes into a page (layout signature
+    /// `sig`) names now. `None`: unmapped (or no key left).
+    fn key_of(&mut self, src: Source, inside: u64, sig: u64) -> Option<u64> {
         match src {
             Source::Console(va) => match self.pool_page(va) {
                 None => None,
@@ -256,18 +294,35 @@ impl State {
                     None => {
                         let k = self.private_key()?;
                         self.inner.insert((cpu, inside), k);
-                        self.own.insert(k, Some((cpu, inside)));
+                        self.own.insert(k, Own::Inner((cpu, inside)));
                         Some(k)
                     }
                 },
             },
-            Source::Private => {
-                PRIVATE.fetch_add(1, Relaxed);
-                let k = self.private_key()?;
-                self.own.insert(k, None);
-                Some(k)
+            Source::Derived { first, pages, slot } => {
+                let pools: Box<[Option<u64>]> = (0..u64::from(pages)).map(|i| self.pool_page(first + i * P).map(|p| p.0)).collect();
+                self.derived_key(pools, inside, slot, sig)
             }
         }
+    }
+
+    /// The key of a derived tile whose pages lie on `pools` now: `None` (NULL) when none is mapped, else the one
+    /// key every tile of that identity shares.
+    fn derived_key(&mut self, pools: Box<[Option<u64>]>, inside: u64, slot: u32, sig: u64) -> Option<u64> {
+        if pools.iter().all(Option::is_none) {
+            // nothing of its mips is mapped (on the console they read nothing either): NULL, no card page
+            DERIVED_NULL.fetch_add(1, Relaxed);
+            return None;
+        }
+        let id: Derived = (pools, inside, slot, sig);
+        if let Some(&k) = self.derived.get(&id) {
+            DERIVED_SHARED.fetch_add(1, Relaxed);
+            return Some(k);
+        }
+        let k = self.private_key()?;
+        self.derived.insert(id.clone(), k);
+        self.own.insert(k, Own::Derived(id));
+        Some(k)
     }
 
     /// Tiles come to name `keys` (one entry per tile; `None`: unmapped): their card pages, from one call to the
@@ -332,8 +387,13 @@ impl State {
     /// A key of our own nothing names any more goes back to the free list.
     fn forget(&mut self, key: u64) {
         if let Some(what) = self.own.remove(&key) {
-            if let Some(k) = what {
-                self.inner.remove(&k);
+            match what {
+                Own::Inner(k) => {
+                    self.inner.remove(&k);
+                }
+                Own::Derived(id) => {
+                    self.derived.remove(&id);
+                }
             }
             self.private_free.push(key);
         }
@@ -429,10 +489,15 @@ fn plan(device: &ID3D12Device, r: &ID3D12Resource, desc: &D3D12_RESOURCE_DESC, c
         let end = (address + range.1).div_ceil(P) * P;
         (first..end).step_by(P as usize).collect()
     };
+    // a tile left without a page of its own is derived from all of its subresource's pages
+    let mut slot = 0u32;
     let mut claim = |pages: &[u64], k: usize| -> Source {
         match pages.get(k) {
             Some(&p) if used.insert(p) => Source::Console(p),
-            _ => Source::Private,
+            _ => {
+                slot += 1;
+                Source::Derived { first: pages.first().copied().unwrap_or(address / P * P), pages: pages.len().max(1) as u32, slot: slot - 1 }
+            }
         }
     };
     for s in 0..slices {
@@ -463,6 +528,17 @@ fn plan(device: &ID3D12Device, r: &ID3D12Resource, desc: &D3D12_RESOURCE_DESC, c
         }
     }
     (out.len() as u32 == total).then_some(out)
+}
+
+/// A texture's layout, for derived tiles' keys: the console description (its layout fixes the bytes' places) and
+/// the host's (fixes the tiles').
+fn signature(console: &D3D12_RESOURCE_DESC, host: &D3D12_RESOURCE_DESC) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for d in [console, host] {
+        (d.Dimension.0, d.Alignment, d.Width, d.Height, d.DepthOrArraySize, d.MipLevels, d.Format.0, d.SampleDesc.Count, d.Layout.0, d.Flags.0).hash(&mut h);
+    }
+    h.finish()
 }
 
 /// `Memory::texture`: a reserved host texture for console texture `console` at `address` (host description `host`,
@@ -526,10 +602,12 @@ pub fn texture(address: u64, console: &D3D12_RESOURCE_DESC, host: &D3D12_RESOURC
         return None;
     };
     let bytes = con.ranges.iter().map(|x| x.1).max().unwrap_or(P);
+    let sig = signature(console, &rd);
+    DERIVED.fetch_add(plan.iter().filter(|x| matches!(x.1, Source::Derived { .. })).count() as u64, Relaxed);
     let mut g = state();
     let s = g.get_or_insert_with(State::default);
     let inside = address % P;
-    let mut keys: Vec<Option<u64>> = plan.iter().map(|&(_, src)| s.key_of(src, inside)).collect();
+    let mut keys: Vec<Option<u64>> = plan.iter().map(|&(_, src)| s.key_of(src, inside, sig)).collect();
     let cards = s.take(&mut keys);
     let mut tiles = Vec::with_capacity(plan.len());
     // a reserved texture starts unmapped: only tiles with a card page are mapped
@@ -549,7 +627,7 @@ pub fn texture(address: u64, console: &D3D12_RESOURCE_DESC, host: &D3D12_RESOURC
     let raw = r.as_raw() as usize;
     s.longest = s.longest.max(bytes);
     s.by_address.entry(address).or_default().push(raw);
-    s.textures.insert(raw, Tex { resource: r.clone(), address, bytes, tiles });
+    s.textures.insert(raw, Tex { resource: r.clone(), address, bytes, sig, tiles });
     Some(r)
 }
 
@@ -601,18 +679,12 @@ pub fn remapped(pages: &[u64]) {
         if t.address + t.bytes <= lo || t.address >= hi {
             continue;
         }
-        let inside = t.address % P;
-        let over: Vec<(usize, Source, Option<u64>)> = t
-            .tiles
-            .iter()
-            .enumerate()
-            .filter(|(_, x)| matches!(x.1, Source::Console(va) if touched.contains(&va)))
-            .map(|(i, x)| (i, x.1, x.2))
-            .collect();
+        let (inside, sig) = (t.address % P, t.sig);
+        let over: Vec<(usize, Source, Option<u64>)> = t.tiles.iter().enumerate().filter(|(_, x)| x.1.over(&touched)).map(|(i, x)| (i, x.1, x.2)).collect();
         let mut list = Vec::new();
         for (i, src, old) in over {
             TOUCHED.fetch_add(1, Relaxed);
-            let new = s.key_of(src, inside);
+            let new = s.key_of(src, inside, sig);
             if new == old {
                 // onto the pool page it has already, or unmapped and still unmapped: nothing to do
                 if new.is_some() { SAME.fetch_add(1, Relaxed) } else { STILL_UNMAPPED.fetch_add(1, Relaxed) };
@@ -663,10 +735,10 @@ pub fn remapped(pages: &[u64]) {
 
 /// For the VRAM line and the run report.
 pub fn report() -> String {
-    let (live, keys, pools, heaps) = state().as_ref().map_or((0, 0, 0, 0), |s| (s.textures.len(), s.refs.len(), s.pools.len(), s.small_heaps.len()));
+    let (live, keys, pools, heaps, derived) = state().as_ref().map_or((0, 0, 0, 0, 0), |s| (s.textures.len(), s.refs.len(), s.pools.len(), s.small_heaps.len(), s.derived.len()));
     let queue = if MADE.load(Relaxed) > 0 { crate::tilequeue::get().map(crate::tilequeue::report) } else { None };
     format!(
-        "{} small textures placed ({} MiB live in {} heaps); {} reserved textures live ({} made, {} gone) over {} pools, {} card pages ({} MiB) under them; tiles {} ({} private), {} without a card page ({} held back at the budget); {} 0xf8 batches: {} tiles over their pages, {} onto the pool page they had, {} still unmapped, {} remapped; {} starting inside a page; not taken: {} at the budget, {} not eligible, {} no layout, {} not made, {} mapping failures; tile queue: {}",
+        "{} small textures placed ({} MiB live in {} heaps); {} reserved textures live ({} made, {} gone) over {} pools, {} card pages ({} MiB) under them, derived {} ({} MiB); tiles {} ({} derived: {} lookups shared a key, {} left NULL with nothing mapped), {} without a card page ({} held back at the budget); {} 0xf8 batches: {} tiles over their pages, {} onto the pool page they had, {} still unmapped, {} remapped; {} starting inside a page; not taken: {} at the budget, {} not eligible, {} no layout, {} not made, {} mapping failures; tile queue: {}",
         SMALL.load(Relaxed),
         SMALL_BYTES.load(Relaxed) >> 20,
         heaps,
@@ -676,8 +748,12 @@ pub fn report() -> String {
         pools,
         keys,
         (keys as u64 * P) >> 20,
+        derived,
+        (derived as u64 * P) >> 20,
         TILES.load(Relaxed),
-        PRIVATE.load(Relaxed),
+        DERIVED.load(Relaxed),
+        DERIVED_SHARED.load(Relaxed),
+        DERIVED_NULL.load(Relaxed),
         NO_CARD.load(Relaxed),
         HELD_BACK.load(Relaxed),
         BATCHES.load(Relaxed),
@@ -740,5 +816,58 @@ mod tests {
         let mut d = tex(64, 64, 16, 1, DXGI_FORMAT_R8G8B8A8_UNORM);
         d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
         assert!(console_layout(&d).is_none());
+    }
+
+    /// A state with keys of its own from a fake range (no memory model in tests).
+    fn keyed() -> State {
+        State { private_next: 1 << 40, private_end: (1 << 40) + 64 * P, ..Default::default() }
+    }
+
+    #[test]
+    fn a_derived_tile_with_nothing_mapped_is_null_and_takes_no_key() {
+        let mut s = keyed();
+        assert_eq!(s.derived_key(vec![None, None].into(), 0, 0, 7), None);
+        assert!(s.derived.is_empty() && s.own.is_empty());
+        assert_eq!(s.private_next, 1 << 40, "no key page spent");
+    }
+
+    #[test]
+    fn derived_tiles_of_one_layout_over_the_same_pool_pages_share_a_key() {
+        let mut s = keyed();
+        let pools = || -> Box<[Option<u64>]> { vec![Some(0x5000_0000), None].into() };
+        let a = s.derived_key(pools(), 0, 2, 7).expect("a key");
+        // another texture of the same layout over the same pool pages: the same key
+        assert_eq!(s.derived_key(pools(), 0, 2, 7), Some(a));
+        // another layout, slot, start inside the page, or pool page: a key of its own
+        let others = [s.derived_key(pools(), 0, 2, 8), s.derived_key(pools(), 0, 3, 7), s.derived_key(pools(), 0x1000, 2, 7), s.derived_key(vec![Some(0x5001_0000), None].into(), 0, 2, 7)];
+        let mut all: Vec<u64> = others.iter().map(|k| k.expect("a key")).collect();
+        all.push(a);
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), 5);
+        // once nothing names it, the key and its identity go
+        s.forget(a);
+        assert!(!s.derived.values().any(|&k| k == a));
+        assert!(s.private_free.contains(&a));
+        assert_ne!(s.derived_key(pools(), 0, 2, 7), None);
+    }
+
+    #[test]
+    fn a_derived_tile_follows_every_page_it_comes_from() {
+        let src = Source::Derived { first: 0x10_0000, pages: 3, slot: 0 };
+        let touched = |pages: &[u64]| pages.iter().copied().collect::<HashSet<u64>>();
+        assert!(src.over(&touched(&[0x10_0000 + 2 * P])));
+        assert!(!src.over(&touched(&[0x10_0000 + 3 * P, 0x10_0000 - P])));
+        assert!(Source::Console(0x20_0000).over(&touched(&[0x20_0000])));
+    }
+
+    #[test]
+    fn layouts_differ_by_either_description() {
+        let a = tex(512, 64, 1, 4, DXGI_FORMAT_R8G8B8A8_UNORM);
+        let mut b = a;
+        b.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        assert_eq!(signature(&a, &a), signature(&a, &a));
+        assert_ne!(signature(&a, &a), signature(&b, &a));
+        assert_ne!(signature(&a, &a), signature(&a, &b));
     }
 }

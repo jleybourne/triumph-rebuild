@@ -109,17 +109,29 @@ pub fn gone(o: Origin, bytes: u64, console: u64) {
 /// Resources put in system memory because the card had no room (`E_OUTOFMEMORY` on the default heap, or the card
 /// at its budget).
 pub static FELL_BACK: AtomicU64 = AtomicU64::new(0);
+/// Textures handed to the title with no host texture (neither the card nor system memory took one).
+pub static HOSTLESS: AtomicU64 = AtomicU64::new(0);
 
 /// The card is at its budget (`QueryVideoMemoryInfo`, set by the lead's watcher): new textures nothing renders to go
 /// to system memory instead of pushing what is in use out of the card.
 pub static PRESSURE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Under [`PRESSURE`], a default-heap resource of `desc` goes to system memory (render targets and depth stay: the
+/// The card is near its budget (within 1 GiB, set by the watcher): new textures nothing renders to go to system
+/// memory from here, before the budget is reached, so the room left is kept for what the GPU writes and for the
+/// streamed textures' pages.
+pub static NEAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// New sampled textures go to system memory now ([`NEAR`] or [`PRESSURE`]).
+pub fn demote() -> bool {
+    NEAR.load(Relaxed) || PRESSURE.load(Relaxed)
+}
+
+/// When [`demote`], a default-heap resource of `desc` goes to system memory (render targets and depth stay: the
 /// GPU writes them every frame).
 pub fn to_system(desc: &windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_DESC) -> bool {
     use windows::Win32::Graphics::Direct3D12::*;
     let written = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET.0 | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL.0;
-    PRESSURE.load(Relaxed) && desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER && desc.Flags.0 & written == 0
+    demote() && desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER && desc.Flags.0 & written == 0
 }
 
 pub fn fell_back(d: &windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_DESC) {
@@ -152,6 +164,12 @@ pub fn report() -> String {
     if f > 0 {
         s += &format!("; {f} put in system memory (card full)");
     }
+    let h = HOSTLESS.load(Relaxed);
+    if h > 0 {
+        s += &format!("; {h} with no host texture at all");
+    }
+    s += "; ";
+    s += &crate::alias::report();
     s
 }
 
