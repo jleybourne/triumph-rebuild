@@ -15,7 +15,12 @@
 //!
 //! A heap goes when its last texture goes, two seconds later (the GPU may still be reading it). Heaps of GPU-written
 //! textures get the high residency priority: past the card's budget the driver demotes sampled textures first.
-//! `REBUILD_ALIAS_TARGETS=0` makes committed textures again.
+//!
+//! **Off unless `REBUILD_ALIAS_TARGETS=1`.** Measured on WARP through the world load (run `warp1`, vram3): 1,191
+//! textures placed, 104 into a live texture's heap, 3,912 MiB of heaps for 4,001 MiB of textures: 89 MiB saved,
+//! because the title's live targets hardly overlap (vram2's census: 2.8 GB of targets in its other memory cover
+//! 2.8 GB). And the debug layer flagged placed targets drawn before any clear, discard or copy (#1422): a placed
+//! target's compression metadata starts undefined, which a committed one's does not. Not worth that for 89 MiB.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -32,10 +37,10 @@ pub static TEXTURE_BYTES: AtomicU64 = AtomicU64::new(0);
 /// How long an emptied heap is kept.
 const GRACE: Duration = Duration::from_secs(2);
 
-/// On unless `REBUILD_ALIAS_TARGETS=0`. Read once.
+/// Off unless `REBUILD_ALIAS_TARGETS=1` (see the module notes). Read once.
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("REBUILD_ALIAS_TARGETS").map_or(true, |v| v.trim() != "0"))
+    *ON.get_or_init(|| std::env::var("REBUILD_ALIAS_TARGETS").is_ok_and(|v| v.trim() == "1"))
 }
 
 /// A texture in a heap: its offset there, its host bytes, its console range, its host pointer.
