@@ -159,8 +159,7 @@ pub fn known(pl: &Plan) -> Vec<u8> {
         }
         if *v == View::RwTyped {
             m |= 1 << bit(View::Typed);
-        }
-        w[*s as usize] = m;
+        }        w[*s as usize] = m;
     }
     for (s, v) in &pl.sampler_slots {
         w[(HEAP_SLOTS + s) as usize] = 1 << bit(*v);
@@ -173,13 +172,27 @@ pub fn rec_desc() -> windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_DESC {
     buffer_desc(WORDS as u64 * 4, true)
 }
 
-/// Adds what one record names to the plan. `Ok(true)`: a slot was new.
-pub fn absorb(pl: &mut Plan, rec: &[u8]) -> Result<bool, String> {
+/// What one record says: whether it named a slot the plan did not have, and whether an index left the heap.
+#[derive(Default, Clone, Copy)]
+pub struct Absorbed {
+    pub new: bool,
+    /// an index from the data past the console range (`sir_vi` sent it to the null bank) or past the sampler heap:
+    /// the oracle reads past its heap there (undefined), ours the null view, so the set compares nothing real
+    pub oob: bool,
+}
+
+/// Adds what one record names to the plan. The null bank (`[CONSOLE_VIEWS, + NULL_BANK)`) is never given a view:
+/// an index there is one past the console range, which reads the null view by design.
+pub fn absorb(pl: &mut Plan, rec: &[u8]) -> Result<Absorbed, String> {
+    use rebuild_sir::lift::{CONSOLE_VIEWS, NULL_BANK};
     let w = |i: u32| u32::from_le_bytes(rec[i as usize * 4..i as usize * 4 + 4].try_into().unwrap());
-    if w(HEAP_SLOTS + SAMPLER_SLOTS) != 0 || w(HEAP_SLOTS + SAMPLER_SLOTS + 1) != 0 {
+    if w(HEAP_SLOTS + SAMPLER_SLOTS) != 0 {
         return Err("a recorded descriptor index past the harness heap".into());
     }
-    let mut new = false;
+    let mut r = Absorbed { oob: w(HEAP_SLOTS + SAMPLER_SLOTS + 1) != 0, ..Default::default() };
+    if r.oob && std::env::var_os("REBUILD_EXEC_TRACE").is_some() {
+        eprintln!("execcheck: a sampler index past the sampler heap");
+    }
     let mut add = |map: &mut BTreeMap<u32, View>, slot: u32, bits: u32| -> Result<(), String> {
         for b in (0..KINDS).filter(|b| bits >> b & 1 != 0) {
             let v = view(b);
@@ -188,7 +201,7 @@ pub fn absorb(pl: &mut Plan, rec: &[u8]) -> Result<bool, String> {
                 None => v,
             };
             if map.get(&slot) != Some(&m) {
-                new = true;
+                r.new = true;
                 map.insert(slot, m);
             }
         }
@@ -196,9 +209,17 @@ pub fn absorb(pl: &mut Plan, rec: &[u8]) -> Result<bool, String> {
     };
     for s in 0..DUMMY_BASE {
         let b = w(s);
-        if b != 0 {
-            add(&mut pl.slots, s, b)?;
+        if b == 0 {
+            continue;
         }
+        if (CONSOLE_VIEWS..CONSOLE_VIEWS + NULL_BANK).contains(&s) {
+            if std::env::var_os("REBUILD_EXEC_TRACE").is_some() {
+                eprintln!("execcheck: an index past the console range, read as kind bits {b:#x} (null slot {})", s - CONSOLE_VIEWS);
+            }
+            r.oob = true;
+            continue;
+        }
+        add(&mut pl.slots, s, b)?;
     }
     for s in 0..SAMPLER_DUMMY {
         let b = w(HEAP_SLOTS + s);
@@ -206,7 +227,7 @@ pub fn absorb(pl: &mut Plan, rec: &[u8]) -> Result<bool, String> {
             add(&mut pl.sampler_slots, s, b)?;
         }
     }
-    Ok(new)
+    Ok(r)
 }
 
 #[cfg(test)]
@@ -224,5 +245,23 @@ mod tests {
         for b in 0..KINDS {
             assert_eq!(bit(view(b)), b);
         }
+    }
+
+    #[test]
+    fn an_index_past_the_console_range_is_named_and_given_no_view() {
+        use rebuild_sir::lift::CONSOLE_VIEWS;
+        let mut rec = vec![0u32; WORDS as usize];
+        rec[12] = 1 << bit(View::Tex(1));
+        // `sir_vi` sent an index from float data to the null bank's 2D texture
+        rec[(CONSOLE_VIEWS + 5) as usize] = 1 << bit(View::Tex(1));
+        let mut pl = Plan::default();
+        let a = absorb(&mut pl, &super::super::run::bytes_of(rec.iter().copied())).unwrap();
+        assert!(a.new && a.oob);
+        assert_eq!(pl.slots.keys().copied().collect::<Vec<_>>(), vec![12]);
+        // a sampler index past the sampler heap is one too
+        let mut rec = vec![0u32; WORDS as usize];
+        rec[(HEAP_SLOTS + SAMPLER_SLOTS + 1) as usize] = 1;
+        let a = absorb(&mut Plan::default(), &super::super::run::bytes_of(rec.into_iter())).unwrap();
+        assert!(!a.new && a.oob);
     }
 }
