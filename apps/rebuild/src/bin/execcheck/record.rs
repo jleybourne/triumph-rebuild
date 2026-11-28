@@ -125,19 +125,21 @@ pub fn instrument(src: &str) -> Result<(String, Vec<View>), String> {
     out.push_str(&src[at..]);
     let prelude = format!(
         "// execcheck: the recording pass\n\
+         // a plain load first: every lane setting the same bit with an atomic serialises on WARP\n\
+         void sir_rec_or(RWByteAddressBuffer rec, uint a, uint k) {{ if (((rec.Load(a) >> k) & 1u) == 0u) {{ rec.InterlockedOr(a, 1u << k); }} }}\n\
          uint sir_rec(uint i, uint k) {{\n\
          \x20   RWByteAddressBuffer rec = ResourceDescriptorHeap[{REC_SLOT}];\n\
          \x20   ByteAddressBuffer known = ResourceDescriptorHeap[{KNOWN_SLOT}];\n\
-         \x20   if (i >= {DUMMY_BASE}u) {{ rec.InterlockedOr({o}u, 1u << k); return {DUMMY_BASE}u + k; }}\n\
-         \x20   rec.InterlockedOr(i * 4u, 1u << k);\n\
+         \x20   if (i >= {DUMMY_BASE}u) {{ sir_rec_or(rec, {o}u, k); return {DUMMY_BASE}u + k; }}\n\
+         \x20   sir_rec_or(rec, i * 4u, k);\n\
          \x20   return ((known.Load(i * 4u) >> k) & 1u) != 0 ? i : {DUMMY_BASE}u + k;\n\
          }}\n\
          uint sir_recs(uint i, uint k) {{\n\
          \x20   RWByteAddressBuffer rec = ResourceDescriptorHeap[{REC_SLOT}];\n\
          \x20   ByteAddressBuffer known = ResourceDescriptorHeap[{KNOWN_SLOT}];\n\
          \x20   uint d = {SAMPLER_DUMMY}u + (k == 18u ? 1u : 0u);\n\
-         \x20   if (i >= {SAMPLER_DUMMY}u) {{ rec.InterlockedOr({os}u, 1u << k); return d; }}\n\
-         \x20   rec.InterlockedOr(({HEAP_SLOTS}u + i) * 4u, 1u << k);\n\
+         \x20   if (i >= {SAMPLER_DUMMY}u) {{ sir_rec_or(rec, {os}u, k); return d; }}\n\
+         \x20   sir_rec_or(rec, ({HEAP_SLOTS}u + i) * 4u, k);\n\
          \x20   return ((known.Load(({HEAP_SLOTS}u + i) * 4u) >> k) & 1u) != 0 ? i : d;\n\
          }}\n",
         o = (HEAP_SLOTS + SAMPLER_SLOTS) * 4,

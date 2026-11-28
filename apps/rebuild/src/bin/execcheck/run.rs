@@ -681,9 +681,10 @@ fn record_plan(g: &mut Gpu, pl: &mut Plan, rec_pso: &ID3D12PipelineState, rs: &I
 /// Runs a program and the oracle's on every input set.
 pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &[u32]) -> Row {
     let trace = std::env::var_os("REBUILD_EXEC_TRACE").is_some();
+    let t0 = std::time::Instant::now();
     let step = |s: &str| {
         if trace {
-            eprintln!("execcheck {}: {s}", p.hash);
+            eprintln!("execcheck {} {:>6} ms: {s}", p.hash, t0.elapsed().as_millis());
         }
     };
     let row = |verdict: &'static str, reason: String, detail: String| Row { hash: p.hash.clone(), stage: p.stage, single: p.single, wave: p.wave, verdict, reason, detail };
@@ -702,9 +703,13 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
         }
     }
     // a dynamic index over several kinds of view: the slots come from the recording pass
+    // a dynamic index over several kinds of view: the slots come from the recording pass. One kind keeps the filled
+    // region: recording those too (with the recorded slots outside the region given views) turned 30 programs that
+    // match into differing ones, where the oracle reads other slots than ours for an index from the data
+    let record = std::env::var_os("REBUILD_EXEC_NORECORD").is_none();
     let (mut pl, recording) = match plan(p, false) {
         Ok(pl) => (pl, None),
-        Err(e) if e == "dynamic descriptor index over mixed views" && std::env::var_os("REBUILD_EXEC_NORECORD").is_none() => {
+        Err(e) if e == "dynamic descriptor index over mixed views" && record => {
             let pl = match plan(p, true) {
                 Ok(pl) => pl,
                 Err(e) => return row("untested", e, String::new()),
@@ -802,7 +807,7 @@ pub fn program(g: &mut Gpu, p: &Prog, o: &Oracle, out: &std::path::Path, skip: &
                 .ok()
                 .and_then(|c| c.part(rebuild_shader::FourCC::ISG1).map(|x| rebuild_shader::signature::parse(x.data).unwrap_or_default()))
                 .unwrap_or_default();
-            let own = super::ps::oracle_struct(&oracle_in, &p.src)
+            let own = super::ps::oracle_struct(&oracle_in, &super::ps::psv_input_modes(&o.dxil), &p.src)
                 .and_then(|st| super::ps::feed_vs(&st))
                 .and_then(|src| super::ps::compile_vs(&src, out, &format!("{}.oracle", p.hash)));
             match own {

@@ -89,6 +89,31 @@ fn dxc_threads() -> usize {
     std::env::var("REBUILD_EXEC_DXC").ok().and_then(|v| v.parse().ok()).unwrap_or(3).clamp(1, rebuild_pipelines::translate::MAX_DXC)
 }
 
+/// One of the `dxc_threads` DXC processes this process may run, given back on drop (translation threads lift in
+/// parallel; only their DXC calls wait).
+struct DxcSlot;
+
+static DXC_BUSY: Mutex<usize> = Mutex::new(0);
+static DXC_FREE: std::sync::Condvar = std::sync::Condvar::new();
+
+impl DxcSlot {
+    fn take() -> DxcSlot {
+        let mut n = DXC_BUSY.lock().unwrap_or_else(|e| e.into_inner());
+        while *n >= dxc_threads() {
+            n = DXC_FREE.wait(n).unwrap_or_else(|e| e.into_inner());
+        }
+        *n += 1;
+        DxcSlot
+    }
+}
+
+impl Drop for DxcSlot {
+    fn drop(&mut self) {
+        *DXC_BUSY.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        DXC_FREE.notify_one();
+    }
+}
+
 /// The short name of a wave mapping, for the CSV's set column ("" for agnostic programs).
 fn wave_name(w: rebuild_sir::lift::Wave) -> &'static str {
     use rebuild_sir::lift::Wave;
@@ -133,18 +158,56 @@ pub struct Skip {
 
 /// Lifts, emits and compiles (DXC only when the HLSL changed) every agnostic program of the stages asked for.
 /// `done`: programs that already have a row (a worker restarted after a lost device): not translated again.
-fn prepare(walk: &census::Walk, stages: &[&'static str], out: &Path, only: Option<&BTreeSet<String>>, done: &BTreeSet<String>) -> (Vec<Prog>, Vec<Skip>) {
+/// `batch`: only the first that many programs left (by hash), so a worker that must restart after a set that never
+/// finishes lifts little; the flag says whether programs were left out.
+fn prepare(walk: &census::Walk, stages: &[&'static str], out: &Path, only: Option<&BTreeSet<String>>, done: &BTreeSet<String>, batch: Option<usize>) -> (Vec<Prog>, Vec<Skip>, bool) {
     let dxc = dxc().expect("dxc.exe (Windows SDK) or REBUILD_DXC");
+    let kind_of = |p: &census::Program| match (&p.native.io, p.native.stage) {
+        (StageIo::Ps { .. }, _) => Some("ps"),
+        (StageIo::Cs(_), _) => Some("cs"),
+        (StageIo::Vs { .. }, HwStage::Vs) => Some("vs"),
+        _ => None,
+    };
+    let mut more = false;
+    let pick: Option<BTreeSet<usize>> = batch.map(|n| {
+        let mut c: Vec<usize> = (0..walk.programs.len())
+            .filter(|&i| {
+                let p = &walk.programs[i];
+                !only.is_some_and(|set| !set.contains(&p.hash)) && !done.contains(&p.hash) && in_shard(&p.hash) && kind_of(p).is_some_and(|k| stages.contains(&k))
+            })
+            .collect();
+        c.sort_by(|a, b| walk.programs[*a].hash.cmp(&walk.programs[*b].hash));
+        // the class filter the translation threads apply (agnostic, or wave-wide with --wave), in hash order until
+        // the batch is full: a batch of programs the run never takes would loop
+        let mut f = Findings::default();
+        let mut taken = Vec::new();
+        for i in c {
+            let row = features::analyse(&walk.programs[i].native, &mut f);
+            if row.decode_error.is_some() || (row.class() == WaveClass::Agnostic) == flag("--wave") || (flag("--v0") && row.blocks != 1) {
+                continue;
+            }
+            if taken.len() == n {
+                more = true;
+                break;
+            }
+            taken.push(i);
+        }
+        taken.into_iter().collect()
+    });
     let next = AtomicUsize::new(0);
     let progs = Mutex::new(Vec::new());
     let skips = Mutex::new(Vec::new());
     std::thread::scope(|s| {
-        for _ in 0..workers().min(dxc_threads()) {
+        // lifting on every worker thread; DXC through `dxc_slot` (at most `dxc_threads` at once)
+        for _ in 0..workers() {
             s.spawn(|| {
                 let mut f = Findings::default();
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(p) = walk.programs.get(i) else { break };
+                    if pick.as_ref().is_some_and(|k| !k.contains(&i)) {
+                        continue;
+                    }
                     if only.is_some_and(|set| !set.contains(&p.hash)) || done.contains(&p.hash) || !in_shard(&p.hash) {
                         continue;
                     }
@@ -189,7 +252,7 @@ fn prepare(walk: &census::Walk, stages: &[&'static str], out: &Path, only: Optio
     });
     let mut progs = progs.into_inner().unwrap();
     progs.sort_by(|a: &Prog, b: &Prog| (a.stage, &a.hash).cmp(&(b.stage, &b.hash)));
-    (progs, skips.into_inner().unwrap())
+    (progs, skips.into_inner().unwrap(), more)
 }
 
 fn translate(p: &census::Program, kind: &'static str, dxc: &Path, out: &Path) -> Result<Prog, String> {
@@ -199,6 +262,7 @@ fn translate(p: &census::Program, kind: &'static str, dxc: &Path, out: &Path) ->
     let obj = out.join(format!("{}.{kind}.dxil", p.hash));
     let same = std::fs::read_to_string(&hl).is_ok_and(|old| old == h.src) && obj.exists();
     if !same {
+        let _slot = DxcSlot::take();
         std::fs::write(&hl, &h.src).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(&obj);
         if flag("--gis") {
@@ -401,7 +465,9 @@ fn main() {
     } else {
         BTreeSet::new()
     };
-    let (mut progs, skips) = prepare(&walk, &stages, &out, only.as_ref(), &have);
+    // a worker translates a batch of what is left (`--batch`, default 150) and ends with 6 when more is left
+    let batch = flag("--worker").then(|| arg("--batch").and_then(|v| v.parse().ok()).unwrap_or(150));
+    let (mut progs, skips, more) = prepare(&walk, &stages, &out, only.as_ref(), &have, batch);
     drop(walk);
     drop(data);
     if flag("--card") {
@@ -459,6 +525,9 @@ fn main() {
         let _ = std::fs::remove_file(shard_file(&out, "current"));
         drop(g);
         drop(card);
+        if more {
+            rebuild_cardlock::exit(6);
+        }
         return;
     }
 
@@ -480,12 +549,16 @@ fn main() {
     let exe = std::env::current_exe().unwrap();
     let mut passthrough: Vec<String> = std::env::args().skip(1).filter(|a| a != "--resume").collect();
     passthrough.push("--worker".into());
-    for _attempt in 0..1000 {
+    let mut failed_idle = 0;
+    for _attempt in 0..100_000 {
         let mut child = std::process::Command::new(&exe).args(&passthrough).spawn().expect("worker");
         let st = child.wait().expect("worker");
         card_release_dead(child.id());
         if st.success() {
             break;
+        }
+        if st.code() == Some(6) {
+            continue; // the worker finished its batch; more is left
         }
         // the worker died on a program: name it and go on
         let cur_set = std::fs::read_to_string(shard_file(&out, "current")).unwrap_or_default();
@@ -494,17 +567,27 @@ fn main() {
             None => (cur_set.trim().to_string(), None),
         };
         if cur.is_empty() {
-            eprintln!("execcheck: worker failed with no program in hand ({st})");
-            std::process::exit(1);
+            // before any program (out of memory reading the archive while another lane holds the machine, say):
+            // a while later, again, a few times
+            failed_idle += 1;
+            eprintln!("execcheck: worker failed with no program in hand ({st}), {failed_idle} of 20");
+            if failed_idle >= 20 {
+                std::process::exit(1);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            continue;
         }
-        // an input set that never finished (a loop whose trip count comes from the data): skipped next time,
-        // unless every set has
         // an input set that never finished (a loop whose trip count comes from the data) or lost the device (an
-        // index from the data past every view): skipped next time, unless every set has
+        // index from the data past every view): skipped next time; at a second such set, the sets after it too (the
+        // sets run in order: the program is run again at most twice), unless no set is left
         if let (Some(3 | 4), Some(k)) = (st.code(), set) {
             let path = shard_file(&out, "hung.txt");
             let mut h = std::fs::read_to_string(&path).unwrap_or_default();
+            let again = h.lines().any(|l| l.starts_with(&cur));
             h.push_str(&format!("{cur} {k} {}\n", if st.code() == Some(4) { "never finished" } else { "lost the device" }));
+            for later in (k + 1..run::SETS).filter(|_| again) {
+                h.push_str(&format!("{cur} {later} not run (after set {k})\n"));
+            }
             std::fs::write(&path, &h).unwrap();
             if h.lines().filter(|l| l.starts_with(&cur)).count() < run::SETS as usize {
                 let _ = std::fs::remove_file(shard_file(&out, "current"));

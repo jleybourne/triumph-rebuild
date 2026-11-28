@@ -168,7 +168,7 @@ impl Gpu {
                     }
                     let mut buf = vec![0u64; len.div_ceil(8)];
                     let m = buf.as_mut_ptr() as *mut D3D12_MESSAGE;
-                    if q.GetMessage(i, Some(m), &mut len).is_ok() && (*m).Severity.0 <= D3D12_MESSAGE_SEVERITY_ERROR.0 {
+                    if q.GetMessage(i, Some(m), &mut len).is_ok() && ((*m).Severity.0 <= D3D12_MESSAGE_SEVERITY_ERROR.0 || std::env::var_os("REBUILD_EXEC_ALLMSG").is_some()) {
                         out.push(std::ffi::CStr::from_ptr((*m).pDescription as *const std::ffi::c_char).to_string_lossy().into_owned());
                     }
                 }
@@ -392,10 +392,14 @@ impl Gpu {
             // a program that never finishes: the worker ends, and the supervisor names it
             let ev = windows::Win32::System::Threading::CreateEventW(None, false, false, None).map_err(|e| e.to_string())?;
             self.fence.SetEventOnCompletion(self.value, ev).map_err(|e| e.to_string())?;
-            let r = windows::Win32::System::Threading::WaitForSingleObject(ev, 30_000);
+            // REBUILD_EXEC_TIMEOUT seconds (default 10; a set takes tens of milliseconds on WARP)
+            let secs: u32 = std::env::var("REBUILD_EXEC_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+            let r = windows::Win32::System::Threading::WaitForSingleObject(ev, secs * 1000);
             let _ = windows::Win32::Foundation::CloseHandle(ev);
             if r != windows::Win32::Foundation::WAIT_OBJECT_0 {
-                eprintln!("execcheck: no completion in 30 s");
+                // (a new device in the same process does not help: WARP's threads are the process's, and the
+                // abandoned work holds them)
+                eprintln!("execcheck: no completion in {secs} s");
                 std::process::exit(4);
             }
         }

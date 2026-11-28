@@ -3,6 +3,7 @@
 //! linear interpolation differ, so a wrong interpolation mode shows), full 32-bit render targets and a 32-bit depth
 //! buffer, read back and compared word by word.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use rebuild_shader::signature::Element;
@@ -79,10 +80,63 @@ fn sem_key(sem: &str) -> usize {
     (h + index * 17) % 1009
 }
 
+/// The interpolation mode (D3D_INTERPOLATION_MODE) of each input element a pixel shader's PSV0 part lists, by
+/// semantic name and index: the packer keeps elements of different modes in different registers, so a feeding
+/// vertex shader must declare the same modes to pack (and link) as the program does.
+pub fn psv_input_modes(dxil: &[u8]) -> Vec<(String, u32, u8)> {
+    let read = || -> Option<Vec<(String, u32, u8)>> {
+        let c = rebuild_shader::Container::parse(dxil).ok()?;
+        let part = c.part(rebuild_shader::FourCC::PSV0)?.data;
+        let w = |at: usize| part.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+        let size = w(0)?;
+        if size < 36 {
+            return None;
+        }
+        let inputs = *part.get(4 + 28)? as usize;
+        let mut at = 4 + size;
+        let count = w(at)?;
+        at += 4;
+        if count > 0 {
+            at += 4 + w(at)? * count;
+        }
+        let strings_len = w(at)?;
+        let strings = part.get(at + 4..at + 4 + strings_len)?;
+        at += 4 + strings_len;
+        let indices_len = w(at)?;
+        let indices: Vec<u32> = (0..indices_len).map(|k| w(at + 4 + 4 * k).unwrap_or(0) as u32).collect();
+        at += 4 + 4 * indices_len;
+        let el = w(at)?;
+        at += 4;
+        let mut out = Vec::new();
+        for k in 0..inputs {
+            let e = part.get(at + el * k..at + el * (k + 1))?;
+            let name_at = u32::from_le_bytes(e[0..4].try_into().unwrap()) as usize;
+            let name: String = strings.get(name_at..)?.iter().take_while(|b| **b != 0).map(|b| *b as char).collect();
+            let index = indices.get(u32::from_le_bytes(e[4..8].try_into().unwrap()) as usize).copied().unwrap_or(0);
+            out.push((name, index, e[13]));
+        }
+        Some(out)
+    };
+    read().unwrap_or_default()
+}
+
+/// The HLSL modifiers of a D3D_INTERPOLATION_MODE.
+fn modifiers(mode: u8) -> &'static str {
+    match mode {
+        1 => "nointerpolation ",
+        3 => "centroid ",
+        4 => "noperspective ",
+        5 => "noperspective centroid ",
+        6 => "sample ",
+        7 => "noperspective sample ",
+        _ => "",
+    }
+}
+
 /// The input struct of a pixel shader as the oracle's input signature packs it (element by element, in register
-/// order), with the interpolation modes our struct gives the same semantics: a feeding vertex shader built from it
-/// links to the oracle.
-pub fn oracle_struct(isg1: &[Element], ours: &str) -> Result<String, String> {
+/// order), with the interpolation modes the oracle's PSV0 gives (else the ones our struct gives the same
+/// semantics): a feeding vertex shader built from it links to the oracle.
+pub fn oracle_struct(isg1: &[Element], modes: &[(String, u32, u8)], ours: &str) -> Result<String, String> {
     let start = ours.find("struct In {").ok_or("no input struct")?;
     let body = &ours[start + "struct In {".len()..];
     let body = &body[..body.find("};").ok_or("input struct not closed")?];
@@ -97,28 +151,68 @@ pub fn oracle_struct(isg1: &[Element], ours: &str) -> Result<String, String> {
         }
         String::new()
     };
-    let mut els: Vec<&Element> = isg1.iter().filter(|e| e.system == 0 || e.system == 1).collect();
+    let mut els: Vec<&Element> = isg1.iter().filter(|e| e.system <= 3).collect();
     els.sort_by_key(|e| (e.register, e.mask.trailing_zeros()));
-    let mut out = String::from("struct In {
-");
-    for (k, e) in els.iter().enumerate() {
-        let n = e.mask.count_ones();
-        let base = match e.comp {
-            1 => "uint",
-            2 => "int",
-            4 => "uint16_t",
-            5 => "int16_t",
-            6 => "float16_t",
-            _ => "float",
-        };
-        let ty = if n > 1 { format!("{base}{n}") } else { base.to_string() };
-        let sem = if e.system == 1 { "SV_Position".to_string() } else { format!("{}{}", e.name, e.index) };
-        let mods = if e.system == 1 { String::new() } else { ours_mods(&sem) };
-        out.push_str(&format!("    {mods}{ty} o{k} : {sem};
-"));
+    let mut out = String::from("struct In {\n");
+    // DXC packs a vertex shader's outputs prefix-stable (each element at the first row where it fits), the oracle
+    // keeps the console's rows: after each row's elements, padding fills the row's free components, so a later
+    // element cannot move into them
+    let mut pads = 0;
+    let rows: BTreeSet<u32> = els.iter().map(|e| e.register).collect();
+    for row in rows {
+        let mut used = 0u8;
+        let mut row_mods = String::new();
+        let mut row_int = false;
+        for (k, e) in els.iter().enumerate().filter(|(_, e)| e.register == row) {
+            let n = e.mask.count_ones();
+            let base = match e.comp {
+                1 => "uint",
+                2 => "int",
+                4 => "uint16_t",
+                5 => "int16_t",
+                6 => "float16_t",
+                _ => "float",
+            };
+            let ty = if n > 1 { format!("{base}{n}") } else { base.to_string() };
+            let sem = match e.system {
+                1 => "SV_Position".to_string(),
+                2 => format!("SV_ClipDistance{}", e.index),
+                3 => format!("SV_CullDistance{}", e.index),
+                _ => format!("{}{}", e.name, e.index),
+            };
+            let mode = modes.iter().find(|(n, i, _)| n.eq_ignore_ascii_case(&e.name) && *i == e.index).map(|m| m.2);
+            let mods = match mode {
+                _ if e.system == 1 => String::new(),
+                Some(m) => modifiers(m).to_string(),
+                None => ours_mods(&sem),
+            };
+            out.push_str(&format!("    {mods}{ty} o{k} : {sem};\n"));
+            used |= e.mask;
+            row_mods = mods;
+            row_int = e.comp == 1 || e.comp == 2;
+        }
+        if els.iter().any(|e| e.register == row && e.system != 0) {
+            continue;
+        }
+        // the free runs of the row, in column order
+        let mut c = 0;
+        while c < 4 {
+            if used >> c & 1 == 1 {
+                c += 1;
+                continue;
+            }
+            let start = c;
+            while c < 4 && used >> c & 1 == 0 {
+                c += 1;
+            }
+            let n = c - start;
+            let base = if row_int { "uint" } else { "float" };
+            let ty = if n > 1 { format!("{base}{n}") } else { base.to_string() };
+            out.push_str(&format!("    {row_mods}{ty} pad{pads} : SIRPAD{pads};\n"));
+            pads += 1;
+        }
     }
-    out.push_str("};
-");
+    out.push_str("};\n");
     Ok(out)
 }
 
@@ -272,7 +366,7 @@ mod tests {
         let ours = "struct In {\n    float4 pos : SV_Position;\n    float3 r1_0 : TEXCOORD0;\n    nointerpolation uint r2_0 : TEXCOORD1;\n    bool ff : SV_IsFrontFace;\n};\n";
         // the oracle: TEXCOORD1 first, packed into the same register as TEXCOORD0's tail
         let isg1 = [el("SV_Position", 0, 1, 3, 0, 0xf), el("TEXCOORD", 1, 0, 1, 1, 0x1), el("TEXCOORD", 0, 0, 3, 1, 0xe), el("SV_IsFrontFace", 0, 9, 1, 2, 1)];
-        let st = oracle_struct(&isg1, ours).unwrap();
+        let st = oracle_struct(&isg1, &[], ours).unwrap();
         assert!(st.contains("nointerpolation uint o1 : TEXCOORD1;"), "{st}");
         assert!(st.contains("float3 o2 : TEXCOORD0;"), "{st}");
         assert!(!st.contains("SV_IsFrontFace"), "{st}");
