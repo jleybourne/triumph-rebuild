@@ -82,6 +82,8 @@ struct Tiles {
     pages: HashMap<u64, PlacementId>,
     /// sub-windows whose views wait for the resources (made before `set_resources`)
     views_pending: Vec<u32>,
+    /// key pages (`crate::mapped`) mapped in their sub-window: only those given a reused card page, to zero it
+    keys_mapped: std::collections::HashSet<u64>,
 }
 
 static MODEL: OnceLock<Model> = OnceLock::new();
@@ -135,7 +137,7 @@ pub fn start(device: &ID3D12Device, warp: bool) -> Option<&'static Model> {
     // card memory the tiles may take: REBUILD_TILE_MIB, else 6 GiB on a card and 2 GiB on WARP (WARP's "card"
     // memory is the process's own, under the run's job limit)
     let mib = std::env::var("REBUILD_TILE_MIB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(if warp { 2048 } else { 6144 });
-    let tiles = Tiles { uma: Uma::new(SUBS * SUB as usize / WINDOW, mib << 20), space, pages: HashMap::new(), views_pending: Vec::new() };
+    let tiles = Tiles { uma: Uma::new(SUBS * SUB as usize / WINDOW, mib << 20), space, pages: HashMap::new(), views_pending: Vec::new(), keys_mapped: Default::default() };
     let maps = Maps { watched: BTreeMap::new(), spans: BTreeMap::new(), arena: ArenaState::default() };
     let model = Model {
         ring,
@@ -311,6 +313,8 @@ pub fn flush_wait(queue: &ID3D12CommandQueue) {
         let v = m.ring.flush();
         let _ = unsafe { queue.Wait(&m.ring.fence, v) };
     }
+    // and for the reserved textures' tile mappings so far (their own queue; crate::tilequeue)
+    crate::tilequeue::wait(queue);
 }
 
 /// The card's copy of watched memory or the arena holding `va`: its span inside one sub-window.
@@ -418,6 +422,10 @@ fn vram_line_with(census: bool) -> String {
     s += &format!("host textures {}", rebuild_d3d12x::vram::report());
     s += &format!("
 vram      mapped textures: {}", crate::mapped::report());
+    if crate::mapped::enabled() {
+        s += &format!("
+vram      {}; {} presents", crate::pagemap::report(), crate::present::PRESENT_CALLS.load(Relaxed));
+    }
     if census {
         s += &census_line();
     }
@@ -969,27 +977,82 @@ pub(crate) fn key_range(bytes: u64) -> Option<u64> {
     Some(at)
 }
 
-/// The card page behind key page `key` (placed now if it has none). `None`: no card memory left (the budget).
-pub(crate) fn card_for(key: u64) -> Option<u32> {
-    let m = MODEL.get()?;
+/// The card pages behind key pages `keys` (placed now where there are none), in one lock and at most one mapping
+/// call. `None`: no card memory left (the budget). A key page is not mapped in its sub-window (nothing reads it
+/// there: its card page is reached through the textures' tiles), except when its card page is reused, so the
+/// ring can zero it as it does any reused page.
+pub(crate) fn cards_for(keys: &[u64]) -> Vec<Option<u32>> {
+    let Some(m) = MODEL.get() else { return vec![None; keys.len()] };
     let mut t = lock(&m.tiles);
-    if !t.pages.contains_key(&key) {
-        m.place_pages(&mut t, std::iter::once(key));
+    let before = t.uma.card_pages_reached();
+    let mut reused: Vec<Backed> = Vec::new();
+    let mut placed = 0u64;
+    for &key in keys {
+        if t.pages.contains_key(&key) {
+            continue;
+        }
+        match t.uma.place(key, PAGE) {
+            Ok((id, b)) => {
+                t.pages.insert(key, id);
+                placed += 1;
+                reused.extend(b.into_iter().filter(|b| b.card < before));
+            }
+            Err(e) => {
+                if PAGES_REFUSED.fetch_add(1, Relaxed) < 4 {
+                    eprintln!("memory    key page {key:#x} gets no card page: {e:?}");
+                }
+            }
+        }
     }
-    t.uma.backing(key)
+    let reached = t.uma.card_pages_reached();
+    if reached > 0 {
+        // the tile thread names heaps by index: they exist before it does
+        let _ = t.space.heap((reached - 1) / rebuild_uma::tiles::HEAP_TILES);
+    }
+    if !reused.is_empty() {
+        if t.space.map(&reused).is_ok() {
+            m.publish(&mut t);
+            for b in &reused {
+                let address = b.page as u64 * P;
+                t.keys_mapped.insert(address);
+                let k = (address / SUB) as usize;
+                m.ring.zero(m.vas[k].load(Relaxed) + address % SUB, PAGE as u32);
+                PAGES_ZEROED.fetch_add(1, Relaxed);
+            }
+        } else if MAP_FAILED.fetch_add(1, Relaxed) < 4 {
+            eprintln!("memory    mapping {} reused key pages failed", reused.len());
+        }
+    }
+    PAGES_PLACED.fetch_add(placed, Relaxed);
+    keys.iter().map(|&k| t.uma.backing(k)).collect()
 }
 
-/// Give back key page `key`'s card page.
-pub(crate) fn release_key(key: u64) {
-    if let Some(m) = MODEL.get() {
-        m.retire(&mut lock(&m.tiles), key, key + P);
+/// Give back key pages' card pages (one unmapping call at most, for those mapped to be zeroed).
+pub(crate) fn release_keys(keys: &[u64]) {
+    let Some(m) = MODEL.get() else { return };
+    let mut t = lock(&m.tiles);
+    let mut unmap = Vec::new();
+    for &key in keys {
+        let Some(id) = t.pages.remove(&key) else { continue };
+        let Ok(r) = t.uma.retire(id) else { continue };
+        PAGES_RETIRED.fetch_add(r.len() as u64, Relaxed);
+        if t.keys_mapped.remove(&key) {
+            unmap.extend(r);
+        }
+    }
+    if !unmap.is_empty() {
+        if let Err(e) = t.space.unmap(&unmap) {
+            if MAP_FAILED.fetch_add(1, Relaxed) < 4 {
+                eprintln!("memory    unmapping {} key pages failed: {e}", unmap.len());
+            }
+        }
     }
 }
 
-/// Map a reserved texture's tiles (on the ring's queue: a queue that waits for the ring is ordered after it).
-pub(crate) fn map_texture_tiles(resource: &ID3D12Resource, tiles: &[rebuild_uma::space::TexTile]) -> Result<(), String> {
-    let m = MODEL.get().ok_or("no memory model")?;
-    lock(&m.tiles).space.map_tiles(resource, tiles)
+/// Tile heap `h` (made if it is not yet), for the tile thread (`crate::tilequeue`).
+pub(crate) fn tile_heap(h: u32) -> Option<ID3D12Heap> {
+    let m = MODEL.get()?;
+    lock(&m.tiles).space.heap(h).ok()
 }
 
 /// Console address `a` lies in memory the model knows (watched, or the arena).

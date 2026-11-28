@@ -23,6 +23,11 @@
 //! the texture goes             texture_gone    -> gone(): its card pages are given back when nothing else names them
 //! ```
 //!
+//! Tile mappings go through `crate::tilequeue`: one `UpdateTileMappings` per texture per creation or 0xf8 batch
+//! (per heap its card pages are in), contiguous tiles as one range, tiles staying on their pool page skipped, on a
+//! queue and thread of their own; the title's next submission waits for them on the GPU. Card pages for a batch's
+//! new keys come from the memory model in one call (`memory::cards_for`), and go back in one (`release_keys`).
+//!
 //! Contents still come from `crate::cputex` (the detile pass), which copies into the host texture when its pages
 //! change. Card pages come from the memory model's budget (`REBUILD_TILE_MIB`): when it is spent, a tile stays
 //! unmapped (reads zero) instead of the title getting an out-of-memory.
@@ -37,7 +42,7 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT};
 
-use rebuild_uma::space::TexTile;
+use crate::tilequeue::{Job, TexTile};
 
 const P: u64 = 64 << 10;
 
@@ -57,6 +62,12 @@ pub static HELD_BACK: AtomicU64 = AtomicU64::new(0);
 pub static AT_BUDGET: AtomicU64 = AtomicU64::new(0);
 pub static REMAPS: AtomicU64 = AtomicU64::new(0);
 pub static MAP_FAILED: AtomicU64 = AtomicU64::new(0);
+/// 0xf8 batches seen, tiles over the pages they touched, and of those: onto the pool page they had already, and
+/// unmapped and still unmapped (both skipped; `REMAPS` is the rest)
+pub static BATCHES: AtomicU64 = AtomicU64::new(0);
+pub static TOUCHED: AtomicU64 = AtomicU64::new(0);
+pub static SAME: AtomicU64 = AtomicU64::new(0);
+pub static STILL_UNMAPPED: AtomicU64 = AtomicU64::new(0);
 /// Small textures placed at 4 KiB in heaps of our own: made, and bytes live.
 pub static SMALL: AtomicU64 = AtomicU64::new(0);
 pub static SMALL_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -233,61 +244,88 @@ impl State {
         (off < pages * P).then_some((cpu, key + off / P * P))
     }
 
-    /// A tile standing for `src` of a texture starting `inside` bytes into a page names a key page: which, and its
-    /// card page (one more tile names it). `(None, None)`: unmapped, or no card memory left.
-    fn acquire(&mut self, src: Source, inside: u64) -> (Option<u64>, Option<u32>) {
-        let key = match src {
+    /// The key page a tile standing for `src` of a texture starting `inside` bytes into a page names now. `None`:
+    /// unmapped (or no key left).
+    fn key_of(&mut self, src: Source, inside: u64) -> Option<u64> {
+        match src {
             Source::Console(va) => match self.pool_page(va) {
-                None => return (None, None),
-                Some((_, key)) if inside == 0 => key,
+                None => None,
+                Some((_, key)) if inside == 0 => Some(key),
                 Some((cpu, _)) => match self.inner.get(&(cpu, inside)) {
-                    Some(&k) => k,
+                    Some(&k) => Some(k),
                     None => {
-                        let Some(k) = self.private_key() else { return (None, None) };
+                        let k = self.private_key()?;
                         self.inner.insert((cpu, inside), k);
                         self.own.insert(k, Some((cpu, inside)));
-                        k
+                        Some(k)
                     }
                 },
             },
             Source::Private => {
                 PRIVATE.fetch_add(1, Relaxed);
-                let Some(k) = self.private_key() else { return (None, None) };
+                let k = self.private_key()?;
                 self.own.insert(k, None);
-                k
-            }
-        };
-        // at the card's budget, no new card pages: the tile stays unmapped (reads zero) until it is mapped again
-        let fresh = !self.refs.contains_key(&key);
-        let card = if fresh && rebuild_d3d12x::vram::PRESSURE.load(Relaxed) {
-            HELD_BACK.fetch_add(1, Relaxed);
-            None
-        } else {
-            crate::memory::card_for(key)
-        };
-        match card {
-            Some(card) => {
-                *self.refs.entry(key).or_insert(0) += 1;
-                (Some(key), Some(card))
-            }
-            None => {
-                NO_CARD.fetch_add(1, Relaxed);
-                if !self.refs.contains_key(&key) {
-                    self.forget(key);
-                }
-                (None, None)
+                Some(k)
             }
         }
     }
 
-    /// One tile less names `key`: its card page goes back when it was the last.
-    fn release(&mut self, key: u64) {
-        let Some(n) = self.refs.get_mut(&key) else { return };
-        *n -= 1;
-        if *n == 0 {
-            self.refs.remove(&key);
-            crate::memory::release_key(key);
-            self.forget(key);
+    /// Tiles come to name `keys` (one entry per tile; `None`: unmapped): their card pages, from one call to the
+    /// memory model. One more tile names each key with a card page; a key left without one (the budget) is
+    /// cleared to `None` and the tile stays unmapped (reads zero) until it is mapped again.
+    fn take(&mut self, keys: &mut [Option<u64>]) -> Vec<Option<u32>> {
+        let pressure = rebuild_d3d12x::vram::PRESSURE.load(Relaxed);
+        let mut ask: Vec<u64> = Vec::new();
+        let mut seen: HashSet<u64> = HashSet::new();
+        for &k in keys.iter().flatten() {
+            if !seen.insert(k) {
+                continue;
+            }
+            // at the card's budget, no new card pages
+            if pressure && !self.refs.contains_key(&k) {
+                HELD_BACK.fetch_add(1, Relaxed);
+                continue;
+            }
+            ask.push(k);
+        }
+        let cards: HashMap<u64, u32> = if ask.is_empty() {
+            HashMap::new()
+        } else {
+            ask.iter().copied().zip(crate::memory::cards_for(&ask)).filter_map(|(k, c)| c.map(|c| (k, c))).collect()
+        };
+        keys.iter_mut()
+            .map(|k| match k.and_then(|key| cards.get(&key).map(|&c| (key, c))) {
+                Some((key, c)) => {
+                    *self.refs.entry(key).or_insert(0) += 1;
+                    Some(c)
+                }
+                None => {
+                    if let Some(key) = k.take() {
+                        NO_CARD.fetch_add(1, Relaxed);
+                        if !self.refs.contains_key(&key) {
+                            self.forget(key);
+                        }
+                    }
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// One tile less names each of `keys`: card pages nothing names any more go back, in one call.
+    fn drop_keys(&mut self, keys: &[u64]) {
+        let mut gone = Vec::new();
+        for &key in keys {
+            let Some(n) = self.refs.get_mut(&key) else { continue };
+            *n -= 1;
+            if *n == 0 {
+                self.refs.remove(&key);
+                self.forget(key);
+                gone.push(key);
+            }
+        }
+        if !gone.is_empty() {
+            crate::memory::release_keys(&gone);
         }
     }
 
@@ -454,6 +492,8 @@ pub fn texture(address: u64, console: &D3D12_RESOURCE_DESC, host: &D3D12_RESOURC
     };
     let d = crate::device::get()?;
     let device = &d.host;
+    // tile mappings go on their own queue; without one, the caller makes a committed texture
+    let queue = crate::tilequeue::get()?;
     if address % P != 0 {
         // small textures packed into one page: placed at 4 KiB rather than a 64 KiB tile each
         let mut g = state();
@@ -488,19 +528,21 @@ pub fn texture(address: u64, console: &D3D12_RESOURCE_DESC, host: &D3D12_RESOURC
     let bytes = con.ranges.iter().map(|x| x.1).max().unwrap_or(P);
     let mut g = state();
     let s = g.get_or_insert_with(State::default);
-    let mut tiles = Vec::with_capacity(plan.len());
-    let mut map = Vec::with_capacity(plan.len());
     let inside = address % P;
-    for (mut t, src) in plan {
-        let (key, card) = s.acquire(src, inside);
+    let mut keys: Vec<Option<u64>> = plan.iter().map(|&(_, src)| s.key_of(src, inside)).collect();
+    let cards = s.take(&mut keys);
+    let mut tiles = Vec::with_capacity(plan.len());
+    // a reserved texture starts unmapped: only tiles with a card page are mapped
+    let mut map = Vec::new();
+    for (((mut t, src), key), card) in plan.into_iter().zip(keys).zip(cards) {
         t.card = card;
-        map.push(t);
+        if card.is_some() {
+            map.push(t);
+        }
         tiles.push((t, src, key));
     }
-    if let Err(e) = crate::memory::map_texture_tiles(&r, &map) {
-        if MAP_FAILED.fetch_add(1, Relaxed) < 4 {
-            eprintln!("mapped    tiles of a texture at {address:#x}: {e}");
-        }
+    if !map.is_empty() {
+        queue.submit(vec![Job { resource: r.clone(), tiles: map }]);
     }
     TILES.fetch_add(tiles.len() as u64, Relaxed);
     MADE.fetch_add(1, Relaxed);
@@ -529,11 +571,8 @@ pub fn gone(host: &ID3D12Resource) {
             s.by_address.remove(&t.address);
         }
     }
-    for (_, _, key) in &t.tiles {
-        if let Some(k) = key {
-            s.release(*k);
-        }
-    }
+    let keys: Vec<u64> = t.tiles.iter().filter_map(|x| x.2).collect();
+    s.drop_keys(&keys);
     GONE.fetch_add(1, Relaxed);
 }
 
@@ -554,49 +593,80 @@ pub fn remapped(pages: &[u64]) {
         .flat_map(|(_, v)| v.iter().copied())
         .collect();
     let touched: HashSet<u64> = pages.iter().copied().collect();
+    BATCHES.fetch_add(1, Relaxed);
+    // per texture over the pages: (tile, the key it names now) for the tiles whose key changes
+    let mut work: Vec<(usize, Vec<(usize, Option<u64>)>)> = Vec::new();
     for raw in candidates {
-        let Some(mut t) = s.textures.remove(&raw) else { continue };
+        let Some(t) = s.textures.get(&raw) else { continue };
         if t.address + t.bytes <= lo || t.address >= hi {
-            s.textures.insert(raw, t);
             continue;
         }
-        let mut changed = Vec::new();
-        for i in 0..t.tiles.len() {
-            let (tile, src, old) = t.tiles[i];
-            let Source::Console(va) = src else { continue };
-            if !touched.contains(&va) {
+        let inside = t.address % P;
+        let over: Vec<(usize, Source, Option<u64>)> = t
+            .tiles
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| matches!(x.1, Source::Console(va) if touched.contains(&va)))
+            .map(|(i, x)| (i, x.1, x.2))
+            .collect();
+        let mut list = Vec::new();
+        for (i, src, old) in over {
+            TOUCHED.fetch_add(1, Relaxed);
+            let new = s.key_of(src, inside);
+            if new == old {
+                // onto the pool page it has already, or unmapped and still unmapped: nothing to do
+                if new.is_some() { SAME.fetch_add(1, Relaxed) } else { STILL_UNMAPPED.fetch_add(1, Relaxed) };
                 continue;
             }
-            // take the new key before giving back the old: a tile staying on its pool page keeps its card page
-            let (new, card) = s.acquire(src, t.address % P);
-            if let Some(k) = old {
-                s.release(k);
-            }
-            if new == old && card.is_some() {
+            list.push((i, new));
+        }
+        if !list.is_empty() {
+            work.push((raw, list));
+        }
+    }
+    if work.is_empty() {
+        return;
+    }
+    // the new keys' card pages in one call, taken before the old keys are given back (a key named on both sides
+    // keeps its card page)
+    let mut keys: Vec<Option<u64>> = work.iter().flat_map(|(_, l)| l.iter().map(|x| x.1)).collect();
+    let cards = s.take(&mut keys);
+    let mut olds: Vec<u64> = Vec::new();
+    let mut jobs: Vec<Job> = Vec::with_capacity(work.len());
+    let mut k = 0usize;
+    for (raw, list) in work {
+        let Some(t) = s.textures.get_mut(&raw) else { continue };
+        let mut changed = Vec::with_capacity(list.len());
+        for (i, _) in list {
+            let (mut tile, src, old) = t.tiles[i];
+            let (new, card) = (keys[k], cards[k]);
+            k += 1;
+            olds.extend(old);
+            if new.is_none() && old.is_none() {
                 continue;
             }
-            let mut tile = tile;
             tile.card = card;
             t.tiles[i] = (tile, src, new);
             changed.push(tile);
         }
         if !changed.is_empty() {
             REMAPS.fetch_add(changed.len() as u64, Relaxed);
-            if let Err(e) = crate::memory::map_texture_tiles(&t.resource, &changed) {
-                if MAP_FAILED.fetch_add(1, Relaxed) < 4 {
-                    eprintln!("mapped    remapping tiles of a texture at {:#x}: {e}", t.address);
-                }
-            }
+            jobs.push(Job { resource: t.resource.clone(), tiles: changed });
         }
-        s.textures.insert(raw, t);
+    }
+    s.drop_keys(&olds);
+    // one submit (one fence value) for the whole batch, one job per texture
+    if let Some(q) = crate::tilequeue::get() {
+        q.submit(jobs);
     }
 }
 
 /// For the VRAM line and the run report.
 pub fn report() -> String {
     let (live, keys, pools, heaps) = state().as_ref().map_or((0, 0, 0, 0), |s| (s.textures.len(), s.refs.len(), s.pools.len(), s.small_heaps.len()));
+    let queue = if MADE.load(Relaxed) > 0 { crate::tilequeue::get().map(crate::tilequeue::report) } else { None };
     format!(
-        "{} small textures placed ({} MiB live in {} heaps); {} reserved textures live ({} made, {} gone) over {} pools, {} card pages ({} MiB) under them; tiles {} ({} private), {} without a card page ({} held back at the budget), {} remapped; {} starting inside a page; not taken: {} at the budget, {} not eligible, {} no layout, {} not made, {} mapping failures",
+        "{} small textures placed ({} MiB live in {} heaps); {} reserved textures live ({} made, {} gone) over {} pools, {} card pages ({} MiB) under them; tiles {} ({} private), {} without a card page ({} held back at the budget); {} 0xf8 batches: {} tiles over their pages, {} onto the pool page they had, {} still unmapped, {} remapped; {} starting inside a page; not taken: {} at the budget, {} not eligible, {} no layout, {} not made, {} mapping failures; tile queue: {}",
         SMALL.load(Relaxed),
         SMALL_BYTES.load(Relaxed) >> 20,
         heaps,
@@ -610,6 +680,10 @@ pub fn report() -> String {
         PRIVATE.load(Relaxed),
         NO_CARD.load(Relaxed),
         HELD_BACK.load(Relaxed),
+        BATCHES.load(Relaxed),
+        TOUCHED.load(Relaxed),
+        SAME.load(Relaxed),
+        STILL_UNMAPPED.load(Relaxed),
         REMAPS.load(Relaxed),
         UNALIGNED.load(Relaxed),
         AT_BUDGET.load(Relaxed),
@@ -617,6 +691,7 @@ pub fn report() -> String {
         NO_LAYOUT.load(Relaxed),
         CREATE_FAILED.load(Relaxed),
         MAP_FAILED.load(Relaxed),
+        queue.unwrap_or_else(|| "none".into()),
     )
 }
 

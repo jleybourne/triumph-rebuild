@@ -16,6 +16,8 @@
 //! - `<what>~` / `<what>~N`: press, then wait (N s at most, default 60) until the screen differs from the capture
 //!   taken just before the press, and then holds still for two captures in a row;
 //! - `~` / `~N`: the same wait with no press (a video, a loading screen);
+//! - `<what>*N`: press, wait up to 8 s for the screen to change, and press again if it did not, N s at most
+//!   (default 90): a screen that takes the press only once it is ready;
 //! - `settle` / `settleN`: wait until two captures in a row agree;
 //! - `cap:<label>`: capture; a small copy goes to `DIR/<nn>-<label>.png` and its path is printed;
 //! - `sleep:<s>`, `exit` (ends the run through the pipe).
@@ -194,6 +196,30 @@ impl Driver {
         if let Some(n) = step.strip_prefix("settle") {
             let limit = secs(n, 30)?;
             return self.settle(limit).map(|_| ());
+        }
+        if let Some((what, n)) = step.split_once('*') {
+            // press until the screen changes (a screen that takes the press only once it is ready), N s at most
+            let limit = secs(n, 90)?;
+            let t = Instant::now();
+            while t.elapsed() < limit {
+                let before = self.look(false)?.0;
+                let a = self.c.ask(&format!("press {what}"))?;
+                if !a.starts_with("ok") {
+                    return Err(format!("press {what}: {a}"));
+                }
+                let pressed = Instant::now();
+                std::thread::sleep(hold_of(what) + Duration::from_millis(400));
+                while pressed.elapsed() < Duration::from_secs(8) {
+                    let (now, _) = self.look(false)?;
+                    let d = distance(&before, &now);
+                    if d > CHANGED {
+                        println!("          changed ({d:.3}) {:.1} s after the press, {:.1} s in", pressed.elapsed().as_secs_f64(), t.elapsed().as_secs_f64());
+                        return Ok(());
+                    }
+                }
+            }
+            println!("          no change within {} s of presses; going on", limit.as_secs());
+            return Ok(());
         }
         let (what, wait) = match step.split_once('~') {
             Some((w, n)) => (w, Some(secs(n, 60)?)),
