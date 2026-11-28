@@ -27,13 +27,22 @@ use crate::Stage;
 /// The DXC arguments every translated program is compiled with (after `-T <stage>_6_6`).
 pub const DXC_ARGS: [&str; 5] = ["-E", "main", "-O3", "-enable-16bit-types", "-Fo"];
 
-/// `dxc.exe`: `REBUILD_DXC`, else the newest in the Windows SDK.
+/// `dxc.exe`: `REBUILD_DXC`, else the one beside the running exe (the release zip ships DXC beside
+/// `rebuild.exe`, `scripts/package.ps1`), else the newest in the Windows SDK.
 pub fn dxc_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("REBUILD_DXC") {
+    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf));
+    pick_dxc(std::env::var_os("REBUILD_DXC"), exe_dir.as_deref(), Path::new(r"C:\Program Files (x86)\Windows Kits\10\bin"))
+}
+
+/// [`dxc_path`]'s order, with its inputs given: the variable, the exe's folder, the SDK's `bin` folder.
+fn pick_dxc(var: Option<std::ffi::OsString>, exe_dir: Option<&Path>, sdk_bin: &Path) -> Option<PathBuf> {
+    if let Some(p) = var {
         return Some(p.into());
     }
-    let root = PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\bin");
-    let mut v: Vec<_> = std::fs::read_dir(root).ok()?.filter_map(|e| e.ok().map(|e| e.path().join("x64").join("dxc.exe"))).filter(|p| p.exists()).collect();
+    if let Some(p) = exe_dir.map(|d| d.join("dxc.exe")).filter(|p| p.is_file()) {
+        return Some(p);
+    }
+    let mut v: Vec<_> = std::fs::read_dir(sdk_bin).ok()?.filter_map(|e| e.ok().map(|e| e.path().join("x64").join("dxc.exe"))).filter(|p| p.exists()).collect();
     v.sort();
     v.pop()
 }
@@ -328,6 +337,24 @@ mod tests {
                 None
             }
         }
+    }
+
+    #[test]
+    fn dxc_is_the_variable_then_beside_the_exe_then_the_newest_sdk() {
+        let root = std::env::temp_dir().join(format!("rebuild-dxc-pick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (exe, sdk) = (root.join("app"), root.join("sdk"));
+        for d in [exe.clone(), sdk.join("10.0.1.0").join("x64"), sdk.join("10.0.2.0").join("x64")] {
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("dxc.exe"), b"MZ").unwrap();
+        }
+        let newest = sdk.join("10.0.2.0").join("x64").join("dxc.exe");
+        assert_eq!(pick_dxc(Some("C:\\x\\dxc.exe".into()), Some(&exe), &sdk), Some(PathBuf::from("C:\\x\\dxc.exe")));
+        assert_eq!(pick_dxc(None, Some(&exe), &sdk), Some(exe.join("dxc.exe")), "the release zip's own DXC");
+        assert_eq!(pick_dxc(None, Some(&root), &sdk), Some(newest.clone()), "nothing beside the exe: the SDK");
+        assert_eq!(pick_dxc(None, None, &sdk), Some(newest));
+        assert_eq!(pick_dxc(None, Some(&root), &root.join("none")), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

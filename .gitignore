@@ -4,3 +4,6 @@ agents/MEASURING
 # GPU locks held by the lead and helper lanes (never committed)
 agents/CARD
 agents/MEASURING
+
+# release packaging output (scripts/package.ps1)
+dist/
