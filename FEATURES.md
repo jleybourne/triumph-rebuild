@@ -15,6 +15,9 @@
   <a href="#-for-developers">For developers</a>
 </p>
 
+<p align="center"><b>How to use it:</b> <a href="docs/user-guide.md">player's guide</a> (install, Play, settings,
+saves, mods) · <a href="docs/building.md">building</a> (from source, tests, the release zip)</p>
+
 > [!NOTE]
 > **Where the game is:** the title boots, plays its intro video, runs its first-run menus readably at its own
 > 30 fps cap (about 260 fps with the cap off), saves, and starts loading the world. Gameplay is not reached yet. See [progress](progress.md).
@@ -114,9 +117,10 @@
 | ✅ | **Frame line** | one line a second: fps, frame time, GPU time, draws, upload, translation |
 | ✅ | **Scripted input and captures** | `REBUILD_INPUT_SCRIPT="40s:A,60s:cap"`: timed presses and full-resolution captures, without the overlays unless asked |
 | 🔄 | **Live control** | a pipe to press buttons and take captures while the game runs |
-| ✅ | **Tests** | 809 tests; GPU tests run on WARP, so no card is needed |
+| ✅ | **Tests** | 810 tests; GPU tests run on WARP, so no card is needed |
 | ✅ | **Shader checker** | every translated shader compared bit-for-bit against a reference on WARP |
 | ✅ | **Traces** | lists, textures, descriptors, Bink, files, saves: each behind its own switch |
+| ✅ | **Release zip** | `scripts/package.ps1`: the launcher, the layer, DXC and every licence, in one portable zip; refuses if the repository or the zip would hold game data ([building](docs/building.md#packaging)) |
 
 ---
 
