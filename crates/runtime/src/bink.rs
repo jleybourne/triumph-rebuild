@@ -82,6 +82,8 @@ bink! {
     goto "BinkGoto" Always,
     pause "BinkPause" No,
     will_loop "BinkSetWillLoop" No,
+    sound_system "BinkSetSoundSystem" No,
+    volume "BinkSetVolume" No,
 }
 
 fn after(b: &Bound, frame: Frame, args: [u64; 4], r: u64) {
@@ -140,7 +142,7 @@ mod tests {
     #[test]
     fn a_bound_call_reaches_the_real_function_with_its_arguments_and_counts_frames() {
         assert!(wrap_title_export("kernel32.dll", "BinkDoFrameAsyncWait", 1).is_none());
-        assert!(wrap_title_export("Bink2Scarlett.dll", "BinkSetVolume", 1).is_none(), "not bound through here");
+        assert!(wrap_title_export("Bink2Scarlett.dll", "BinkFreeGlobals", 1).is_none(), "not bound through here");
         let ours = wrap_title_export("Bink2Scarlett.dll", "BinkDoFrameAsyncWait", fake_wait as *const () as u64).unwrap();
         let f: unsafe extern "system" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(ours as usize) };
         let before = crate::cputex::FRAMES.load(Relaxed);

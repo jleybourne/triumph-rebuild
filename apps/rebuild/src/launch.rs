@@ -113,6 +113,12 @@ static REACHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 
 /// The device slots the title called that are not written yet, first called first.
 fn device_report() {
+    // the title's sound, also on a crash (the tap's files finished first)
+    rebuild_audio::hostout::flush();
+    println!("audio     {}", rebuild_audio::stats::report());
+    for l in rebuild_audio::hostout::report() {
+        println!("audio     {l}");
+    }
     if !REACHED.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
@@ -532,6 +538,12 @@ pub fn run(o: Options) -> ! {
         Err(e) => fail(1, &e),
     }
     set_command_line(&format!(r"G:\{}", exe.name));
+    // the title's sound leaves through the host's WASAPI: watched from here on (counts; REBUILD_AUDIO_SINK taps it
+    // into WAV files, REBUILD_AUDIO_VOLUME sets its session volume before it plays)
+    match rebuild_audio::hostout::install() {
+        Ok(()) => println!("audio     host WASAPI watched{}", match std::env::var("REBUILD_AUDIO_VOLUME") { Ok(v) => format!("; session volume {v}"), Err(_) => String::new() }),
+        Err(e) => println!("audio     host WASAPI not watched: {e}"),
+    }
     // the title's own allocator for XMemAlloc, if its exe exports one
     if let Some(e) = exe.image.exports.iter().find(|e| e.name.as_deref() == Some("__XMemAllocationHooks__")) {
         if let Some(rva) = e.rva {

@@ -133,6 +133,7 @@ pub unsafe extern "system" fn XDspActivate(
     if dsp.is_null() || desc.is_null() {
         return E_INVALIDARG;
     }
+    crate::stats::count(&crate::stats::DSP_STREAMS);
     let d = desc.read_unaligned();
     if !valid(&d) {
         return E_INVALIDARG;
@@ -185,6 +186,7 @@ pub unsafe extern "system" fn XDspSubmitCommand(
     if stream.is_null() || command.is_null() {
         return E_INVALIDARG;
     }
+    crate::stats::count(&crate::stats::DSP_BLOCKS);
     let s = &*stream;
     let c = &*command;
     if !c.output.is_null() {

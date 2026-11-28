@@ -136,6 +136,11 @@ pub fn global() -> &'static Hal {
     HAL.get_or_init(|| Hal::new(heap::global().clone()))
 }
 
+/// The state, if the title has used any of it (the run report reads it without making it).
+pub fn made() -> Option<&'static Hal> {
+    HAL.get()
+}
+
 /// `HRESULT AcpHalAllocateShapeContexts(ShapeContexts* contexts)`: six counts in (rate conversion,
 /// EQ/compressor, filter/volume, DMA, XMA, PCM); six host arrays and six device addresses out. Once
 /// per process until released.
@@ -308,6 +313,7 @@ unsafe extern "system" fn submit(
             data.cast::<u32>().add(i).read_unaligned()
         }
     };
+    crate::stats::acp_command(command);
     let mut s = lock(&acp.state);
     match command {
         REGISTER_MESSAGES => s.mask |= word(0),
