@@ -42,6 +42,8 @@ pub struct PageMap {
     pub full: AtomicU64,
     /// tables whose descriptors run into a page the host does not hold right after the first one
     pub split_tables: AtomicU64,
+    /// tables bound at console indices at or past `unmapped` (which an index-for-index host heap cannot hold)
+    pub high_tables: AtomicU64,
     /// pages taken at their own index, and elsewhere
     pub identity: AtomicU32,
     pub moved: AtomicU32,
@@ -63,6 +65,7 @@ impl PageMap {
             gpu_pages: AtomicU32::new(0),
             full: AtomicU64::new(0),
             split_tables: AtomicU64::new(0),
+            high_tables: AtomicU64::new(0),
             identity: AtomicU32::new(0),
             moved: AtomicU32::new(0),
         }
@@ -93,6 +96,9 @@ impl PageMap {
     /// counted ([`PageMap::split_tables`]): its later descriptors read another page's.
     #[inline]
     pub fn table(&self, i: u32, n: u32) -> u32 {
+        if i >= self.unmapped {
+            self.high_tables.fetch_add(1, Ordering::Relaxed);
+        }
         let Some(h) = self.host_or_map(i) else { return self.unmapped };
         let last = i.saturating_add(n.max(1) - 1);
         if last >> self.shift != i >> self.shift && self.host_or_map(last) != Some(h + (last - i)) {

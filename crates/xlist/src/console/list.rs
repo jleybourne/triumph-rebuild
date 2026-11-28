@@ -562,6 +562,7 @@ impl ListState {
                     None => {
                         tr!("user data side {k} table slot {slot}: {:#x} (kind {}) in no bound heap: 0", a.console, a.kind);
                         self.stats.user_unset += 1;
+                        NO_HEAP_TABLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         0
                     }
                 }
@@ -1478,6 +1479,10 @@ pub static STAMP_LABELS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 
 /// Draws and dispatches dropped: a library pipeline with no shadow table bound.
 pub static NO_SHADOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Descriptor-table user data written as 0: the table's handle in no bound heap (before the page map, every table
+/// past console index 750,000).
+pub static NO_HEAP_TABLES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Host lists whose Close the host refused (never executed).
 pub static CLOSE_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

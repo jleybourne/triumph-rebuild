@@ -191,6 +191,7 @@ fn device_report() {
             );
         }
         println!("lists     {} draws and dispatches dropped: a library pipeline with no shadow table bound", rebuild_xlist::console::NO_SHADOW.load(Relaxed));
+        println!("lists     {} descriptor tables in no bound heap (user data 0)", rebuild_xlist::console::NO_HEAP_TABLES.load(Relaxed));
         println!("views     {} UAVs of resources without unordered access written as null views", rebuild_d3d12x::heap::NO_UAV.load(Relaxed));
         if let Some(r) = rebuild_runtime::device::resources() {
             for l in r.view_page_report() {

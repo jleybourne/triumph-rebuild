@@ -6,8 +6,10 @@
 //!                         title's own memory when size == count x increment (the fork's test);
 //!                         else ours. Handles are addresses, CPU and GPU alike.
 //! shader-visible views    one host heap of Limits::views descriptors:
-//!   [0, mirrored)           console index i at host index i. Buffers: a raw SRV of the
-//!                           descriptor's bytes; textures: the title's view
+//!   [0, mirrored)           console index i at the host index its page map gives
+//!                           (`rebuild_xlist::console::pages`: pages of 256, most at their own
+//!                           index; the title's heap is 1,245,184 and mirrored 749,568). Buffers:
+//!                           a raw SRV of the descriptor's bytes; textures: the title's view
 //!   [P, P + NULL_BANK)      null views, one per view type translated shaders declare
 //!                           (`rebuild_sir::lift::NullKind`): a console index at or past P reads
 //!                           the null of its type there (`sir_vi`), and so does an alternate that
@@ -21,8 +23,10 @@
 //!   [W, 1,000,000)          window views (W = `rebuild_sir::lift::WINDOW_HEAP_BASE`): sub-window k
 //!                           (console addresses k << 29, 512 MiB) as a raw SRV at W + k; never an
 //!                           alternate
-//! shadow table            per console index 16 bytes (stride, records, alternate, lead), t0 space101;
-//!                         entry P (what a shader past the range reads) is (0, 0, P, 0)
+//! shadow table            per host index 16 bytes (stride, records, alternate, lead), t0 space101;
+//!                         entry P (what a shader past the range reads) is (0, 0, P, 0); after it the
+//!                         page table (`rebuild_sir::lift::PAGE_TABLE_BYTE`): per console page the
+//!                         host index of its first descriptor, P when it has none
 //! shader-visible samplers host heap of min(count, Limits::samplers), index for index
 //! CPU-only views, RTV, DSV host heap of count, index for index (the natural view)
 //! ```
@@ -1478,7 +1482,7 @@ impl Resources {
             let Some(p) = h.pages else { continue };
             let r = |a: &AtomicU64| a.load(Ordering::Relaxed);
             out.push(format!(
-                "heap of {} views at {:#x}: {} of {} host pages of {} taken ({} at their own index, {} moved), {} wanted with none left, {} tables split across pages, {} records past the host heap, highest index written {}, alternates wanted with none left {}",
+                "heap of {} views at {:#x}: {} of {} host pages of {} taken ({} at their own index, {} moved), {} wanted with none left, {} tables split across pages, {} tables bound past index {}, {} records past the host heap, highest index written {}, alternates wanted with none left {}",
                 h.count,
                 h.start,
                 p.taken(),
@@ -1488,6 +1492,8 @@ impl Resources {
                 p.moved.load(Ordering::Relaxed),
                 r(&p.full),
                 r(&p.split_tables),
+                r(&p.high_tables),
+                p.unmapped,
                 r(&h.stats.beyond),
                 h.stats.highest.load(Ordering::Relaxed),
                 r(&h.stats.pool_empty),

@@ -96,15 +96,15 @@ pub fn window_slot(address: u64) -> (u32, u32) {
     (WINDOW_HEAP_BASE + ((address >> 29) as u32 & (WINDOW_COUNT - 1)), (address & (SUB_WINDOW - 1)) as u32)
 }
 
-/// Console view indices a host shader-visible view heap mirrors at the same index: `[0, CONSOLE_VIEWS)`. The
-/// title's heap has 1,245,184 views and the host's at most 1,000,000 (tiers 1-2 and NVIDIA), so not every index
-/// fits; the heap's other ranges must never be reached by a console index, or a shader reads an alternate or
-/// window view (another type) where the title put its descriptor. Every console index a translated program uses
-/// goes through `sir_vi` (and every alternate through `sir_va`): one at or past `CONSOLE_VIEWS` reads the null
-/// view of the declared type in the null bank instead.
+/// The host indices console view indices reach: `[0, CONSOLE_VIEWS)`, through the page map ([`VIEW_PAGE_SHIFT`]).
+/// The title's heap has 1,245,184 views and the host's at most 1,000,000 (tiers 1-2 and NVIDIA), so they cannot
+/// be index for index; the heap's other ranges must never be reached by a console index, or a shader reads an
+/// alternate or window view (another type) where the title put its descriptor. Every index a translated program
+/// uses goes through `sir_vi` (and every alternate through `sir_va`): one at or past `CONSOLE_VIEWS` (a page with
+/// no host page) reads the null view of the declared type in the null bank instead.
 ///
 /// ```text
-/// [0, CONSOLE_VIEWS)                         console index i at host index i
+/// [0, CONSOLE_VIEWS)                         console pages where the page map put them (749,568: whole pages)
 /// [CONSOLE_VIEWS, + NULL_BANK)               null views, one per view type the translator declares ([`NullKind`])
 /// [CONSOLE_VIEWS + NULL_BANK, WINDOW_UAV_BASE)   alternates (and, on a larger heap, from 1,000,000 up)
 /// [WINDOW_UAV_BASE, WINDOW_HEAP_BASE)       window raw UAVs (stores)
