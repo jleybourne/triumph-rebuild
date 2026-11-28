@@ -188,8 +188,10 @@ and descriptor heaps, and loads ~7.1 GiB of content (`progress.md:122-124`). Eac
   to `REBUILD_FRAME_LOG`:
   `t | fps | ms | gpu | draws | dispatches | dropped | wait | late | held | WxH -> WxH`
   (`framelog.rs:202-229`; sample in `crates/runtime/src/frameline.sample`).
-- At `REBUILD_RUN_SECONDS` it writes `summary.toml` (`avg_fps`, `frame_ms`, `low1_fps`, `gpu_ms`, `frames`,
-  `seconds`, `measured_from`), shuts the presenter down and exits.
+- `gpu` is the title's GPU time a frame: the union of its host lists' timestamp pairs over the direct and
+  compute queues (`gputime.rs`, read a few frames late).
+- At `REBUILD_RUN_SECONDS` it writes `summary.toml` (`avg_fps`, `frame_ms`, `low1_fps`, `gpu_ms`, `gpu_sum_ms`,
+  `gpu_span_ms`, `frames`, `seconds`, `measured_from`), shuts the presenter down and exits.
 - Otherwise runtitle's own wait loop ends with one of these outcomes:
 
 | outcome | when | report |
@@ -812,6 +814,14 @@ never early. The CPU-relay fallback lands 17 µs after the fence.
 In the title run, `xlist`'s label slots (0x238/0x240) write `WriteBufferImmediate` MARKER_OUT through
 `ListHost::label` (`list.rs:1301-1329`).
 
+**GPU timestamp labels** (0x240 flag 1) are written by the list itself (`xlist/src/console/stamps.rs`): an
+`EndQuery` at the label's point into the device's timestamp ring, and at the host list's end one
+`ResolveQueryData` straight into the title's memory at the label's address (8-byte aligned, as the resolve
+needs). The value is the host's 64-bit tick: queue slot 0x90 (`GetTimestampFrequency`, which the title calls to
+convert them) answers the host queue's frequency, so the ticks are in the units the title was told, exactly, with
+no CPU relay and no shader. The system timestamp (flag 2) is still refused. First WARP run: 1,370 labels in 30 s,
+about four a frame.
+
 ### 3.5 XMem, physical pages and placeholders (`crates/runtime`)
 
 This is what the title run actually uses today.
@@ -1123,7 +1133,10 @@ back to a method call. Each call is translated as it arrives, on the recording t
   packets. The list is cut (`split`, `:341-369`): the host list closes, a new one opens, and a
   `Segment{list, waits}` is pushed with state replayed. Reset folds segments back and keeps the spares.
   `MemoryWait::holds_for` uses D3D12 comparison numbering (the fork's reading, unverified).
-- **Labels** 0x238/0x240 write `WriteBufferImmediate` MARKER_OUT. Timestamp labels are refused.
+- **Labels** 0x238/0x240 write `WriteBufferImmediate` MARKER_OUT. GPU timestamp labels are a query resolved
+  into the title's memory at the host list's end (§3.4); the system timestamp is refused.
+- **Timing pairs**: every direct and compute host list takes a query pair from the device's ring, one at its
+  first command and one after its last (`HostList::stamp`); submission resolves them (§4.7).
 - **Pipe syncs** 0x418/0x420 become a global barrier only if work ran since the last one.
 - **0x4a0** returns real upload memory owned by the allocator and freed at allocator reset.
 - **0x1f0 `CopyMemoryToMemoryX`** becomes `CopyBufferRegion` on the resources behind each address.
@@ -1138,7 +1151,11 @@ counters are noted, not carried.
 1. prepends the presenter's frame-begin timestamp list on the first submission of a frame;
 2. for each console list, takes its segments (lists that are not ours count as `FOREIGN`);
 3. turns each segment's waits into queue-side actions;
-4. batches host lists, up to 64 per `ExecuteCommandLists`.
+4. batches host lists, up to 64 per `ExecuteCommandLists`;
+5. notes each executed host list's timing pair on the queue's timer (`gputime.rs`). At the queue's first
+   submission of a later frame, one small list resolves the frame's pairs into the queue's readback ring, ahead
+   of the new lists, in runs of consecutive pairs. At each present `gputime::collect` reads the entries the
+   progress fence has passed (no wait) and hands every finished frame's busy time to `framelog::gpu`.
 
 `place` (`:148-166`) decides how each wait is kept:
 
@@ -1164,7 +1181,7 @@ card test shows a bridged cross-queue wait keeps GPU order without blocking the 
   - a flip-discard swap chain on the presenting queue's host queue, at the host display mode;
   - 3 buffers with a frame-latency waitable, maximum latency 2;
   - FP16 output in scRGB;
-  - a timestamp query heap for `framelog::gpu`.
+  - a timestamp query heap for `framelog::gpu_span` (the present queue's span, summary `gpu_span_ms`).
 - `present()`:
   - **Copy path:** same format family, fits, 2D, not MSAA. It does a `CopyTextureRegion` and
     `SetSourceSize`. If `SetSourceSize` fails, it switches to the blit for good.
@@ -1515,6 +1532,7 @@ All 47 names in `crates/` and `apps/`, from a grep of the source.
 | `REBUILD_RUN_SECONDS` | `framelog.rs:358`, `fake-layer.rs:33` | at N s of process age: summary, shut down, exit 0 |
 | `REBUILD_MEASURE_FROM` | `framelog.rs:161`, `fake-layer.rs:34` | `after_loading`, or the default first present |
 | `REBUILD_CAPTURE_FRAMES` | `present.rs:134` | presented frame numbers to save as PNG |
+| `REBUILD_LIST_TIMESTAMPS` | `xlist/src/console/stamps.rs` | `0`: host lists take no timing pair (no `gpu` in the frame line); labels are written either way |
 | `REBUILD_CONSOLE` | `registry.rs:27` | `series-s` / `s` → ConsoleMode 0x60; otherwise 0x64 |
 | `REBUILD_MEMORY_BUDGET_MB` | `budget.rs:47` | physical-page budget (default min(12 GiB, RAM / 3)); `exitprobe` sets 3072 |
 | `REBUILD_LIMIT_RAM_MB` | `limits.rs:33` | budget ≤ RAM / 2 and the job's commit cap |

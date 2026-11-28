@@ -14,3 +14,7 @@ windows = { version = "0.58", features = [
     "Win32_Graphics_Direct3D_Fxc",
     "Win32_Graphics_Dxgi_Common",
 ] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# WARP devices for the tests (EnumWarpAdapter)
+windows = { version = "0.58", features = ["Win32_Graphics_Dxgi", "Win32_System_Threading"] }

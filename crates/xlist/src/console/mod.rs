@@ -40,6 +40,7 @@ pub mod indirect;
 mod list;
 pub mod rect;
 mod slots;
+pub mod stamps;
 
 #[cfg(test)]
 mod fake;
@@ -53,7 +54,7 @@ use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D12::*;
 
 pub use alloc::{create_allocator, host_allocator, upload_range};
-pub use list::{create_list, CLOSE_FAILED, INDIRECT, INDIRECT_REFUSED, NO_SHADOW, RECTS_EXPANDED, RECTS_DROPPED, forget_bound_state, host_list, segments, skip, stats, sync_descriptors, trace, HostList, ListStats, Segment};
+pub use list::{create_list, CLOSE_FAILED, INDIRECT, INDIRECT_REFUSED, NO_SHADOW, RECTS_EXPANDED, RECTS_DROPPED, STAMP_LABELS, forget_bound_state, host_list, segments, skip, stats, sync_descriptors, trace, HostList, ListStats, Segment};
 pub use slots::{allocator_slots, list_slots, traps, Returns, SlotInfo, SlotKind, Trap, ALLOCATOR_SLOTS, LIST_SLOTS};
 
 /// A COM or console object pointer, borrowed: never released through this.
@@ -425,7 +426,10 @@ pub trait ListHost: PipelineSource + Send + Sync {
     /// if a [`MemoryRange`] covers it. The default writes values with `WriteBufferImmediate` in
     /// `MARKER_OUT` mode (Build 2's labels: the value lands once the work before it is done); a
     /// 64-bit value is written low word first, so a reader polling for `>=` never sees a value
-    /// larger than the one written. Timestamps are refused by default (return `false`).
+    /// larger than the one written. GPU timestamps (flag 1) never come here: the list writes them
+    /// itself ([`stamps`]: a query at the label's point, resolved into the title's memory at the host
+    /// list's end); it asks the host only when it cannot (no query heap, an address it cannot place).
+    /// The system timestamp (flag 2) is refused by default (return `false`).
     fn label(&self, list: &ID3D12GraphicsCommandList2, write: &LabelWrite, host_va: Option<u64>) -> bool {
         let (LabelValue::Value(v), Some(va)) = (write.value, host_va) else {
             return false;
@@ -472,11 +476,16 @@ pub(crate) trait Backend: Send + Sync {
     fn upload(&self, bytes: u64) -> windows::core::Result<alloc::UploadChunk>;
     /// The host takes `ID3D12GraphicsCommandList7::Barrier` (D3D12_OPTIONS12).
     fn enhanced_barriers(&self) -> bool;
+    /// The device's timestamp rings ([`stamps`]): timestamp labels and per-list timing. `None`: neither.
+    fn stamps(&self) -> Option<&Arc<stamps::Stamps>> {
+        None
+    }
 }
 
 pub(crate) struct DeviceBackend {
     device: ID3D12Device,
     enhanced: bool,
+    stamps: Option<Arc<stamps::Stamps>>,
 }
 // SAFETY: D3D12 devices are free-threaded.
 unsafe impl Send for DeviceBackend {}
@@ -495,6 +504,9 @@ impl Backend for DeviceBackend {
     fn enhanced_barriers(&self) -> bool {
         self.enhanced
     }
+    fn stamps(&self) -> Option<&Arc<stamps::Stamps>> {
+        self.stamps.as_ref()
+    }
 }
 
 pub(crate) fn backend_of(device: &ID3D12Device) -> Arc<dyn Backend> {
@@ -504,5 +516,5 @@ pub(crate) fn backend_of(device: &ID3D12Device) -> Arc<dyn Backend> {
     }
     .is_ok()
         && o.EnhancedBarriersSupported.as_bool();
-    Arc::new(DeviceBackend { device: device.clone(), enhanced })
+    Arc::new(DeviceBackend { device: device.clone(), enhanced, stamps: stamps::for_device(device) })
 }

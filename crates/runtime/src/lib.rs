@@ -21,6 +21,7 @@ pub mod cpu;
 pub mod drives;
 pub mod dxgi;
 pub mod frame;
+pub mod gputime;
 pub mod framelog;
 pub mod fence;
 pub mod queue;

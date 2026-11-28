@@ -12,8 +12,9 @@
 //!   process, as the contract asks.
 //!
 //! **The fields.** Per frame (title presents in the second): `ms` (mean interval between presents), `gpu` (the
-//! present queue's GPU span of a frame: from its first submission's start to the end of the present's own copy,
-//! timestamps on the GPU), `draws` and `dispatches` (what the submitted lists recorded, `ListStats`), `dropped`
+//! title's GPU time: the union of its host lists' timestamp pairs over every direct and compute queue, measured
+//! per frame and read a few frames late, [`crate::gputime`]; the mean of the frames finished in the second),
+//! `draws` and `dispatches` (what the submitted lists recorded, `ListStats`), `dropped`
 //! (draws and dispatches the lists dropped because their pipeline has no host object, `ListStats::skipped`),
 //! `wait` (the title's time in frame-event waits and blocking fence waits). Per second: `fps`, `late` (presents
 //! not shown because the display queue was full or our copy of an earlier frame had not finished: the title is
@@ -22,7 +23,9 @@
 //! stay absent. Segments the launcher does not know are ignored by it.
 //!
 //! **The summary** (`[summary]`): `avg_fps`, `low1_fps` (the 99th percentile frame time as fps, from a 0.25 ms
-//! histogram), `frame_ms`, `gpu_ms`, `frames`, `seconds` and `measured_from` over the measuring window:
+//! histogram), `frame_ms`, `gpu_ms` (as the line's `gpu`), `gpu_sum_ms` (the lists' times summed: overlapping
+//! queues counted twice), `gpu_span_ms` (the present queue's span from a frame's first submission to the end of
+//! the present's copy: idle gaps included), `frames`, `seconds` and `measured_from` over the measuring window:
 //! `REBUILD_MEASURE_FROM=title_start` (the default) starts it at the first present, `after_loading` at the first
 //! frame with a draw. Then `frame_rate` (`title`, `cap N`, `unlimited`) and `vsync`, as they were at the end.
 //!
@@ -65,6 +68,9 @@ static WINDOW_FRAMES: AtomicU64 = AtomicU64::new(0);
 static WINDOW_US: AtomicU64 = AtomicU64::new(0);
 static WINDOW_GPU_US: AtomicU64 = AtomicU64::new(0);
 static WINDOW_GPU_N: AtomicU64 = AtomicU64::new(0);
+static WINDOW_GPU_SUM_US: AtomicU64 = AtomicU64::new(0);
+static WINDOW_SPAN_US: AtomicU64 = AtomicU64::new(0);
+static WINDOW_SPAN_N: AtomicU64 = AtomicU64::new(0);
 const BUCKET_US: u64 = 250;
 const BUCKETS: usize = 4000;
 static HISTOGRAM: [AtomicU32; BUCKETS] = [const { AtomicU32::new(0) }; BUCKETS];
@@ -122,19 +128,30 @@ pub fn late() {
     LATE.fetch_add(1, Ordering::Relaxed);
 }
 
-/// The GPU span of a frame that finished.
+/// The title's GPU time of a frame that finished: `us` its lists' union, `sum_us` their plain sum.
 #[inline]
-pub fn gpu(us: u64) {
+pub fn gpu(us: u64, sum_us: u64) {
     GPU_US.fetch_add(us, Ordering::Relaxed);
     GPU_N.fetch_add(1, Ordering::Relaxed);
     if MEASURING.load(Ordering::Relaxed) {
         WINDOW_GPU_US.fetch_add(us, Ordering::Relaxed);
+        WINDOW_GPU_SUM_US.fetch_add(sum_us, Ordering::Relaxed);
         WINDOW_GPU_N.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The present queue's span of a frame that finished (first submission to the end of the present's copy).
+#[inline]
+pub fn gpu_span(us: u64) {
+    if MEASURING.load(Ordering::Relaxed) {
+        WINDOW_SPAN_US.fetch_add(us, Ordering::Relaxed);
+        WINDOW_SPAN_N.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 /// The title presented a frame (shown or late); `cost` is our time in the call.
 pub fn presented(cost: Duration, internal: (u32, u32), output: (u32, u32)) {
+    crate::gputime::collect();
     let now = now_ns();
     FRAMES.fetch_add(1, Ordering::Relaxed);
     PRESENT_NS.fetch_add(cost.as_nanos() as u64, Ordering::Relaxed);
@@ -326,6 +343,11 @@ pub fn summary_keys(with_seconds: bool) -> String {
     let gn = WINDOW_GPU_N.load(Ordering::Relaxed);
     if gn > 0 {
         s += &format!("gpu_ms = {:.3}\n", WINDOW_GPU_US.load(Ordering::Relaxed) as f64 / gn as f64 / 1000.0);
+        s += &format!("gpu_sum_ms = {:.3}\n", WINDOW_GPU_SUM_US.load(Ordering::Relaxed) as f64 / gn as f64 / 1000.0);
+    }
+    let sn = WINDOW_SPAN_N.load(Ordering::Relaxed);
+    if sn > 0 {
+        s += &format!("gpu_span_ms = {:.3}\n", WINDOW_SPAN_US.load(Ordering::Relaxed) as f64 / sn as f64 / 1000.0);
     }
     s += &format!("frames = {}\n", FRAMES.load(Ordering::Relaxed));
     if with_seconds && MEASURING.load(Ordering::Relaxed) {

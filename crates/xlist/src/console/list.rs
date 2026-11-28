@@ -37,6 +37,9 @@ pub struct HostList {
     pub executed_at: std::sync::atomic::AtomicU64,
     /// Its host Close failed (a call the host refused while recording): executing it would remove the device.
     pub bad: std::sync::atomic::AtomicBool,
+    /// Its timing pair in the device's timestamp ring ([`super::stamps`]): the query at its first command, the one
+    /// after its last at +1. [`super::stamps::NONE`] for a list that is not timed.
+    pub stamp: std::sync::atomic::AtomicU32,
 }
 
 impl HostList {
@@ -50,6 +53,7 @@ impl HostList {
             executed_on: std::sync::atomic::AtomicUsize::new(0),
             executed_at: std::sync::atomic::AtomicU64::new(0),
             bad: std::sync::atomic::AtomicBool::new(false),
+            stamp: std::sync::atomic::AtomicU32::new(super::stamps::NONE),
         }
     }
 }
@@ -289,6 +293,10 @@ pub(crate) struct ListState {
     private: Vec<(GUID, Vec<u8>)>,
     /// tables the translated programs read since the reset ([`sync_descriptors`])
     spans: [Span; SPANS],
+    /// the device's timestamp rings (none on a stand-in backend)
+    stamps: Option<Arc<super::stamps::Stamps>>,
+    /// timestamp labels of the current host list, resolved at its end: (query, title buffer, its offset)
+    stamp_labels: Vec<(u32, Raw, u64)>,
 }
 
 // SAFETY: a list is recorded by one thread at a time (D3D12's rule, and the title's).
@@ -578,11 +586,65 @@ impl ListState {
         self.seg_work = true;
     }
 
+    /// A host list was opened: its first query of the timing pair (direct and compute lists).
+    fn open_stamp(&mut self) {
+        let mut at = super::stamps::NONE;
+        if super::stamps::list_timing() && self.kind != 3 {
+            if let Some((heap, i)) = self.stamps.as_ref().and_then(|s| s.take(self.kind, 2)) {
+                call!(self.EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, i));
+                at = i;
+            }
+        }
+        self.current().stamp.store(at, Ordering::Relaxed);
+    }
+
+    /// Before the host list closes: the timing pair's second query, then the timestamp labels into the title's
+    /// memory (after the pair, so the list's time is the title's work alone).
+    fn close_stamps(&mut self) {
+        let at = self.current().stamp.load(Ordering::Relaxed);
+        let Some(st) = self.stamps.clone() else { return };
+        if at != super::stamps::NONE {
+            call!(self.EndQuery(st.heap.as_raw(), D3D12_QUERY_TYPE_TIMESTAMP, at + 1));
+        }
+        if self.stamp_labels.is_empty() {
+            return;
+        }
+        let heap = if self.kind == 3 { st.copy.as_ref().map(|h| h.as_raw()) } else { Some(st.heap.as_raw()) };
+        let labels = std::mem::take(&mut self.stamp_labels);
+        if let Some(heap) = heap {
+            for &(i, resource, offset) in &labels {
+                call!(self.ResolveQueryData(heap, D3D12_QUERY_TYPE_TIMESTAMP, i, 1, resource, offset));
+            }
+            STAMP_LABELS.fetch_add(labels.len() as u64, Ordering::Relaxed);
+        }
+        self.stamp_labels = labels;
+        self.stamp_labels.clear();
+    }
+
+    /// A GPU timestamp label at console `address`: a query now, resolved into the title's memory at the host list's
+    /// end ([`close_stamps`](Self::close_stamps)). False when it cannot be (no ring for the list's type, an address
+    /// no buffer holds, or one not 8-byte aligned, which the resolve requires). The range is the host's own (the
+    /// title's memory), never the allocator's upload memory, which a resolve may not write.
+    fn stamp_label(&mut self, address: u64) -> bool {
+        if address == 0 || address % 8 != 0 || self.stamps.is_none() {
+            return false;
+        }
+        let Some((resource, offset)) = self.host.memory(address).and_then(|r| r.place(address, 8)) else { return false };
+        if offset % 8 != 0 {
+            return false;
+        }
+        let Some((heap, i)) = self.stamps.as_ref().and_then(|s| s.take(self.kind, 1)) else { return false };
+        call!(self.EndQuery(heap, D3D12_QUERY_TYPE_TIMESTAMP, i));
+        self.stamp_labels.push((i, resource, offset));
+        true
+    }
+
     fn close_current(&mut self) -> HRESULT {
         if !self.open {
             return E_FAIL;
         }
         self.open = false;
+        self.close_stamps();
         let hr = call!(self.Close());
         // a list the host refused is never executed (the submit skips it); the title sees the console's S_OK
         let failed = hr.is_err();
@@ -702,6 +764,7 @@ impl ListState {
                 self.segments.push(Segment { list: h, waits: vec![wait] });
                 self.open = true;
                 self.point_at_current();
+                self.open_stamp();
                 self.stats.splits += 1;
                 self.replay();
                 self.sh.library_layout_lost(0);
@@ -864,10 +927,13 @@ pub fn create_list(kind: u32, allocator: Raw, pipeline: Raw) -> windows::core::R
             stats: ListStats::default(),
             private: Vec::new(),
             spans: [Span::default(); SPANS],
+            stamps: a.backend.stamps().cloned(),
+            stamp_labels: Vec::new(),
         },
     });
     let p: Raw = Box::into_raw(obj).cast();
     a.rehold(temp, &*enter(p) as *const _ as usize);
+    enter(p).open_stamp();
     if !pipeline.is_null() {
         enter(p).set_pipeline(pipeline);
     }
@@ -1075,6 +1141,7 @@ unsafe extern "system" fn reset(this: Raw, allocator: Raw, pipeline: Raw) -> HRE
     s.allocator = allocator;
     s.point_at_current();
     s.open = true;
+    s.open_stamp();
     s.seg_work = false;
     s.work_since_barrier = false;
     s.sh.clear();
@@ -1381,6 +1448,9 @@ pub static INDIRECT_REFUSED: [std::sync::atomic::AtomicU64; 2] = [std::sync::ato
 /// Rectangle-list draws expanded to triangles on the CPU, and those that could not be (dropped).
 pub static RECTS_EXPANDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub static RECTS_DROPPED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// GPU timestamp labels written into the title's memory (resolved at their host list's end).
+pub static STAMP_LABELS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Draws and dispatches dropped: a library pipeline with no shadow table bound.
 pub static NO_SHADOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1989,6 +2059,9 @@ unsafe extern "system" fn clear_uav_float(this: Raw, gpu: u64, cpu: usize, resou
 fn label(this: Raw, address: u64, value: LabelValue, bytes: u32, flush: u32, flags: u32) {
     let s = enter(this);
     s.work();
+    if value == LabelValue::GpuTimestamp && s.stamp_label(address) {
+        return;
+    }
     let host_va = s.va(address).filter(|_| address != 0);
     let w = LabelWrite { address, value, bytes, flush, flags };
     let done = match &s.current().l2 {

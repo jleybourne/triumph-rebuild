@@ -42,6 +42,8 @@ pub struct Queue {
     pub(crate) progress_next: AtomicU64,
     /// The present queue's frame has had its first submission (its GPU start time is written).
     pub(crate) frame_started: AtomicBool,
+    /// The title's GPU time on this queue: its lists' timing pairs and their resolves ([`crate::gputime`]).
+    pub(crate) timer: crate::gputime::QueueTimer,
 }
 
 // SAFETY: command queues and fences are free-threaded.
@@ -175,6 +177,9 @@ unsafe extern "system" fn GetDevice(_t: *mut c_void, _iid: *const [u8; 16], out:
 
 unsafe extern "system" fn Marker(_t: *mut c_void, _a: usize, _b: usize, _c: usize) {}
 
+/// The host queue's own frequency: the title's GPU timestamp labels are the host's ticks as resolved
+/// (`rebuild_xlist::console::stamps`), so the frequency the title converts them with must be the host's. (The fork
+/// answered the console's 100 MHz; with host ticks in the labels that would misread them by the ratio.)
 unsafe extern "system" fn GetTimestampFrequency(this: *mut c_void, out: *mut u64) -> i32 {
     note(0x90 / 8);
     let Some(q) = find(this as usize) else { return 0x8000_4005u32 as i32 };
@@ -281,6 +286,7 @@ pub fn create(desc: &D3D12_COMMAND_QUEUE_DESC) -> Result<usize, i32> {
         progress,
         progress_next: AtomicU64::new(0),
         frame_started: AtomicBool::new(false),
+        timer: crate::gputime::QueueTimer::new(),
     }));
     unsafe {
         (key as *mut usize).write(vtable().as_ptr() as usize);
