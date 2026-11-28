@@ -11,6 +11,8 @@
 //! - the overlay's title frame once the overlay runs (neutral while its menu is open), else the host directly;
 //! - `REBUILD_INPUT_SCRIPT` presses added on top ([`rebuild_input::script`]), with `cap` steps asking the present
 //!   for a capture; every step that starts is printed (`input     script ...`);
+//! - `REBUILD_INPUT_PIPE` presses ([`crate::control`], the live control channel), added the same way
+//!   (`input     pipe ...`);
 //! - a new reading per device whose state changed, kept in a history of 256 for next / previous / temporal
 //!   lookups; device callbacks when a device comes or goes.
 //!
@@ -339,6 +341,20 @@ struct Poller {
 impl Poller {
     fn frame(&mut self) -> Frame {
         let mut f = overlay_frame().unwrap_or_else(|| Frame::read(&mut self.host));
+        if crate::control::active() {
+            let seconds = crate::framelog::elapsed().as_secs_f64();
+            if let Some(p) = crate::control::poll(seconds, crate::framelog::frames()) {
+                for x in &p.fired {
+                    eprintln!("input     pipe {:.2} s, frame {}: {}", x.seconds, x.frame, x.text);
+                }
+                if p.capture {
+                    crate::present::request_capture(None);
+                }
+                if let Some(pad) = p.pad {
+                    script::apply(&mut f, pad);
+                }
+            }
+        }
         if let Some(s) = self.script.as_mut() {
             let seconds = crate::framelog::elapsed().as_secs_f64();
             let frame = crate::framelog::frames();
@@ -377,6 +393,8 @@ fn start() {
         // tests drive the state themselves
         return;
     }
+    // REBUILD_INPUT_PIPE: the live control channel (presses, captures); its presses ride this poller
+    crate::control::start();
     let spawned = std::thread::Builder::new().name("gameinput-poll".into()).stack_size(256 << 10).spawn(move || loop {
         std::thread::sleep(POLL);
         p.poll();

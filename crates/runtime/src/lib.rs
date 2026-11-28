@@ -19,6 +19,8 @@ pub mod limits;
 pub mod device;
 pub mod cpu;
 #[cfg(windows)]
+pub mod control;
+#[cfg(windows)]
 pub mod cputex;
 #[cfg(windows)]
 pub mod bink;
