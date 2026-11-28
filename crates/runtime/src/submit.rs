@@ -45,6 +45,8 @@ pub static WAITS_MET: AtomicU64 = AtomicU64::new(0);
 pub static WAITS_FENCE: AtomicU64 = AtomicU64::new(0);
 pub static WAITS_BRIDGED: AtomicU64 = AtomicU64::new(0);
 pub static WAITS_REFUSED: AtomicU64 = AtomicU64::new(0);
+/// TSC ticks in [`sync_descriptors`] on the submitting threads (the frame line's `xsync`).
+pub static SYNC_TICKS: AtomicU64 = AtomicU64::new(0);
 /// Console lists submitted, and those that were not ours (skipped).
 pub static LISTS: AtomicU64 = AtomicU64::new(0);
 pub static FOREIGN: AtomicU64 = AtomicU64::new(0);
@@ -94,7 +96,9 @@ unsafe fn execute(this: *mut c_void, count: u32, lists: *const *mut c_void) {
             continue;
         };
         // the descriptor tables its translated programs read, mirrored from the title's bytes (the root seam)
+        let t0 = rebuild_xlist::console::cost::now();
         sync_descriptors(list);
+        SYNC_TICKS.fetch_add(rebuild_xlist::console::cost::now().wrapping_sub(t0), Ordering::Relaxed);
         if let Some(s) = stats(list) {
             draws += u64::from(s.draws);
             dispatches += u64::from(s.dispatches);

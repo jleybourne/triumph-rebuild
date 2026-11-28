@@ -19,8 +19,11 @@
 //! `wait` (the title's time in frame-event waits and blocking fence waits). Per second: `fps`, `late` (presents
 //! not shown because the display queue was full or our copy of an earlier frame had not finished: the title is
 //! never blocked for the display), `held` (memory waits the bridge kept, see [`crate::submit`]). Then `internal ->
-//! output`: the title's back buffer and the swap chain. `upload`, `xlate` and `upscale` are not measured yet and
-//! stay absent. Segments the launcher does not know are ignored by it.
+//! output`: the title's back buffer and the swap chain. `upload`: the upload ring.
+//! `xlate` and `xdraw`: list translation on the recording
+//! threads, ms a frame and µs a draw or dispatch (`rebuild_xlist::console::cost`: TSC ticks inside the list slot
+//! functions, ours plus the host driver's); `xsync`: the submit thread's descriptor sync for those lists, ms a
+//! frame. `upscale` is not measured yet and stays absent. Segments the launcher does not know are ignored by it.
 //!
 //! **The summary** (`[summary]`): `avg_fps`, `low1_fps` (the 99th percentile frame time as fps, from a 0.25 ms
 //! histogram), `frame_ms`, `gpu_ms` (as the line's `gpu`), `gpu_sum_ms` (the lists' times summed: overlapping
@@ -171,6 +174,8 @@ pub fn presented(cost: Duration, internal: (u32, u32), output: (u32, u32)) {
     let last = LAST_PRESENT.swap(now.max(1), Ordering::Relaxed);
     if !MEASURING.load(Ordering::Relaxed) && (drew || !after_loading()) {
         WINDOW_START.store(now, Ordering::Relaxed);
+        let (t, w, _) = rebuild_xlist::console::cost::totals();
+        *WINDOW_XT.lock().unwrap_or_else(|e| e.into_inner()) = Some((t, w));
         MEASURING.store(true, Ordering::Relaxed);
         return;
     }
@@ -185,6 +190,20 @@ pub fn presented(cost: Duration, internal: (u32, u32), output: (u32, u32)) {
         WINDOW_US.fetch_add(us, Ordering::Relaxed);
         HISTOGRAM[((us / BUCKET_US) as usize).min(BUCKETS - 1)].fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// List translation at the start of the measuring window: ticks, draws and dispatches (set at its first frame).
+static WINDOW_XT: Mutex<Option<(u64, u64)>> = Mutex::new(None);
+
+/// The measuring window's list translation: ms a frame, µs a draw or dispatch.
+fn window_xlate() -> Option<(f64, f64)> {
+    let (t0, w0) = (*WINDOW_XT.lock().unwrap_or_else(|e| e.into_inner()))?;
+    let (t, w, _) = rebuild_xlist::console::cost::totals();
+    let frames = WINDOW_FRAMES.load(Ordering::Relaxed);
+    (frames > 0 && w > w0).then(|| {
+        let ms = rebuild_xlist::console::cost::ms(t - t0);
+        (ms / frames as f64, ms * 1000.0 / (w - w0) as f64)
+    })
 }
 
 fn after_loading() -> bool {
@@ -217,6 +236,11 @@ pub struct Line {
     pub output: Option<(u32, u32)>,
     /// the upload ring (`crate::memory`): coordinator ms a pass, and MB sent a frame
     pub upload: Option<(f64, f64)>,
+    /// list translation on the recording threads (`rebuild_xlist::console::cost`): ms a frame, and µs a draw or
+    /// dispatch recorded
+    pub xlate: Option<(f64, f64)>,
+    /// the submit thread's descriptor sync for the lists it submits (`crate::submit`): ms a frame
+    pub xsync: Option<f64>,
 }
 
 fn thousands(n: u64) -> String {
@@ -256,6 +280,12 @@ pub fn format(l: &Line) -> String {
     if let Some((ms, mb)) = l.upload {
         s += &format!(" | upload {ms:.1} ms | upmb {mb:.2} MB");
     }
+    if let Some((ms, us)) = l.xlate {
+        s += &format!(" | xlate {ms:.2} ms | xdraw {us:.2} us");
+    }
+    if let Some(ms) = l.xsync {
+        s += &format!(" | xsync {ms:.2} ms");
+    }
     match (l.internal, l.output) {
         (Some(i), Some(o)) => s += &format!(" | {}x{} -> {}x{}", i.0, i.1, o.0, o.1),
         (None, Some(o)) => s += &format!(" | {}x{}", o.0, o.1),
@@ -280,6 +310,10 @@ struct Counts {
     held: u64,
     /// the upload ring's totals: bytes, busy µs, passes
     up: (u64, u64, u64),
+    /// list translation: ticks, draws and dispatches, lists (`rebuild_xlist::console::cost`)
+    xt: (u64, u64, u64),
+    /// the submit thread's descriptor sync, ticks
+    xsync: u64,
 }
 
 fn counts() -> Counts {
@@ -297,6 +331,8 @@ fn counts() -> Counts {
         frame_n: r(&FRAME_N),
         held: crate::submit::WAITS_BRIDGED.load(Ordering::Relaxed),
         up: crate::memory::upload_totals().map_or((0, 0, 0), |t| (t.0, t.1, t.2)),
+        xt: rebuild_xlist::console::cost::totals(),
+        xsync: crate::submit::SYNC_TICKS.load(Ordering::Relaxed),
     }
 }
 
@@ -327,6 +363,11 @@ fn line(t: u64, seconds: f64, a: &Counts, b: &Counts) -> Line {
             let passes = (b.up.2 - a.up.2).max(1);
             ((b.up.1 - a.up.1) as f64 / passes as f64 / 1000.0, (b.up.0 - a.up.0) as f64 / 1e6 / frames.max(1) as f64)
         }),
+        xlate: (frames > 0 && b.xt.2 > a.xt.2).then(|| {
+            let ms = rebuild_xlist::console::cost::ms(b.xt.0 - a.xt.0);
+            (ms / frames as f64, ms * 1000.0 / (b.xt.1 - a.xt.1).max(1) as f64)
+        }),
+        xsync: (frames > 0 && b.xsync > a.xsync).then(|| rebuild_xlist::console::cost::ms(b.xsync - a.xsync) / frames as f64),
     }
 }
 
@@ -370,6 +411,9 @@ pub fn summary_keys(with_seconds: bool) -> String {
     let sn = WINDOW_SPAN_N.load(Ordering::Relaxed);
     if sn > 0 {
         s += &format!("gpu_span_ms = {:.3}\n", WINDOW_SPAN_US.load(Ordering::Relaxed) as f64 / sn as f64 / 1000.0);
+    }
+    if let Some((ms, us)) = window_xlate() {
+        s += &format!("xlate_ms = {ms:.3}\nxdraw_us = {us:.3}\n");
     }
     s += &format!("frames = {}\n", FRAMES.load(Ordering::Relaxed));
     if with_seconds && MEASURING.load(Ordering::Relaxed) {
@@ -472,6 +516,8 @@ mod tests {
             internal: Some((2560, 1440)),
             output: Some((3840, 2160)),
             upload: None,
+            xlate: None,
+            xsync: None,
         };
         let s = format(&l);
         assert_eq!(s, SAMPLE.trim_end());
