@@ -1,8 +1,8 @@
 # Progress
 
 ```
-overall   █████████████░░░░░░░  64 %   work toward 30 fps, weighted by build step
-fps       card: ~17 fps on the black loading screen (layer overhead, pipelines built mid-run) · target 30 · baseline 7.6
+overall   █████████████░░░░░░░  66 %   work toward 30 fps, weighted by build step
+fps       card: 60 s, 18.9 fps avg, 21 fps after the loading screen (GPU 1.5 ms a frame) · target 30 · baseline 7.6
 updated   2026-11-28
 ```
 
@@ -13,7 +13,7 @@ and becomes the number that counts.
 
 | track | progress | | note |
 |---|---|--:|---|
-| **Build 5 · first frame** | `███████████████░░░░░` | 75 % | every loading-screen draw has its shaders (0 dropped, was 935); still black; runs abort on memory (54k pipelines built up front) |
+| **Build 5 · first frame** | `████████████████░░░░` | 80 % | memory model in the run (tiles + upload ring, #60): 12-13 → 18-21 fps, past the loading screen; first pixels drawn (a seam bug); content still the title's black fade |
 | shaders compiled (every class) | `██████████░░░░░░░░░░` | 12,981 / 25,694 | pixel 9,965 · vertex 1,672 · compute 1,344 · of them wave-wide 4,182 ([wave64](runs/build4-wave64.md)) · agnostic 8,799 / 9,128 ([v1](runs/build4-v1.md)) |
 | shaders counted | `████░░░░░░░░░░░░░░░░` | 5,195 / 25,694 | bit-exact vs the oracle on WARP ([exec](runs/build4-exec.md)) |
 | runtime functions ours | `███████████████████░` | 69 / 73 | 624 more bind to the host directly |
@@ -115,6 +115,20 @@ Older entries are never edited.
 
 > The three entries below (58, 59, 61 %) were missing; they are filled in afterwards from the commits that moved
 > the header (`6292f20`, `bafec7c`, `71c075d`). The points behind each step were not recorded.
+
+### 2026-11-28 — The memory model runs the title: 18-21 fps, past the loading screen
+
+```
+[█████████████░░░░░░░]  66 %   (Build 5 75 % → 80 %)
+title       60 s on the card: 1,054 frames, 18.9 fps avg, 21 fps at the end, 18,922 draws, no reset
+```
+
+- **Merged:** #58 (the card-only assert was a B4G4R4A4 render target the card refuses: stand-in), #59 public-docs
+  review (XAsync cancel/cleanup, connectivity callback, buffer barriers), #60 the memory model in the run (tiles at
+  console addresses + upload ring: 12-13 → 17-18 fps on the same binary), and a single-run mutex.
+- **Still black:** the title draws its loading fade (colours ≈ 0); the first non-black pixels are a seam of the
+  rectangle pass (being fixed).
+- Tests: 652 green.
 
 ### 2026-11-28 — Every loading-screen draw has shaders; developer menu built
 
