@@ -917,7 +917,11 @@ static TRACE_LINES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 
 /// Called by the create path: remember handles to trace.
 fn trace_handle(path: &str, h: HANDLE) {
-    if let Some(name) = read_trace_name() {
+    // the title reads the last error next: reading the environment (the first call) must not change it
+    let code = unsafe { host::GetLastError() };
+    let name = read_trace_name();
+    set_last_error(code);
+    if let Some(name) = name {
         if h != INVALID_HANDLE_VALUE && path.to_ascii_lowercase().contains(name) {
             TRACED.lock().unwrap_or_else(|e| e.into_inner()).push(h as usize);
             eprintln!("reads     tracing {path} as handle {:#x} (flags {:#x})", h as usize, LAST_FLAGS.load(std::sync::atomic::Ordering::Relaxed));
